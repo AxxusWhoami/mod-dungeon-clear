@@ -517,10 +517,38 @@ bool DungeonClearPullAction::Execute(Event /*event*/)
                     // Pack too high-level to ever notice us on its own: force the tag
                     // with a melee swing so combat starts and the maneuver drag-back
                     // (combat engine) takes over.
+                    //
+                    // The last two lines are what actually make that sentence true,
+                    // and this site was missing both — unlike its two siblings below
+                    // (the CC-abort engage and the pack-gathered plant), which carry
+                    // the full pattern. Engine transitions in mod-playerbots are
+                    // ACTION-DRIVEN, not derived from bot->IsInCombat(): UpdateAI only
+                    // auto-switches to/from BOT_STATE_DEAD, and stock reaches the
+                    // combat engine solely through AttackAction / PullActions calling
+                    // ChangeEngine. Player::Attack alone just hands the bot a victim
+                    // and lets the CORE swing it — no AI involvement — so without the
+                    // flip the tank stays on the NON-combat engine, where no class
+                    // rotation exists to run and DungeonClearPullManeuverTrigger (a
+                    // COMBAT-engine trigger) can never fire. The tank would white-hit
+                    // the pack in place with no abilities and no drag-back, which is
+                    // exactly the "forced attack, but never a real rotation" shape.
+                    //
+                    // CurrentTarget matters just as much: flipping in with no current
+                    // target lets the stock "drop target" action (relevance 99) read
+                    // the target as invalid and bounce the bot straight back out — the
+                    // 1-tick engine ping-pong DungeonClearMultiplier documents, whose
+                    // suppressor is scoped to assisting FOLLOWERS and so does not
+                    // cover the leader tank here.
+                    //
+                    // Narrow by construction: forceTag only when the pack's aggro
+                    // range is at or below melee reach, and the branch is gated on
+                    // !IsInCombat(), so it fires at most once per pull.
                     bot->SetSelection(trash->GetGUID());
                     if (!bot->HasInArc(CAST_ANGLE_IN_FRONT, trash))
                         ServerFacade::instance().SetFacingTo(bot, trash);
+                    context->GetValue<Unit*>(DcKey::Stock::CurrentTarget)->Set(trash);
                     bot->Attack(trash, true);
+                    botAI->ChangeEngine(BOT_STATE_COMBAT);
                     DC_PULL_TRACE("[DC:{}] pull advancing: force body-tag ({:.1f}yd)",
                                   bot->GetName(), toTag);
                     return true;
