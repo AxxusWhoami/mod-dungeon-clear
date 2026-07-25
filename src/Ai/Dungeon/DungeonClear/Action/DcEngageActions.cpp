@@ -1573,7 +1573,8 @@ bool DcObjectiveArriveAction::Execute(Event /*event*/)
             {
                 float const r = step.radius > 0.0f ? step.radius : 50.0f;
                 if (Unit* target = DcTargeting::NearestHostileNearPoint(
-                        bot, context, step.x, step.y, step.z, r, step.zBand))
+                        bot, context, step.x, step.y, step.z, r, step.zBand,
+                        &step.entryFilter))
                 {
                     DcMovement::ResolveEscortConflict(bot);
                     SetPhase(context, "objective");
@@ -1790,7 +1791,8 @@ bool DcRunEventAction::Execute(Event /*event*/)
             {
                 float const r = step.radius > 0.0f ? step.radius : 50.0f;
                 if (Unit* target = DcTargeting::NearestHostileNearPoint(
-                        bot, context, step.x, step.y, step.z, r, step.zBand))
+                        bot, context, step.x, step.y, step.z, r, step.zBand,
+                        &step.entryFilter))
                 {
                     DcMovement::ResolveEscortConflict(bot);
                     SetPhase(context, "event");

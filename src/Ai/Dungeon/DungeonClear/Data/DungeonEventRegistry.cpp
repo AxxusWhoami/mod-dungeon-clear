@@ -243,6 +243,13 @@ EventBuilder& EventBuilder::ClearRadius(float x, float y, float z, float radius,
     return *this;
 }
 
+EventBuilder& EventBuilder::OnlyEntries(std::vector<uint32> entries)
+{
+    if (!_ev.steps.empty())
+        _ev.steps.back().entryFilter = std::move(entries);
+    return *this;
+}
+
 EventBuilder& EventBuilder::Wait(uint32 durationMs)
 {
     EventStep& s = Add(EventStepKind::Wait);

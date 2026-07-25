@@ -940,10 +940,15 @@ Unit* DcTargeting::NearestRoomTrash(Player* bot, AiObjectContext* ctx)
 
 Unit* DcTargeting::NearestHostileNearPoint(Player* bot, AiObjectContext* ctx,
                                            float px, float py, float pz,
-                                           float radius, float zBand)
+                                           float radius, float zBand,
+                                           std::vector<uint32> const* entryFilter)
 {
     if (!bot || !ctx || radius <= 0.0f)
         return nullptr;
+
+    // An empty list means "no filter" — never "match nothing", so a caller that
+    // forwards an unset step field keeps the position-only behaviour.
+    bool const filtered = entryFilter && !entryFilter->empty();
 
     // Reuse the standard candidate set (nearby units the room/trash machinery
     // already gathers); filter to those that sit in the point's 2D radius and
@@ -960,6 +965,10 @@ Unit* DcTargeting::NearestHostileNearPoint(Player* bot, AiObjectContext* ctx,
         if (!u || !u->IsAlive())
             continue;
         if (!bot->IsHostileTo(u))
+            continue;
+        // Entry allow-list (cheap, so it runs before the reachability probes).
+        if (filtered && std::find(entryFilter->begin(), entryFilter->end(),
+                                  u->GetEntry()) == entryFilter->end())
             continue;
         if (!AttackersValue::IsPossibleTarget(u, bot))
             continue;

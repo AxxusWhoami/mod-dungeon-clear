@@ -426,7 +426,8 @@ StepResult DungeonEventExecutor::RunStep(Player* bot, AiObjectContext* context,
             // "clear" while still travelling in.
             float const r = step.radius > 0.0f ? step.radius : 50.0f;
             Unit* u = DcTargeting::NearestHostileNearPoint(bot, context, step.x, step.y,
-                                                           step.z, r, step.zBand);
+                                                           step.z, r, step.zBand,
+                                                           &step.entryFilter);
             // Diagnostic: a ClearRadius that completes in ~0ms is "premature" —
             // it found no hostile because the tank evaluated it from too far
             // (arriveRadius too large for the design assumption that 'arrived'

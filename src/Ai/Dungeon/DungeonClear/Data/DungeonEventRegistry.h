@@ -233,6 +233,20 @@ struct EventStep
     // climbs, so a >= gate is safe to observe late. -1 => no instance-data gate.
     int32  instanceDataId{-1};
     uint32 instanceDataMin{0};
+
+    // ClearRadius only. When non-empty, the volume clears ONLY creatures whose
+    // entry is in this allow-list — both the RunStep completion gate and the
+    // EngageDirect the driving action issues. Empty (the default) keeps the
+    // plain position-based behaviour: everything hostile in the volume.
+    //
+    // For a set-piece fought inside ambient wildlife this is the difference
+    // between the encounter and a safari. Black Morass is the case that forced
+    // it: the wave volumes sit in open swamp (the arena catch-all is r=160),
+    // and unfiltered they sent the party chasing crocolisks and tarantulas
+    // across the map while the rift's infinites walked unopposed into Medivh.
+    // Ambient fauna is still fought when it aggros the party — that is the
+    // normal combat engine's job, not the clear's.
+    std::vector<uint32> entryFilter;
 };
 
 // How an event enters the clear. Milestone 1 only uses Anchored; Conditional is
@@ -414,6 +428,10 @@ public:
     // anchor placed at the centre so boss-nav travels the tank in first.
     EventBuilder& ClearRadius(float x, float y, float z, float radius,
                               float zBand = 20.0f);
+    // Restrict the PRECEDING ClearRadius to the given creature entries (see
+    // EventStep::entryFilter). Chain it right after the step it narrows:
+    //   .ClearRadius(x, y, z, r).OnlyEntries({ENTRY_A, ENTRY_B})
+    EventBuilder& OnlyEntries(std::vector<uint32> entries);
     EventBuilder& Wait(uint32 durationMs);
     EventBuilder& Custom(uint32 hookId);
     // Protect a moving escortee (see EventStepKind::EscortCreature). `escortee` is
