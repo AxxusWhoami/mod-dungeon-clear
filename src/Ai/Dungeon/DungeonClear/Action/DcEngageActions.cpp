@@ -1856,10 +1856,36 @@ bool DcRunEventAction::Execute(Event /*event*/)
     // Completed or Skipped. A REPEATABLE event is never latched — it must fire
     // again the next time its condition reads true (e.g. the RFD gong, rung once
     // per wave). Its loop is ended by the condition itself going false for good
-    // (Tuten'kash spawns), not by a one-shot latch. Clear any stall and let the
-    // run proceed; the next due-check decides whether to repeat.
+    // (Tuten'kash spawns), not by a one-shot latch.
+    //
+    // REWIND THE STEP LIST HERE. Drive's own rewind fires only after a LAPSE —
+    // EventStaleGapMs of nobody driving the event — which assumes the condition
+    // goes false between repeats. That holds for the short wake/ring events
+    // (Zum'rah is awake, the gong is rung: the condition is false on the very
+    // next tick, so they lapse and rewind naturally). It does NOT hold for an
+    // event whose condition stays true ACROSS repeats: Black Morass's wave event
+    // is due while any rift is open or any Infinite lives, so it keeps being
+    // driven every tick, lastDriveMs never goes stale, no lapse is ever detected
+    // — and stepIndex stays parked at steps.size() (Completed) or on the step
+    // that timed out (Skipped). Drive then returns Completed on every subsequent
+    // tick without running anything, forever.
+    //
+    // Live (2026-07-24): the party cleared the first rift, the step list ran to
+    // the end, and the tank then stood on the spent portal ignoring every later
+    // rift — the event was "running" and doing nothing. Restarting here is what
+    // makes Repeatable actually repeat; the steps are idempotent by design (the
+    // same property Drive's lapse rewind already relies on).
     if (ev->repeatable)
     {
+        prog.stepIndex = 0;
+        prog.attempts = 0;
+        prog.stepStartMs = getMSTime();
+        // Re-base the forward-progress watchdog too: this is a genuine fresh
+        // activation, so the previous pass's high-water mark must not make the
+        // new one look wedged (Advance escalates to Failed off progressMs).
+        prog.maxStepIndex = 0;
+        prog.progressMs = prog.stepStartMs;
+
         ClearStall(context);
         SetPhase(context, "");
         return true;
