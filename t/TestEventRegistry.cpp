@@ -122,6 +122,12 @@ namespace
             // has parked the party at him — and the hook it drives only writes his
             // faction, which is meaningless from afar anyway.
             {209, 3},
+            // Shattered Halls Nethekurse wake-up: ShNethekurseDormant does a 60yd
+            // FindNearestCreature for him, so it cannot read true until boss-nav
+            // has parked the party at him — and the hook it drives only fires his
+            // intro DoAction, which is meaningless from afar anyway (the Zum'rah
+            // pattern verbatim).
+            {540, 5},
         };
         for (Row const& r : kRows)
             if (r.mapId == mapId && r.eventId == eventId)

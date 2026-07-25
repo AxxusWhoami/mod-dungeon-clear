@@ -9,6 +9,7 @@
 #include <unordered_map>
 
 #include "Creature.h"
+#include "CreatureAI.h"
 #include "GameObject.h"
 #include "Group.h"
 #include "InstanceScript.h"
@@ -345,6 +346,55 @@ namespace
         return ObjectiveArriveResult::Running;
     }
 
+    // --- The Shattered Halls: StartNethekurseIntro (hook id 9) ------------
+    // Grand Warlock Nethekurse (16807) spawns SetImmuneToAll; the ONLY things
+    // that clear it are ACTION_START_INTRO from area trigger 4347
+    // (at_rp_nethekurse — CMSG_AREATRIGGER, which a bot never sends; same class
+    // as the Ring of Law / Zum'rah bugs) or his own door-watch seeing chamber
+    // door 182539 lockpicked open. The DC route teleports past that door's
+    // navmesh break without touching it, so a full-bot run walks into a
+    // permanently immune, passive first boss and the engage loop deadlocks.
+    //
+    // Driven by the Conditional "Wake Grand Warlock Nethekurse" event
+    // (ShatteredHallsEvents, due only while he is alive, near, and still
+    // IsImmuneToPC). Fire exactly what the area-trigger script fires:
+    // DoAction(ACTION_START_INTRO) on his AI — it drops SetImmuneToAll on him
+    // and his four peons and starts the peon-kill RP, and it carries its own
+    // `_introStarted` guard so a duplicate fire (a lagging human's real
+    // trigger, say) is a no-op. From there the normal flow takes over: the
+    // tank engages him (JustEngagedWith cancels the RP), or he finishes the
+    // peons and AttackStarts the nearest player himself.
+    //
+    // Logged at INFO for the same reason WakeZumrah is: this is the one place
+    // a Shattered Halls first-boss deadlock gets fixed silently, and under the
+    // test harness a bot-side failure is otherwise invisible.
+    constexpr uint32 SHH_NETHEKURSE = 16807;
+    constexpr int32 SHH_ACTION_START_INTRO = 0;  // boss_nethekurse.cpp ACTION_START_INTRO
+    // Mirrors the event predicate's scan: the party is at/near him whenever the
+    // event is due, so this always resolves the same creature the gate read.
+    constexpr float SHH_NETHEKURSE_SCAN = 60.0f;
+
+    ObjectiveArriveResult StartNethekurseIntro(Player* bot, AiObjectContext* /*context*/,
+                                               DungeonBossInfo const& /*info*/)
+    {
+        Creature* nethekurse = bot->FindNearestCreature(SHH_NETHEKURSE, SHH_NETHEKURSE_SCAN);
+        if (!nethekurse || !nethekurse->IsAlive())
+            return ObjectiveArriveResult::Done;  // gone/dead — nothing to wake
+
+        // Already woken (this fired, or a human's client tripped AT 4347).
+        if (!nethekurse->IsImmuneToPC())
+            return ObjectiveArriveResult::Done;
+
+        nethekurse->AI()->DoAction(SHH_ACTION_START_INTRO);
+        LOG_INFO("playerbots.dungeonclear",
+                 "DungeonClear: Shattered Halls — started Nethekurse's ({}) intro for {} "
+                 "(area trigger 4347 never fires for an all-bot party, so he stays immune)",
+                 SHH_NETHEKURSE, bot->GetName());
+        // Done even if the flip somehow failed to take: the Repeatable event's
+        // predicate still reads immune next tick and re-fires this hook.
+        return ObjectiveArriveResult::Done;
+    }
+
     // --- Old Hillsbrad: GrantIncendiaryBombs (hook id 3) ------------------
     // Brazen (18725) only offers his drake ride to Durnholde Keep when the player
     // HOLDS the Pack of Incendiary Bombs (item 25853) — gossip menu 7959 option 0
@@ -511,6 +561,7 @@ namespace
             { 5, &WakeZumrah },              // ZulFarrak — flip Zum'rah hostile (AT 962)
             { 6, &DriveMellicharWaves },     // Arcatraz — poke Mellichar, hold through the waves
             { 7, &DriveAnzuSummon },         // Sethekk Halls — force-summon Anzu (send-event 14797)
+            { 9, &StartNethekurseIntro },    // Shattered Halls — fire Nethekurse's client-only intro
         };
         return kHooks;
     }
