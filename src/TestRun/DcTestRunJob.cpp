@@ -540,6 +540,16 @@ void DcTestRunJob::TickProvisioning(bool& provisionBudget)
         PlayerbotFactory::InitTalentsBySpecNo(bot, specNo, true);
         factory.InitEquipment(false, true);
         factory.InitGlyphs(false);
+
+        // Gear first, enchants/gems second — the order the `autogear` then
+        // `maintenance` chat commands run in. Randomize() already ends with an
+        // ApplyEnchantAndGemsNew() pass, but the spec re-gear above swaps those
+        // enchanted/gemmed items out for freshly rolled bare ones, so without
+        // this second pass every spec-forced bot (i.e. every tank and healer in
+        // a test run) fights with no enchants and empty sockets. Cheap relative
+        // to Randomize, and it only touches what is currently equipped.
+        if (bot->GetLevel() >= sPlayerbotAIConfig.minEnchantingBotLevel)
+            factory.ApplyEnchantAndGemsNew();
     }
     if (bot->getClass() == CLASS_HUNTER)
     {
