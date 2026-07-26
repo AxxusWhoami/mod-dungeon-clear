@@ -756,14 +756,32 @@ DungeonClear.SwimMaxRange = 250.0
 #        Camp-safety valve for advanced pull mode (`dc pull`). While a pull is in
 #        progress the DPS and healer wait passive at the camp, so they can't
 #        defend themselves if a patrol clips the camp or the pull goes sideways.
-#        If a held, passive party member is in combat and drops below this health
-#        percent, the pull is aborted and the whole party is released to fight
-#        back. 0 disables the valve (rely only on the short pull window).
+#        If a held, passive party member is in combat below this health percent
+#        and what is hitting it is NOT the pack being dragged (splash from the
+#        dragged pack is an ordinary drag, not a failed pull), the party is
+#        released to fight back. An in-flight drag-back is KEPT — the tank
+#        finishes hauling the pack to camp while the freed party fights from
+#        there; only a pull still walking OUT to its pack (nothing tagged yet) is
+#        aborted outright. 0 disables the valve (rely only on the short pull
+#        window).
 #
 #        Default: 50.0
 #
 
 DungeonClear.PullSafetyHpPct = 50.0
+
+#
+#    DungeonClear.PullSafetyGrace
+#        Seconds the qualifying state above must PERSIST before the valve fires.
+#        A single stray hit that the follower shrugs off inside the grace never
+#        throws the maneuver away on a flicker; sustained damage (something is
+#        really camping the camp) releases the party. 0 fires on the first
+#        qualifying tick.
+#
+#        Default: 0.0
+#
+
+DungeonClear.PullSafetyGrace = 0.0
 
 #
 #    DungeonClear.PullSetback
@@ -1243,8 +1261,13 @@ DungeonClear.SpectateSpeed = 2.5
 # DungeonClear.PullPetReleaseDelay.Heroic = 4.5
 # DungeonClear.PullThreatLeadPanicHp.Heroic = 70.0
 
-#    Release a held passive member while it still has the health to survive it.
+#    Release a held passive member while it still has the health to survive it —
+#    but only after the danger has persisted PullSafetyGrace seconds: one stray
+#    heroic elite hit on a cloth follower clears 35% easily, and without the
+#    grace the valve fires precisely in the scenario the drag-back exists to
+#    rescue.
 # DungeonClear.PullSafetyHpPct.Heroic = 65.0
+# DungeonClear.PullSafetyGrace.Heroic = 1.5
 
 #    Actually wait a patrol out. 8s gives up on plenty of real patrol loops, and
 #    giving up means committing into a pack that was about to be smaller.

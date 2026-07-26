@@ -105,6 +105,7 @@ TEST(DcSettingsRegistryTest, HeroicProfileIsExactlyThePullSafetySet)
         "PullPlayerReleaseDelay",
         "PullThreatLeadPanicHp",
         "PullSafetyHpPct",
+        "PullSafetyGrace",
         "PullPetReleaseDelay",
         "PullCommitRangeFloor",
         "PullDynamicMaxLeeroyMobs",

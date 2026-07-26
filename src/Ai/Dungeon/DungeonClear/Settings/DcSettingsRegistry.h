@@ -329,6 +329,16 @@ inline constexpr DcSettingDef kDcSettings[] =
     // fire while it still has the health to survive being released.
     { "PullSafetyHpPct",        DcType::Float, 50,   0, 100,  true,  65 },
 
+    // Seconds the qualifying state (held follower in combat below PullSafetyHpPct
+    // with a NON-pull attacker on it) must persist before the valve fires. 0 =
+    // fire on the first qualifying tick (the historical behaviour). See
+    // DungeonClearMath::ShouldTripCampSafety.
+    //
+    // HEROIC: one stray elite hit on a cloth follower clears 35% easily, so
+    // without a grace the valve fires precisely in the scenario the drag-back
+    // exists to rescue. 1.5s matches the spirit of PullCcAssistGrace.
+    { "PullSafetyGrace",        DcType::Float, 0.0,  0,  10,  true,  1.5 },
+
     // Hysteresis (seconds) on the cross-bot "is the party fighting?" gate that
     // drives BOTH the dynamic scout-lag suppression and the fight-assist arm. A
     // bare leader->IsInCombat() read is a point-in-time check, and combat starts

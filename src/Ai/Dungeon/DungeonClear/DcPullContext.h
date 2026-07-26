@@ -110,6 +110,32 @@ struct DcPullContext
                                                  // in" (DungeonClearMath::Should
                                                  // AbortPullForCc).
 
+    // --- camp-safety valve -------------------------------------------------
+    bool        partyReleased = false;           // the camp-safety valve released
+                                                 // the party from its passive hold
+                                                 // WITHOUT tearing the pull down —
+                                                 // the tank keeps dragging to camp
+                                                 // while the followers fight back.
+                                                 // Read by GetLeaderCampHold (the
+                                                 // party is no longer passive) and
+                                                 // ReapStrandedPassives (strip DC
+                                                 // passive at once, no release
+                                                 // delay). Set by SafetyRelease,
+                                                 // cleared when the next maneuver
+                                                 // starts (see Transition).
+    uint32      campSafetySince = 0;             // getMSTime() a HELD FOLLOWER's
+                                                 // current qualifying "in combat
+                                                 // below the safety HP floor with
+                                                 // a non-pull attacker" spell
+                                                 // began; 0 = fine. Lives in the
+                                                 // FOLLOWER's own copy of this
+                                                 // value (the leader's copy never
+                                                 // uses it) — the grace latch for
+                                                 // DungeonClearMath::
+                                                 // ShouldTripCampSafety. Re-armed
+                                                 // fresh on each new passive hold
+                                                 // (ApplyFollowerPassive).
+
     // --- per-target latches -----------------------------------------------
     ObjectGuid  abortTarget;                     // pack a pull gave up on; don't re-pull
     ObjectGuid  tagTarget;                        // "already tagged, hold for aggro" /
@@ -200,8 +226,45 @@ struct DcPullContext
             EnterEngage(nowMs);
             return;
         }
+        // Entering a holding phase from Idle/Engage starts a NEW maneuver: any
+        // standing safety release belonged to the previous one. Deliberately NOT
+        // cleared by EnterEngage — a valve fire during Advancing aborts INTO
+        // Engage, and the flag must survive that transition so the reaper skips
+        // the graceful release delay (a safety release is always immediate).
+        if (phase == DcPullPhase::Idle || phase == DcPullPhase::Engage)
+            partyReleased = false;
         phase = p;
         phaseSince = nowMs;
+    }
+
+    // Camp-safety valve outcome (pure — gtested via TestPullDecisions). A held
+    // passive follower took real damage from something that is NOT the pack being
+    // dragged; the party must be freed to fight back. What happens to the PULL
+    // depends on the phase:
+    //   Returning (dragging)  keep the drag — the camp is the destination, and
+    //   Forming   (marking)   abandoning mid-drag fights wherever the party
+    //                         happens to be standing (the over-pull the drag
+    //                         exists to prevent). Release the party only.
+    //   Advancing             abort as before: the tank is still walking TOWARD
+    //                         the pack; a drag-back from a pull that never tagged
+    //                         is meaningless.
+    //   Idle / Engage         no-op — nothing is holding the party.
+    // Returns true when the pull itself was aborted (phase forced to Engage).
+    bool SafetyRelease(uint32 nowMs)
+    {
+        switch (phase)
+        {
+            case DcPullPhase::Forming:
+            case DcPullPhase::Returning:
+                partyReleased = true;
+                return false;
+            case DcPullPhase::Advancing:
+                partyReleased = true;  // immediate release — see Transition
+                EnterEngage(nowMs);
+                return true;
+            default:
+                return false;
+        }
     }
 
     // --- camp ownership (see campPublishedMs) -----------------------------

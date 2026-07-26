@@ -351,6 +351,84 @@ TEST(DungeonClearCcAssistTest, ZeroNowLatchesToOne)
 }
 
 // ---------------------------------------------------------------------------
+// ShouldTripCampSafety — the camp-safety valve gate (attribution + grace).
+// Mirrors the ShouldAbortPullForCc fixture: same latch/clear contract.
+// ---------------------------------------------------------------------------
+using DungeonClearMath::ShouldTripCampSafety;
+
+// Splash from the pack being dragged is an ordinary drag, never a valve trip —
+// and it must not so much as arm the latch.
+TEST(DungeonClearCampSafetyTest, CampSafetyDoesNotTripWhenOnlyThePulledPackIsHitting)
+{
+    std::uint32_t out = 12345u;
+    EXPECT_FALSE(ShouldTripCampSafety(true, 26.0f, 65.0f,
+                                      /*attackerIsPullTarget*/ true,
+                                      10000u, 20000u, 0u, out));
+    EXPECT_EQ(out, 0u);
+}
+
+// A third-party attacker below the floor qualifies (zero grace trips at once).
+TEST(DungeonClearCampSafetyTest, CampSafetyTripsForAThirdPartyAttacker)
+{
+    std::uint32_t out = 0u;
+    EXPECT_TRUE(ShouldTripCampSafety(true, 26.0f, 65.0f,
+                                     /*attackerIsPullTarget*/ false,
+                                     0u, 5000u, 0u, out));
+}
+
+// A qualifying flicker that clears inside the grace re-arms fresh next time.
+TEST(DungeonClearCampSafetyTest, CampSafetyGraceSwallowsAFlicker)
+{
+    std::uint32_t out = 0u;
+    EXPECT_FALSE(ShouldTripCampSafety(true, 40.0f, 65.0f, false, 0u, 5000u, 1500u, out));
+    EXPECT_EQ(out, 5000u);
+    // Health recovers above the floor -> latch cleared.
+    EXPECT_FALSE(ShouldTripCampSafety(true, 80.0f, 65.0f, false, out, 5600u, 1500u, out));
+    EXPECT_EQ(out, 0u);
+    // Qualifies again at 5800 — the grace restarts from there, not from 5000.
+    EXPECT_FALSE(ShouldTripCampSafety(true, 40.0f, 65.0f, false, out, 5800u, 1500u, out));
+    EXPECT_EQ(out, 5800u);
+    EXPECT_FALSE(ShouldTripCampSafety(true, 40.0f, 65.0f, false, out, 7200u, 1500u, out));
+}
+
+// Sustained qualifying state fires once the grace has elapsed.
+TEST(DungeonClearCampSafetyTest, CampSafetyFiresAfterSustained)
+{
+    std::uint32_t out = 0u;
+    EXPECT_FALSE(ShouldTripCampSafety(true, 40.0f, 65.0f, false, 0u, 5000u, 1500u, out));
+    EXPECT_EQ(out, 5000u);
+    EXPECT_FALSE(ShouldTripCampSafety(true, 40.0f, 65.0f, false, out, 6499u, 1500u, out));
+    EXPECT_TRUE(ShouldTripCampSafety(true, 40.0f, 65.0f, false, out, 6500u, 1500u, out));
+    EXPECT_EQ(out, 5000u);
+}
+
+// graceMs == 0 preserves today's behaviour exactly: first qualifying tick fires.
+TEST(DungeonClearCampSafetyTest, CampSafetyGraceZeroFiresImmediately)
+{
+    std::uint32_t out = 0u;
+    EXPECT_TRUE(ShouldTripCampSafety(true, 40.0f, 65.0f, false, 0u, 5000u, 0u, out));
+}
+
+// Health back above the floor clears the latch (even from a stale value).
+TEST(DungeonClearCampSafetyTest, CampSafetyLatchClearsWhenHealthRecovers)
+{
+    std::uint32_t out = 9999u;
+    EXPECT_FALSE(ShouldTripCampSafety(true, 90.0f, 65.0f, false, 9999u, 20000u, 0u, out));
+    EXPECT_EQ(out, 0u);
+}
+
+// Out of combat, or a disabled valve (floor <= 0), never qualifies.
+TEST(DungeonClearCampSafetyTest, CampSafetyRespectsCombatAndDisable)
+{
+    std::uint32_t out = 7u;
+    EXPECT_FALSE(ShouldTripCampSafety(false, 10.0f, 65.0f, false, 7u, 20000u, 0u, out));
+    EXPECT_EQ(out, 0u);
+    out = 7u;
+    EXPECT_FALSE(ShouldTripCampSafety(true, 10.0f, 0.0f, false, 7u, 20000u, 0u, out));
+    EXPECT_EQ(out, 0u);
+}
+
+// ---------------------------------------------------------------------------
 // ShouldDropPullVerdict — the no-target verdict-drop grace gate.
 // ---------------------------------------------------------------------------
 using DungeonClearMath::ShouldDropPullVerdict;

@@ -171,6 +171,25 @@ namespace DungeonClearMath
                               std::uint32_t now, std::uint32_t graceMs,
                               std::uint32_t& ccSinceOut);
 
+    // Camp-safety valve (pure). A held passive follower should trigger the valve
+    // when it is in combat below `safetyHpPct` AND that has persisted for
+    // `graceMs`. `attackerIsPullTarget` is the caller's verdict that everything
+    // currently on the follower belongs to the pack being dragged — in which case
+    // this is an ordinary drag taking splash, not a failed pull, and the valve
+    // must not fire (raw HP% alone is the wrong question: a follower at 60% being
+    // splashed by the dragged pack is a normal drag; at 60% from something ELSE, a
+    // second pack found us and the maneuver is genuinely compromised).
+    // `safetyHpPct` <= 0 disables the valve outright. `since` is the timestamp the
+    // CURRENT continuous qualifying spell began (0 = fine); the latch/grace
+    // contract mirrors ShouldAbortPullForCc exactly (including the now==0 corner).
+    // `graceMs` == 0 fires on the first qualifying tick. Returns true to trip the
+    // valve and writes the updated latch to `sinceOut` (persisted in the
+    // follower's DcPullContext::campSafetySince by the caller).
+    bool ShouldTripCampSafety(bool inCombat, float healthPct, float safetyHpPct,
+                              bool attackerIsPullTarget,
+                              std::uint32_t since, std::uint32_t now,
+                              std::uint32_t graceMs, std::uint32_t& sinceOut);
+
     // Dynamic-verdict drop grace gate (pure). A standing Leeroy/Advanced verdict
     // must survive a TRANSIENT no-target read (door veto flicker, long-path cache
     // mid-rebuild, far-targets poll boundary): dropping it instantly flips the
