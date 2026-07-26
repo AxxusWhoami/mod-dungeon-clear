@@ -50,6 +50,11 @@ namespace DcTestRunLive
         // Mana %, or -1 for a class with no mana pool (warrior/rogue/DK) so the
         // dashboard can omit the bar entirely rather than draw a permanent 0%.
         std::int16_t mp = -1;
+        // Character name, so the dashboard can label the row with the bot the
+        // reader sees in-game instead of a generic TANK/HEAL/DPS token. Last
+        // field on purpose: the members above are positionally aggregate-
+        // initialised in the tests, and appending keeps those call sites valid.
+        std::string name;
     };
 
     // One active `.dc test plan` campaign, for the dashboard's plan progress

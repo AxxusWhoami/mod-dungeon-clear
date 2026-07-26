@@ -77,6 +77,7 @@ namespace DcTestRunLive
                 if (b)
                     s << ',';
                 s << "{\"role\":\"" << EscapeJson(p.role) << '"'
+                  << ",\"name\":\"" << EscapeJson(p.name) << '"'
                   << ",\"cls\":" << static_cast<unsigned>(p.classId)
                   << ",\"x\":" << Dp1(p.x)
                   << ",\"y\":" << Dp1(p.y)

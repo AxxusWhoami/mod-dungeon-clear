@@ -355,6 +355,9 @@ DcTestRunLive::RunSnapshot DcTestRunJob::Snapshot() const
             s.mapId = static_cast<std::int32_t>(p->GetMapId());
         DcTestRunLive::BotPos bp;
         bp.role = slot.role;
+        // The slot only knows class/spec/role; the name belongs to the char the
+        // pool handed out, so it has to come off the resolved player.
+        bp.name = p->GetName();
         bp.classId = slot.classId;
         bp.x = p->GetPositionX();
         bp.y = p->GetPositionY();
