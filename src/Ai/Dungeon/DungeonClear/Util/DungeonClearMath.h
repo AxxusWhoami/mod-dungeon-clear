@@ -190,6 +190,21 @@ namespace DungeonClearMath
                               std::uint32_t since, std::uint32_t now,
                               std::uint32_t graceMs, std::uint32_t& sinceOut);
 
+    // Pull-mode blocking-trash stand-down gate (pure). In advanced-pull mode the
+    // pull pipeline owns the pack it is working, so the blocking-trash trigger
+    // stands down for it (engage-trash outranks the pull's deliberate wait band
+    // and would otherwise preempt every pull). But a BYSTANDER — a pack the pull
+    // never selected — appearing inside the aggro-shaped scan while the pull is
+    // IDLE is exactly the case the scan exists for, and silently handing it to a
+    // pipeline that is not looking at it left the tank walking into it under
+    // Advance. Returns true to STAND DOWN (the pull pipeline owns the tick):
+    // always for the pull's own pack, and for anyone once a maneuver is in
+    // flight (non-Idle — never thrash it). Returns false only for a bystander
+    // while the pull is Idle: the blocking-trash walk-in owns that tick. The
+    // game-state read (pack identity vs decision/pull target, phase) stays at
+    // the trigger; this carries only the decision so it is unit-testable.
+    bool ShouldStandDownForPull(bool packIsPullsOwn, bool pullPhaseIdle);
+
     // Dynamic-verdict drop grace gate (pure). A standing Leeroy/Advanced verdict
     // must survive a TRANSIENT no-target read (door veto flicker, long-path cache
     // mid-rebuild, far-targets poll boundary): dropping it instantly flips the
@@ -352,6 +367,50 @@ namespace DungeonClearMath
         // arming tick (sinceMs nudged to 1) or a backward clock step / getMSTime wrap,
         // where "no time has elapsed yet" is the right answer.
         return now >= sinceMs && (now - sinceMs) >= timeoutMs;
+    }
+
+    // Bystander-detour borrow watchdog (pure, by-reference latch).
+    //
+    // Above commit range the tank's approach belongs to Advance (the long-path
+    // glide). When a bystander pack's aggro sphere actually sits on the line to
+    // the pull target, the pull BORROWS the tick and walks an orbit around it
+    // instead — but while it holds the tick, Advance's own wedge/stall ladder is
+    // not running, so the borrow must be bounded or a non-converging orbit would
+    // freeze the run outright. Bounding it in time is the same "preference, never
+    // refusal" rule the detour itself follows: when the borrow stops paying, hand
+    // the walk back and let the straight route happen.
+    //
+    // It is a NO-PROGRESS clock, not a plain deadline: `bestDist` records the
+    // closest the tank has been to the pack on this detour, and any tick that
+    // beats it by `progressEpsilon` restamps the clock. A long legitimate arc
+    // around a big sphere therefore never expires — only an orbit that has
+    // genuinely stopped closing burns the budget.
+    //
+    // `sinceMs == 0` means "not currently borrowing" and arms the clock.
+    // `timeoutMs == 0` disables the give-up entirely.
+    //
+    // The caller owns the latch either side of this: resetting it when the leg's
+    // target changes, and deciding what a `false` means. The pull makes it
+    // one-shot per pack (DcPullContext::avoidGaveUp) rather than simply retrying
+    // once the clock would re-arm — the tank closing one more yard under Advance
+    // is enough to satisfy the progress test, so a retrying caller would cancel
+    // Advance's spline every fraction of a second and thrash the movement it was
+    // supposed to be handing back.
+    inline bool ShouldKeepAvoidDetour(std::uint32_t now, float curDist,
+                                      std::uint32_t timeoutMs, float progressEpsilon,
+                                      std::uint32_t& sinceMs, float& bestDist)
+    {
+        if (sinceMs == 0 || curDist < bestDist - progressEpsilon)
+        {
+            sinceMs = now ? now : 1;   // arm; avoid the 0 "unarmed" sentinel on ms 0
+            bestDist = curDist;
+            return true;
+        }
+        if (timeoutMs == 0)
+            return true;
+        // `now >= sinceMs` guards the unsigned subtraction against a backward clock
+        // step / getMSTime wrap, where "no time has elapsed" is the right answer.
+        return !(now >= sinceMs && (now - sinceMs) >= timeoutMs);
     }
 
     // Engage-fizzle handoff latch (pure). An advanced-pull "camp fight" ended with

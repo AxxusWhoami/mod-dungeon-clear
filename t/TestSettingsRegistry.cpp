@@ -112,7 +112,9 @@ TEST(DcSettingsRegistryTest, HeroicProfileIsExactlyThePullSafetySet)
         "PullCombatSpread",
         "PullDynamicPartyLag",
         "PullPatrolWaitSec",
+        "PullEnRouteAvoid",
         "AdvanceWindowYards",
+        "TrashWidthCap",
     };
 
     std::vector<std::string> actual;
@@ -148,4 +150,16 @@ TEST(DcSettingsRegistryTest, KeysAreUniqueAndLookupFindsThem)
         EXPECT_EQ(found, &d) << d.key;
     }
     EXPECT_EQ(FindDcSetting("NotARealSetting"), nullptr);
+}
+
+TEST(DcSettingsRegistryTest, TrashBandClampedToHeroicCap)
+{
+    // C.2: the heroic band cap. With the unified reach a common heroic elite's
+    // band lands ~32-36yd, which the normal 30 cap silently clips — discarding
+    // exactly the reach the unification added. Normal keeps 30.
+    DcSettingDef const* d = FindDcSetting("TrashWidthCap");
+    ASSERT_NE(d, nullptr);
+    EXPECT_EQ(d->defVal, 30);
+    ASSERT_TRUE(DcHasHeroicDefault(*d));
+    EXPECT_EQ(d->heroicVal, 42);
 }

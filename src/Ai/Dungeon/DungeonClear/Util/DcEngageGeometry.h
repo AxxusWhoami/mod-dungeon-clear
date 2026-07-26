@@ -7,8 +7,10 @@
 #define _DC_ENGAGE_GEOMETRY_H
 
 #include <optional>
+#include <vector>
 
 #include "MoveSplineInitArgs.h"
+#include "ObjectGuid.h"
 #include "Position.h"
 #include "Ai/Dungeon/DungeonClear/Util/ChunkedPathfinder.h"
 
@@ -34,6 +36,29 @@ public:
     // return `fallback`. Cheap — no allocation, no pathfinding.
     static float AggroRangeOf(Player* bot, Unit* u, float fallback,
                               float floorYd, float capYd);
+
+    // THE single source for the aggro-reach formula — the distance at which `u`
+    // notices `bot`, expressed as a radius around `u`:
+    //   GetAggroRange(bot) + u's reach + bot's reach + AggroRangeMargin
+    //   + partyBuffer
+    // `partyBuffer` is the extra slack an AVOIDANCE wants and a DETECTION does
+    // not: avoidance is steering the whole party past the pack (followers cut
+    // corners), detection is only asking "will this thing pull". Callers:
+    //   detection  (AggroRangeOf)          -> partyBuffer = 0
+    //   avoidance  (BystanderSpheres)      -> partyBuffer = PullEnRouteMargin
+    //   boss skirt (RoomAggroSphereRadius) -> partyBuffer = RoomAggroPathPadding
+    //   hand-offs  (BossEngageRange, PullCommitRange) -> partyBuffer = 0
+    // Extracting it is what ends the drift where the blocking-trash band and the
+    // avoid sphere disagreed about the same fact by ~3.5yd (the code comment in
+    // BystanderSpheres promised they "can never disagree"; they did). Returns 0
+    // for null/non-creature inputs. No clamping — callers clamp to their own
+    // floors/caps.
+    static float AggroReach(Player* bot, Unit* u, float partyBuffer);
+
+    // The pure formula behind AggroReach, separated so the invariant "detection
+    // and avoidance agree up to partyBuffer" is gtestable without a live map.
+    static float AggroReachYards(float aggroRange, float mobReach, float botReach,
+                                 float aggroMargin, float partyBuffer);
 
     // The distance at which the tank should consider itself "at the boss" and
     // hand off from the smooth long-path/direct-pursuit glide to the decisive
@@ -115,6 +140,86 @@ public:
     static bool NeedsRoomAggroSkirt(float botX, float botY,
                                     float targetX, float targetY,
                                     float bossX, float bossY, float avoidRadius);
+
+    // --- En-route pack avoidance ------------------------------------------
+    // One bystander pack's aggro sphere, as the avoidance sees it.
+    struct AvoidSphere
+    {
+        float x = 0.0f, y = 0.0f, z = 0.0f;
+        float r = 0.0f;          // aggro reach + reaches + margins
+        ObjectGuid guid;         // the mob the sphere is centred on (latch key)
+    };
+
+    // Pure: index of the sphere the straight 2D line bot->target violates FIRST,
+    // i.e. the violated sphere whose centre is nearest the bot; -1 when the line
+    // is clear of all of them.
+    //
+    // Nearest-first, rather than "worst" or "all at once", is what lets the
+    // proven single-sphere orbit do the work: the tank rounds the obstacle
+    // actually in front of it, and once past, the next violator becomes the
+    // nearest and the orbit re-aims at that. Trying to solve all spheres in one
+    // step is where a multi-sphere solver would have to invent geometry that
+    // AggroSafeApproachPoint has already had four bug-fix passes on.
+    static int FirstViolatedSphere(float botX, float botY,
+                                   float targetX, float targetY,
+                                   std::vector<AvoidSphere> const& spheres);
+
+    // Build the bystander avoid-sphere set around a leg of travel from the bot
+    // to `legEnd`. Extracted verbatim from EnRoutePackAvoidPoint's body so the
+    // pull leg and the Advance glide can never disagree about what "inside
+    // aggro" means: every sphere is sized
+    //   GetAggroRange(bot) + mob reach + bot reach + AggroRangeMargin
+    //   + PullEnRouteMargin
+    // and dead / non-hostile / critter / totem / already-in-combat / other-floor
+    // mobs never become spheres. `exclude` is the destination pack — by
+    // identity, formation id, or 12yd proximity — which must NEVER become an
+    // avoid sphere (it is what the caller is walking to); pass nullptr for
+    // Advance, which has no pack it is deliberately walking to. NOT gated on
+    // PullEnRouteAvoid — callers gate. One grid search per call.
+    static std::vector<AvoidSphere> BystanderSpheres(Player* bot,
+                                                     Position const& legEnd,
+                                                     Unit* exclude);
+
+    // Pure: first sphere any leg of `polyline` violates, or -1 when the whole
+    // polyline is clear. Writes the violating leg's START point index to
+    // `legOut` — polyline[legOut] is the last point still outside the sphere
+    // (when legOut > 0; legOut == 0 means the hazard is violated from the very
+    // first leg, i.e. effectively already at/inside it), so a caller that
+    // truncates its window to [0..legOut] glides up to the hazard's threshold
+    // and stops there.
+    //
+    // NOTE the deliberate contract difference from FirstViolatedSphere, which
+    // picks the violated sphere whose CENTRE IS NEAREST THE BOT (see its comment:
+    // it feeds a single-sphere orbit that re-aims as each obstacle is passed).
+    // Over a polyline "nearest the bot" is the wrong question — a route can
+    // double back, so the sphere to stop at is the one violated EARLIEST ALONG
+    // THE ROUTE, which may be further away in straight-line terms. Do not
+    // "unify" these two orderings; they answer different questions. Within one
+    // leg, ties break to the sphere centre nearest the leg start, which makes a
+    // 2-point polyline behave identically to FirstViolatedSphere.
+    static int FirstViolatedSphereOnPolyline(
+        std::vector<G3D::Vector3> const& polyline,
+        std::vector<AvoidSphere> const& spheres, size_t& legOut);
+
+    // A detour waypoint that keeps the walk to `target` out of every OTHER
+    // pack's aggro range, or nullopt when the straight approach is already clear
+    // (or avoidance is off / nothing can be snapped — always degrade to walking
+    // straight, never to standing still).
+    //
+    // Why this exists: the pull classifier estimates who joins a fight that
+    // STAYS PUT at the target. That is the right question for sizing the pull and
+    // the wrong one for getting there — a pack 40yd off the path aggros nothing
+    // by standing still, and everything when the tank jogs past it. Live Sethekk
+    // heroic: a pull predicted at 3 mobs was fought by 11, with three uninvolved
+    // packs sitting 36-64yd from the target. The verdict was right; the walk was
+    // not.
+    //
+    // Cost is bounded and this is deliberately NOT free: one grid search plus a
+    // handful of line tests per call. Gated by PullEnRouteAvoid (heroic-only by
+    // default) and intended for the leader tank's approach, not every bot.
+    static std::optional<Position> EnRoutePackAvoidPoint(Player* bot,
+                                                         AiObjectContext* ctx,
+                                                         Unit* target);
 
     // True when the tank is close enough AND on a navigable level with the boss
     // to hand off from route-following to the decisive engage pull. The 3D

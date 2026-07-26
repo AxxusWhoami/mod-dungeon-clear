@@ -429,6 +429,33 @@ TEST(DungeonClearCampSafetyTest, CampSafetyRespectsCombatAndDisable)
 }
 
 // ---------------------------------------------------------------------------
+// ShouldStandDownForPull — the pull-mode blocking-trash stand-down gate.
+// ---------------------------------------------------------------------------
+using DungeonClearMath::ShouldStandDownForPull;
+
+// The pack the pull pipeline is (or is about to be) working is always its own,
+// whatever the phase — the trigger must never preempt the pull for it.
+TEST(DungeonClearPullStandDownTest, PullModeStandDownHoldsForThePullsOwnTarget)
+{
+    EXPECT_TRUE(ShouldStandDownForPull(/*packIsPullsOwn*/ true, /*idle*/ true));
+    EXPECT_TRUE(ShouldStandDownForPull(/*packIsPullsOwn*/ true, /*idle*/ false));
+}
+
+// A bystander — a pack the pull never selected — with nothing in flight is
+// exactly what the aggro-shaped scan exists for: the walk-in owns the tick.
+TEST(DungeonClearPullStandDownTest, PullModeStandDownReleasesForABystanderWhenPullIsIdle)
+{
+    EXPECT_FALSE(ShouldStandDownForPull(/*packIsPullsOwn*/ false, /*idle*/ true));
+}
+
+// Once a maneuver is in flight the trigger keeps standing down even for a
+// bystander — the maneuver must not be thrashed.
+TEST(DungeonClearPullStandDownTest, PullModeStandDownHoldsForABystanderMidManeuver)
+{
+    EXPECT_TRUE(ShouldStandDownForPull(/*packIsPullsOwn*/ false, /*idle*/ false));
+}
+
+// ---------------------------------------------------------------------------
 // ShouldDropPullVerdict — the no-target verdict-drop grace gate.
 // ---------------------------------------------------------------------------
 using DungeonClearMath::ShouldDropPullVerdict;
@@ -1261,6 +1288,107 @@ TEST(DungeonClearStuckCombatTest, ArmingAtTimeZeroAvoidsTheSentinel)
     // at the 0 "disarmed" sentinel or the clock would re-arm every tick and never
     // accumulate. It is nudged to 1 instead.
     EXPECT_FALSE(DungeonClearMath::ShouldBreakStuckCombat(true, 0, 15000, since));
+    EXPECT_EQ(since, 1u);
+}
+
+// ===== Bystander-detour borrow watchdog (ShouldKeepAvoidDetour) =====
+//
+// The pull borrows the approach tick from Advance to walk around another pack's
+// aggro sphere. Advance's wedge ladder is parked while it holds the tick, so the
+// borrow is bounded by a NO-PROGRESS clock: closing on the pack keeps it alive
+// indefinitely; orbiting without closing hands the walk back.
+
+TEST(DungeonClearAvoidDetourTest, ProgressKeepsTheBorrowAliveIndefinitely)
+{
+    std::uint32_t since = 0;
+    float best = 0.0f;
+    constexpr std::uint32_t timeout = 8000;
+
+    // First tick arms the clock and records the distance.
+    EXPECT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(1000, 60.0f, timeout, 1.0f, since, best));
+    EXPECT_EQ(since, 1000u);
+    EXPECT_FLOAT_EQ(best, 60.0f);
+
+    // A long arc that keeps closing restamps every time, so the budget never runs
+    // out even though far more than `timeout` has elapsed since the detour began.
+    EXPECT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(20000, 50.0f, timeout, 1.0f, since, best));
+    EXPECT_EQ(since, 20000u);
+    EXPECT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(60000, 40.0f, timeout, 1.0f, since, best));
+    EXPECT_EQ(since, 60000u);
+    EXPECT_FLOAT_EQ(best, 40.0f);
+}
+
+TEST(DungeonClearAvoidDetourTest, SidewaysOrbitBurnsTheBudgetAndGivesUp)
+{
+    std::uint32_t since = 0;
+    float best = 0.0f;
+    constexpr std::uint32_t timeout = 8000;
+
+    EXPECT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(1000, 40.0f, timeout, 1.0f, since, best));
+
+    // Orbiting: the tank is moving, but never getting closer to the pack than the
+    // 40yd it started at (it even drifts out to 42). Hold until the budget expires…
+    EXPECT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(4000, 41.0f, timeout, 1.0f, since, best));
+    EXPECT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(1000 + timeout - 1, 42.0f, timeout, 1.0f, since, best));
+    // …then hand the walk back to Advance.
+    EXPECT_FALSE(DungeonClearMath::ShouldKeepAvoidDetour(1000 + timeout, 42.0f, timeout, 1.0f, since, best));
+    // The latch is KEPT after a give-up, so the predicate keeps saying no while
+    // the orbit keeps not closing.
+    EXPECT_FALSE(DungeonClearMath::ShouldKeepAvoidDetour(1000 + timeout + 500, 41.5f, timeout, 1.0f, since, best));
+}
+
+TEST(DungeonClearAvoidDetourTest, ClosingDistanceAloneWouldReArmTheClock)
+{
+    std::uint32_t since = 0;
+    float best = 0.0f;
+    constexpr std::uint32_t timeout = 8000;
+
+    ASSERT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(1000, 40.0f, timeout, 1.0f, since, best));
+    ASSERT_FALSE(DungeonClearMath::ShouldKeepAvoidDetour(1000 + timeout, 40.0f, timeout, 1.0f, since, best));
+
+    // Distance closed while the borrow was off beats the recorded best, so the
+    // PREDICATE re-arms on a fresh clock. This is exactly why the pull caller does
+    // NOT lean on it after a give-up: one yard of Advance's own walking satisfies
+    // this, and re-borrowing that fast would cancel Advance's spline every few
+    // hundred ms. DcPullContext::avoidGaveUp is the one-shot latch on top.
+    EXPECT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(30000, 30.0f, timeout, 1.0f, since, best));
+    EXPECT_EQ(since, 30000u);
+    EXPECT_FLOAT_EQ(best, 30.0f);
+}
+
+TEST(DungeonClearAvoidDetourTest, SubEpsilonJitterIsNotProgress)
+{
+    std::uint32_t since = 0;
+    float best = 0.0f;
+    constexpr std::uint32_t timeout = 8000;
+
+    ASSERT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(1000, 40.0f, timeout, 1.0f, since, best));
+
+    // A glide's tick-to-tick jitter must not count as closing, or an orbit that
+    // creeps inward by centimetres would hold the borrow open forever.
+    EXPECT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(2000, 39.5f, timeout, 1.0f, since, best));
+    EXPECT_EQ(since, 1000u);              // clock NOT restamped
+    EXPECT_FLOAT_EQ(best, 40.0f);         // best NOT lowered
+    EXPECT_FALSE(DungeonClearMath::ShouldKeepAvoidDetour(1000 + timeout, 39.5f, timeout, 1.0f, since, best));
+}
+
+TEST(DungeonClearAvoidDetourTest, ZeroTimeoutNeverGivesUp)
+{
+    std::uint32_t since = 0;
+    float best = 0.0f;
+
+    ASSERT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(1000, 40.0f, 0, 1.0f, since, best));
+    EXPECT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(999000, 40.0f, 0, 1.0f, since, best));
+}
+
+TEST(DungeonClearAvoidDetourTest, ArmingAtTimeZeroAvoidsTheSentinel)
+{
+    std::uint32_t since = 0;
+    float best = 0.0f;
+    // Same sentinel hazard as the stuck-combat clock: `since == 0` means "not
+    // borrowing", so arming on server-ms 0 must nudge to 1 or the clock re-arms
+    // every tick and the budget never accumulates.
+    EXPECT_TRUE(DungeonClearMath::ShouldKeepAvoidDetour(0, 40.0f, 8000, 1.0f, since, best));
     EXPECT_EQ(since, 1u);
 }
 

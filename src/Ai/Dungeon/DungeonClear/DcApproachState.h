@@ -71,6 +71,28 @@ struct DcApproachState
     int8 skirtOrbitDir         = 0;  // 0 = unlatched, +/-1 = committed orbit rotation
     ObjectGuid skirtOrbitTarget;     // trash GUID the current orbit latch is for
 
+    // En-route pack avoidance (DcEngageGeometry::EnRoutePackAvoidPoint) reuses
+    // the same orbit machinery, but around a BYSTANDER pack rather than a
+    // room-aggro boss — and which bystander is "the one in the way" changes as
+    // the tank rounds them one at a time. The latch is therefore keyed by the
+    // SPHERE being rounded, not by the destination: inheriting a "round left"
+    // committed for a pack we have already passed is the same two-point bounce
+    // the boss skirt latch exists to prevent. Reset when the chosen sphere
+    // changes, and by the approach reset below.
+    int8 avoidOrbitDir         = 0;  // 0 = unlatched, +/-1 = committed rotation
+    ObjectGuid avoidOrbitSphere;     // pack GUID the current avoid orbit is for
+
+    // Mid-glide hazard probe (Advance). While a continuous escort spline is in
+    // flight the hop ladder short-circuits (the ride outranks everything), so a
+    // PATROL can wander into the committed window after launch unobserved. The
+    // probe re-tests the remaining window against the bystander avoid-spheres at
+    // most every DC_GLIDE_HAZARD_PROBE_MS and halts the glide (escort-aware
+    // stop) when something violates it. The ignore latch is what stops a
+    // stop/launch ping-pong: the sphere that caused the last interrupt is
+    // skipped, so the tank interrupts only for something NEW.
+    uint32 glideHazardProbeMs  = 0;  // last probe timestamp (getMSTime)
+    ObjectGuid glideHazardIgnore;    // sphere behind the last interrupt
+
     // --- blocking-door interaction ----------------------------------------
     // Last door the bot clicked open and when, so the door-blocked action can
     // re-click an auto-closing gate (Strat's King's Square Gate re-shuts 3s
@@ -143,6 +165,10 @@ struct DcApproachState
         lastPos             = Position();
         skirtOrbitDir       = 0;
         skirtOrbitTarget.Clear();
+        avoidOrbitDir       = 0;
+        avoidOrbitSphere.Clear();
+        glideHazardProbeMs  = 0;
+        glideHazardIgnore.Clear();
         doorStallGuid.Clear();
         doorStallSinceMs    = 0;
         doorStallLastMs     = 0;

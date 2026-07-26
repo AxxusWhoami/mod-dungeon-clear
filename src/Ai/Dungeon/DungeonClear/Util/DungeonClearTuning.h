@@ -72,6 +72,15 @@ constexpr float DC_TRASH_CONE_HALF_ANGLE = 1.0471975512f;  // pi/3 == 60°
 // does not.
 constexpr bool  DC_USE_CORRIDOR_SCAN = true;
 constexpr float DC_CORRIDOR_LOOKAHEAD = 35.0f;
+
+// Mid-glide hazard probe cadence (Advance). While a continuous escort spline is
+// in flight the hop ladder short-circuits, so a patrol can enter the committed
+// window unobserved; the probe re-tests the remaining window against the
+// bystander avoid-spheres at most this often. At ~7yd/s glide speed this is a
+// ~3.5yd resolution — far finer than the 35yd capped window — for one grid
+// visit per half-second per tank. Gated on AdvanceWindowYards > 0 and
+// PullEnRouteAvoid, so normal difficulty pays nothing.
+constexpr uint32 DC_GLIDE_HAZARD_PROBE_MS = 500;
 // Half-width of the path "blocking trash" band. Widened from 8 to 18 so it
 // roughly matches level-80 elite aggro radius: a pack sitting a few yards off the
 // route line still aggros as the tank passes, so it must count as blocking trash.
@@ -99,6 +108,20 @@ constexpr float DC_PULL_START_RANGE = 26.0f;
 // disagreed, NOBODY moved the camp, and the spread gate (camp-anchored in pull
 // mode) kept passing while the tank glided away from the party.
 constexpr uint32 DC_CAMP_PUBLISH_FRESH_MS = 1000;
+
+// Bystander-detour borrow budget: how long the pull may keep driving the
+// approach around another pack's aggro sphere WITHOUT the tank getting any
+// closer to the pack it is walking at, before it hands the walk back to Advance.
+// The clock restamps on every yard of real progress (DungeonClearMath::
+// ShouldKeepAvoidDetour), so this only ever measures a stalled orbit — 8s of
+// pure sideways travel is already far more than any legitimate arc needs, and
+// the bound is what keeps a non-converging orbit from freezing the run while
+// Advance's own wedge ladder is parked.
+constexpr uint32 DC_PULL_AVOID_STALL_MS = 8000;
+// A tick has to beat the detour's best distance-to-pack by this much to count as
+// progress and restamp the clock. Absorbs the sub-yard jitter of a glide so an
+// orbit that is merely drifting can't hold the borrow open forever.
+constexpr float DC_PULL_AVOID_PROGRESS_YD = 1.0f;
 
 // The max party-spread default lives in DcSettingsRegistry ("PartyMaxSpread");
 // the trigger, the advance gate, and the status publisher all read it through

@@ -505,6 +505,85 @@ bool DungeonClearPullAction::Execute(Event /*event*/)
                                   toTrash, commitRange);
                     return true;
                 }
+                // Bystander detour on the way OUT to the pack.
+                //
+                // The tag leg (Advancing, below) already bends around other packs,
+                // but it only begins once the tank is inside commit range — by then
+                // the room has already been crossed, and crossing it is where the
+                // extra packs come from. Above commit range the walk is Advance's
+                // long-path glide, which routes for NAVIGATION and has no notion of
+                // anyone's aggro arc: it will happily jog the tank through two
+                // sleeping packs to reach the one the classifier correctly sized at
+                // three. That is the live heroic "predicted 3, fought 11".
+                //
+                // So when a bystander sphere genuinely sits on the line, borrow the
+                // tick and walk the orbit ourselves. Deliberately narrow:
+                //   * only when a sphere is actually violated (nullopt otherwise —
+                //     the overwhelmingly common tick yields to Advance untouched);
+                //   * only when the pack sits at the end of one complete on-level
+                //     route, i.e. the open-room case where Advance's chunked
+                //     long-path is buying nothing. A pack up a ramp or through a
+                //     corridor still goes to Advance, which is the only thing that
+                //     can route to it at all;
+                //   * only while the borrow keeps closing distance
+                //     (ShouldKeepAvoidDetour) — Advance's wedge/stall ladder is
+                //     parked while we hold the tick, so a non-converging orbit hands
+                //     the walk straight back instead of freezing the run.
+                // A failed snap or a failed move falls through to the yield exactly
+                // as before: preference, never refusal.
+                auto driveBystanderDetour = [&]() -> bool
+                {
+                    if (pull.avoidLegTarget != trash->GetGUID())
+                    {
+                        pull.avoidLegTarget = trash->GetGUID();
+                        pull.avoidSinceMs = 0;
+                        pull.avoidBestDist = 0.0f;
+                        pull.avoidGaveUp = false;
+                    }
+                    // Given up on this pack already: stay out of Advance's way for
+                    // the rest of the approach (and skip the grid search).
+                    if (pull.avoidGaveUp)
+                        return false;
+                    if (!DcEngageGeometry::IsEngageReachable(bot, trash,
+                                                             /*requireDirect*/ false))
+                        return false;
+                    std::optional<Position> const avoid =
+                        DcEngageGeometry::EnRoutePackAvoidPoint(bot, context, trash);
+                    if (!avoid)
+                    {
+                        // Line is clear — stop borrowing and let the clock rearm from
+                        // scratch on the next obstacle.
+                        pull.avoidSinceMs = 0;
+                        return false;
+                    }
+                    if (!DungeonClearMath::ShouldKeepAvoidDetour(
+                            now, toTrash, DC_PULL_AVOID_STALL_MS,
+                            DC_PULL_AVOID_PROGRESS_YD, pull.avoidSinceMs,
+                            pull.avoidBestDist))
+                    {
+                        pull.avoidGaveUp = true;
+                        DC_PULL_INFO("[DC:{}] pull idle: bystander detour stopped "
+                                     "closing on {} ({:.1f}yd) -> handing the walk "
+                                     "back to advance for this pack",
+                                     bot->GetName(), trash->GetGUID().ToString(),
+                                     toTrash);
+                        return false;
+                    }
+                    bool const moved =
+                        DcMoveTo(trash->GetMapId(), avoid->GetPositionX(),
+                                 avoid->GetPositionY(), avoid->GetPositionZ(),
+                                 /*idle*/ false, /*react*/ false, /*normal_only*/ false,
+                                 /*exact_waypoint*/ false, MovementPriority::MOVEMENT_NORMAL);
+                    if (!(moved || bot->isMoving() ||
+                          IsWaitingForLastMove(MovementPriority::MOVEMENT_NORMAL)))
+                        return false;
+                    DC_PULL_DEBUG("[DC:{}] pull idle: detouring around a bystander pack "
+                                  "on the way to {} ({:.1f}yd) -> ({:.1f},{:.1f})",
+                                  bot->GetName(), trash->GetGUID().ToString(), toTrash,
+                                  avoid->GetPositionX(), avoid->GetPositionY());
+                    return true;
+                };
+
                 float const setback = DcSettings::GetFloat(bot, "PullSetback");
                 float const safeRadius = DcSettings::GetFloat(bot, "PullCampSafeRadius");
                 float const maxDrag = DcSettings::GetFloat(bot, "PullMaxDrag");
@@ -532,7 +611,7 @@ bool DungeonClearPullAction::Execute(Event /*event*/)
                                       commitRange, camp.GetPositionX(),
                                       camp.GetPositionY(), camp.GetPositionZ(),
                                       candToTrash);
-                        return false;
+                        return driveBystanderDetour();
                     }
                     // Hysteresis kept the old camp: still assert ownership this tick.
                     pull.TouchCampOwnership(now);
@@ -541,7 +620,7 @@ bool DungeonClearPullAction::Execute(Event /*event*/)
                               "{:.1f} -> glide closer before committing",
                               bot->GetName(), trash->GetGUID().ToString(), toTrash,
                               commitRange);
-                return false;
+                return driveBystanderDetour();
             }
             // Pick the camp: a generous distance back along the cleared route
             // (PullSetback) so the party gets real room, extended further only if
@@ -912,12 +991,25 @@ bool DungeonClearPullAction::Execute(Event /*event*/)
             // not the pack's centre, so the run stops at the aggro edge.
             float tagX = trash->GetPositionX();
             float tagY = trash->GetPositionY();
-            float const tagZ = trash->GetPositionZ();
+            float tagZ = trash->GetPositionZ();
             if (trashCreature && toTag > 0.1f)
             {
                 float const f = tagStop / toTag;
                 tagX = trash->GetPositionX() + (bot->GetPositionX() - trash->GetPositionX()) * f;
                 tagY = trash->GetPositionY() + (bot->GetPositionY() - trash->GetPositionY()) * f;
+            }
+
+            // The tag leg is the one the tank walks ALONE and the one most worth
+            // protecting: it goes out to a pack we have deliberately decided to
+            // peel, and any bystander it wakes on the way arrives at the camp with
+            // the pack we wanted. Detour around them; a failed snap falls through
+            // to the direct line exactly as before.
+            if (std::optional<Position> avoid =
+                    DcEngageGeometry::EnRoutePackAvoidPoint(bot, context, trash))
+            {
+                tagX = avoid->GetPositionX();
+                tagY = avoid->GetPositionY();
+                tagZ = avoid->GetPositionZ();
             }
             DC_PULL_TRACE("[DC:{}] pull advancing: closing to aggro edge ({:.1f}yd, "
                           "stop {:.1f})", bot->GetName(), toTag, tagStop);

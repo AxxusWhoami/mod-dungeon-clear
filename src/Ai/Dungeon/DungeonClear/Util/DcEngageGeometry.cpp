@@ -12,6 +12,8 @@
 #include "DungeonClearTuning.h"
 #include "Ai/Dungeon/DungeonClear/Data/BossPullbackRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/RoomAggroRegistry.h"
+#include "Ai/Dungeon/DungeonClear/DcApproachState.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
 #include <algorithm>
 #include <cmath>
@@ -65,6 +67,26 @@
 #include "Ai/Dungeon/DungeonClear/Util/NavmeshSnap.h"
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearLiveBossValue.h"
 
+float DcEngageGeometry::AggroReachYards(float aggroRange, float mobReach,
+                                        float botReach, float aggroMargin,
+                                        float partyBuffer)
+{
+    return aggroRange + mobReach + botReach + aggroMargin + partyBuffer;
+}
+
+float DcEngageGeometry::AggroReach(Player* bot, Unit* u, float partyBuffer)
+{
+    if (!bot || !u)
+        return 0.0f;
+    Creature* c = u->ToCreature();
+    if (!c)
+        return 0.0f;
+    return AggroReachYards(c->GetAggroRange(bot), c->GetCombatReach(),
+                           bot->GetCombatReach(),
+                           DcSettings::GetFloat(bot, "AggroRangeMargin"),
+                           partyBuffer);
+}
+
 float DcEngageGeometry::AggroRangeOf(Player* bot, Unit* u, float fallback,
                                     float floorYd, float capYd)
 {
@@ -77,10 +99,14 @@ float DcEngageGeometry::AggroRangeOf(Player* bot, Unit* u, float fallback,
     if (!c)
         return fallback;            // players/totems: keep the caller's band
 
-    // Core formula: detection range adjusted by level diff, already clamped
-    // 5-45yd. Add the creature's reach so the band measures "how close the
-    // route must pass for it to pull", not just its notice distance.
-    float range = c->GetAggroRange(bot) + c->GetCombatReach();
+    // The unified reach (AggroReach, partyBuffer = 0): detection now includes
+    // the bot's own combat reach and AggroRangeMargin, exactly like the
+    // avoidance sphere, so the blocking-trash band and the avoid sphere differ
+    // by PullEnRouteMargin and nothing else. This WIDENED the band by ~3.5yd on
+    // both difficulties — deliberate (heroic over-pull transit plan §C.1): a
+    // detection formula that disagrees with the avoidance formula is a bug on
+    // every difficulty, not a heroic tuning choice.
+    float range = AggroReach(bot, c, 0.0f);
     if (range < floorYd)
         range = floorYd;
     if (range > capYd)
@@ -99,18 +125,15 @@ float DcEngageGeometry::BossEngageRange(Player* bot, AiObjectContext* ctx,
     if (!live)
         return staticRange;         // not loaded yet — use the static fallback
 
-    float const margin =
-        DcSettings::GetFloat(bot, "AggroRangeMargin");
     float const floorYd =
         DcSettings::GetFloat(bot, "BossEngageRangeFloor");
     float const capYd =
         DcSettings::GetFloat(bot, "BossEngageRangeCap");
 
-    // Hand off as the tank enters the boss's real aggro bubble: its notice
-    // distance + both reaches + a small margin so the engage trigger fires
-    // just before the boss would pull on its own.
-    float range = live->GetAggroRange(bot) + live->GetCombatReach()
-                + bot->GetCombatReach() + margin;
+    // Hand off as the tank enters the boss's real aggro bubble: the unified
+    // reach (AggroReach — notice distance + both reaches + margin) so the
+    // engage trigger fires just before the boss would pull on its own.
+    float range = AggroReach(bot, live, 0.0f);
     if (range < floorYd)
         range = floorYd;
     if (range > capYd)
@@ -147,10 +170,9 @@ float DcEngageGeometry::RoomAggroSphereRadius(Player* bot, Creature* boss)
 {
     if (!bot || !boss)
         return 0.0f;
-    float const computed = boss->GetAggroRange(bot) + bot->GetCombatReach()
-         + boss->GetCombatReach()
-         + DcSettings::GetFloat(bot, "AggroRangeMargin")
-         + DcSettings::GetFloat(bot, "RoomAggroPathPadding");
+    // The unified reach (AggroReach) with the path padding as the party buffer.
+    float const computed =
+        AggroReach(bot, boss, DcSettings::GetFloat(bot, "RoomAggroPathPadding"));
 
     // A flagged boss may carry a per-boss skirt override (RoomAggroBoss::skirtRadius)
     // that WIDENS this avoid sphere when the raw aggro range under-states how far the
@@ -170,16 +192,14 @@ float DcEngageGeometry::PullCommitRange(Player* bot, Unit* target, float staticR
     if (!c)
         return staticRange;             // players/totems: keep the fixed fallback
 
-    float const margin = DcSettings::GetFloat(bot, "AggroRangeMargin");
     float const floorYd = DcSettings::GetFloat(bot, "PullCommitRangeFloor");
     float const capYd = DcSettings::GetFloat(bot, "PullCommitRangeCap");
 
-    // Stop just as the tank would enter the pack's real aggro bubble: the core's own
-    // notice distance (Creature::GetAggroRange, already level/config-scaled and
-    // clamped 5-45yd) + both reaches + a small margin, so the commit fires a hair
-    // BEFORE the pack would pull on its own. Identical formula to BossEngageRange.
-    float range = c->GetAggroRange(bot) + c->GetCombatReach()
-                + bot->GetCombatReach() + margin;
+    // Stop just as the tank would enter the pack's real aggro bubble: the
+    // unified reach (AggroReach — notice distance + both reaches + margin), so
+    // the commit fires a hair BEFORE the pack would pull on its own. Identical
+    // formula to BossEngageRange.
+    float range = AggroReach(bot, c, 0.0f);
     if (range < floorYd)
         range = floorYd;
     if (range > capYd)
@@ -241,6 +261,203 @@ namespace
 
         return true;
     }
+}
+
+int DcEngageGeometry::FirstViolatedSphere(float botX, float botY,
+                                          float targetX, float targetY,
+                                          std::vector<AvoidSphere> const& spheres)
+{
+    int best = -1;
+    float bestDist2 = std::numeric_limits<float>::max();
+    for (std::size_t i = 0; i < spheres.size(); ++i)
+    {
+        AvoidSphere const& s = spheres[i];
+        if (s.r <= 0.0f)
+            continue;
+        if (!NeedsRoomAggroSkirt(botX, botY, targetX, targetY, s.x, s.y, s.r))
+            continue;
+        float const dx = s.x - botX;
+        float const dy = s.y - botY;
+        float const d2 = dx * dx + dy * dy;
+        if (d2 < bestDist2)
+        {
+            bestDist2 = d2;
+            best = static_cast<int>(i);
+        }
+    }
+    return best;
+}
+
+std::vector<DcEngageGeometry::AvoidSphere> DcEngageGeometry::BystanderSpheres(
+    Player* bot, Position const& legEnd, Unit* exclude)
+{
+    std::vector<AvoidSphere> spheres;
+    if (!bot)
+        return spheres;
+
+    float const tx = bot->GetPositionX();
+    float const ty = bot->GetPositionY();
+    float const gx = legEnd.GetPositionX();
+    float const gy = legEnd.GetPositionY();
+    float const legLen = std::sqrt((gx - tx) * (gx - tx) + (gy - ty) * (gy - ty));
+
+    float const margin = DcSettings::GetFloat(bot, "PullEnRouteMargin");
+
+    // Search the corridor the walk actually occupies: from the bot, out past the
+    // far end of the leg, wide enough to hold any mob whose own aggro reach could
+    // touch the line. kMaxAggroReach mirrors the pull classifier's clamp (45yd
+    // notice + reach).
+    constexpr float kMaxAggroReach = 50.0f;
+    float const searchRadius = legLen + kMaxAggroReach + margin;
+
+    std::list<Creature*> nearby;
+    Acore::AnyUnitInObjectRangeCheck check(bot, searchRadius);
+    Acore::CreatureListSearcher<Acore::AnyUnitInObjectRangeCheck> searcher(bot, nearby, check);
+    Cell::VisitObjects(bot, searcher, searchRadius);
+
+    // The destination pack (`exclude`) must NEVER become an avoid sphere — it is
+    // what the caller is walking to. Formation identity is the authority;
+    // distance is the fallback for the (common) unformationed pack. Advance
+    // passes nullptr: a glide has no pack it is deliberately walking to.
+    CreatureGroup const* targetGroup = exclude && exclude->ToCreature()
+        ? exclude->ToCreature()->GetFormation() : nullptr;
+    uint32 const targetFormation = targetGroup ? targetGroup->GetId() : 0u;
+    constexpr float kPackRadius = 12.0f;
+
+    spheres.reserve(nearby.size());
+    for (Creature* c : nearby)
+    {
+        if (!c || !c->IsAlive() || c == exclude)
+            continue;
+        if (!bot->IsHostileTo(c) || c->IsCritter() || c->IsTotem())
+            continue;
+        // Already fighting us: its aggro is spent, and treating it as an obstacle
+        // would make the tank orbit the pack it is currently tanking.
+        if (c->IsInCombat())
+            continue;
+        // The destination pack, by formation or by proximity to the target.
+        CreatureGroup const* grp = c->GetFormation();
+        if (targetFormation && grp && grp->GetId() == targetFormation)
+            continue;
+        if (exclude && exclude->GetExactDist2d(c) <= kPackRadius)
+            continue;
+        // Another floor: near in plan view, unreachable in fact. Same constant the
+        // pull estimate and the corridor guards use.
+        if (std::fabs(c->GetPositionZ() - bot->GetPositionZ()) > DC_Z_LEVEL_TOLERANCE)
+            continue;
+
+        AvoidSphere s;
+        s.x = c->GetPositionX();
+        s.y = c->GetPositionY();
+        s.z = c->GetPositionZ();
+        // The unified reach (AggroReach) with PullEnRouteMargin as the party
+        // buffer — the same single-source sizing the detection band
+        // (AggroRangeOf) uses with buffer 0, so the two can never disagree
+        // about what "inside aggro" means.
+        s.r = AggroReach(bot, c, margin);
+        s.guid = c->GetGUID();
+        spheres.push_back(s);
+    }
+    return spheres;
+}
+
+int DcEngageGeometry::FirstViolatedSphereOnPolyline(
+    std::vector<G3D::Vector3> const& polyline,
+    std::vector<AvoidSphere> const& spheres, size_t& legOut)
+{
+    // Legs in ROUTE ORDER — the contract difference from FirstViolatedSphere
+    // (see the header note): the sphere to stop at is the one violated earliest
+    // along the route, not the one nearest the walker.
+    for (size_t leg = 0; leg + 1 < polyline.size(); ++leg)
+    {
+        int best = -1;
+        float bestDist2 = std::numeric_limits<float>::max();
+        for (std::size_t i = 0; i < spheres.size(); ++i)
+        {
+            AvoidSphere const& s = spheres[i];
+            if (s.r <= 0.0f)
+                continue;
+            if (!NeedsRoomAggroSkirt(polyline[leg].x, polyline[leg].y,
+                                     polyline[leg + 1].x, polyline[leg + 1].y,
+                                     s.x, s.y, s.r))
+                continue;
+            // Within one leg, nearest the leg start — which makes a 2-point
+            // polyline replicate FirstViolatedSphere exactly.
+            float const dx = s.x - polyline[leg].x;
+            float const dy = s.y - polyline[leg].y;
+            float const d2 = dx * dx + dy * dy;
+            if (d2 < bestDist2)
+            {
+                bestDist2 = d2;
+                best = static_cast<int>(i);
+            }
+        }
+        if (best >= 0)
+        {
+            legOut = leg;
+            return best;
+        }
+    }
+    return -1;
+}
+
+std::optional<Position> DcEngageGeometry::EnRoutePackAvoidPoint(Player* bot,
+                                                                AiObjectContext* ctx,
+                                                                Unit* target)
+{
+    if (!bot || !ctx || !target)
+        return std::nullopt;
+    if (!DcSettings::GetBool(bot, "PullEnRouteAvoid"))
+        return std::nullopt;
+
+    float const tx = bot->GetPositionX();
+    float const ty = bot->GetPositionY();
+    float const gx = target->GetPositionX();
+    float const gy = target->GetPositionY();
+    float const legLen = std::sqrt((gx - tx) * (gx - tx) + (gy - ty) * (gy - ty));
+
+    // Nothing worth detouring around inside the last couple of yards.
+    if (legLen < 1.0f)
+        return std::nullopt;
+
+    // Sphere building is shared with the Advance glide (BystanderSpheres) so the
+    // two avoidances can never disagree about what "inside aggro" means; the
+    // single-segment nearest-the-bot ordering below stays this leg's own (it
+    // feeds the orbit — see FirstViolatedSphere's header note).
+    Position const legEnd(gx, gy, target->GetPositionZ(), 0.0f);
+    std::vector<AvoidSphere> const spheres = BystanderSpheres(bot, legEnd, target);
+
+    int const idx = FirstViolatedSphere(tx, ty, gx, gy, spheres);
+    if (idx < 0)
+    {
+        // Path is clear — drop any committed rotation so the next obstacle starts
+        // its own orbit unbiased.
+        DcApproachState& appr = ctx->GetValue<DcApproachState&>(DcKey::ApproachState)->Get();
+        appr.avoidOrbitDir = 0;
+        appr.avoidOrbitSphere.Clear();
+        return std::nullopt;
+    }
+
+    AvoidSphere const& s = spheres[static_cast<std::size_t>(idx)];
+
+    // Re-key the orbit latch to the sphere being rounded: a different pack must
+    // start its own orbit rather than inherit "round left" from one already
+    // passed. Same reasoning as the room-aggro skirt's target re-key.
+    DcApproachState& appr = ctx->GetValue<DcApproachState&>(DcKey::ApproachState)->Get();
+    if (appr.avoidOrbitSphere != s.guid)
+    {
+        appr.avoidOrbitSphere = s.guid;
+        appr.avoidOrbitDir = 0;
+    }
+
+    std::optional<Position> wp =
+        AggroSafeApproachPoint(bot, s.x, s.y, s.z, s.r, target, &appr.avoidOrbitDir);
+    if (wp)
+        DC_PULL_DEBUG("[DC:{}] en-route avoid: {} pack(s) near the leg, rounding {} "
+                      "(r={:.1f}) -> detour ({:.1f}, {:.1f}) before approaching {}",
+                      bot->GetName(), spheres.size(), s.guid.ToString(), s.r,
+                      wp->GetPositionX(), wp->GetPositionY(), target->GetName());
+    return wp;
 }
 
 std::optional<Position> DcEngageGeometry::AggroSafeApproachPoint(

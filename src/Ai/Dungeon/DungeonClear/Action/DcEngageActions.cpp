@@ -344,7 +344,26 @@ bool DungeonClearEngageActionBase::EngageDirect(Unit* target)
         // yet) and is consumed each tick; the orbit emerges from per-tick re-aiming
         // and ends the moment the direct line clears. A detour that can't be pathed
         // falls through to the straight approach rather than freezing the clear.
-        if (std::optional<Position> wp = RoomAggroSkirtPoint(target))
+        //
+        // Then the general case: bystander PACKS whose aggro arcs the walk clips.
+        // Same ordering as MoveToSkirtingRoomAggro — the boss sphere is registry-
+        // declared and unrecoverable to wake, so it keeps priority, and only one
+        // orbit ever drives a tick. THIS is the walk-in the en-route avoidance was
+        // meant to cover: every trash/room/boss engage funnels through EngageDirect,
+        // whereas MoveToSkirtingRoomAggro is reached only from the pull's room-clear
+        // branch, so wiring it there alone left the ordinary "jog across the room at
+        // the far pack" — the case the feature exists for — walking a straight line.
+        //
+        // Not inside the final approach band: those last yards are the committed
+        // run-in (COMBAT priority below, deliberately uninterruptible), and there is
+        // nothing left to route around by then — a bystander close enough to matter
+        // at that range has either already aggroed or is inside its own padded
+        // sphere with us, where the orbit has no room to help. It also keeps the
+        // per-tick grid search off the ticks that matter most.
+        std::optional<Position> wp = RoomAggroSkirtPoint(target);
+        if (!wp && distance > attackRange + DC_COMBAT_APPROACH_RANGE)
+            wp = DcEngageGeometry::EnRoutePackAvoidPoint(bot, context, target);
+        if (wp)
         {
             bool const moved = DcMoveTo(bot->GetMapId(), wp->GetPositionX(),
                                       wp->GetPositionY(), wp->GetPositionZ(),
@@ -560,7 +579,15 @@ bool DungeonClearEngageActionBase::MoveToSkirtingRoomAggro(Unit* target,
     float dx = target->GetPositionX();
     float dy = target->GetPositionY();
     float dz = target->GetPositionZ();
-    if (std::optional<Position> wp = RoomAggroSkirtPoint(target))
+    // Room-aggro boss sphere first: it is registry-declared, encounter-critical
+    // (waking the boss mid-clear is unrecoverable), and its sphere is usually the
+    // biggest thing in the room. En-route pack avoidance is the general case and
+    // only gets a say once the boss sphere is clear — two orbits fighting over
+    // one destination on the same tick is the bounce both latches exist to stop.
+    std::optional<Position> wp = RoomAggroSkirtPoint(target);
+    if (!wp)
+        wp = DcEngageGeometry::EnRoutePackAvoidPoint(bot, context, target);
+    if (wp)
     {
         dx = wp->GetPositionX();
         dy = wp->GetPositionY();

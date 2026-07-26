@@ -184,6 +184,13 @@ bool DungeonClearMath::ShouldTripCampSafety(bool inCombat, float healthPct,
     return elapsed >= graceMs;
 }
 
+bool DungeonClearMath::ShouldStandDownForPull(bool packIsPullsOwn, bool pullPhaseIdle)
+{
+    if (packIsPullsOwn)
+        return true;          // the pipeline is (or is about to be) working it
+    return !pullPhaseIdle;    // in flight: never thrash the maneuver
+}
+
 bool DungeonClearMath::ShouldDropPullVerdict(bool targetPresent, std::uint32_t lostSince,
                                              std::uint32_t now, std::uint32_t graceMs,
                                              std::uint32_t& lostSinceOut)

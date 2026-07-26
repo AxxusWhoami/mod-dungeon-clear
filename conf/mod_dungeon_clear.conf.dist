@@ -579,9 +579,12 @@ DungeonClear.BossEngageRangeCap = 30.0
 #        yards. The floor ensures a mob sitting right on the route line always
 #        counts as blocking; the cap bounds how far off the line a giant-aggro
 #        elite can still be pulled (and pads the broad-phase reject box). Only
-#        used when DynamicAggroRange = 1.
+#        used when DynamicAggroRange = 1. The band is the unified aggro reach
+#        (the mob's notice distance + both combat reaches + AggroRangeMargin) —
+#        the same sizing the en-route avoidance sphere uses, so detection and
+#        avoidance can never disagree about what "inside aggro" means.
 #
-#        Defaults: 8.0 / 30.0
+#        Defaults: 8.0 / 30.0 (cap 42.0 in Heroic — see HEROIC DEFAULTS below)
 #
 
 DungeonClear.TrashWidthFloor = 8.0
@@ -1177,6 +1180,44 @@ DungeonClear.PullPatrolWait = 1
 DungeonClear.PullPatrolWaitSec = 8.0
 
 #
+#    DungeonClear.PullEnRouteAvoid
+#        Detour the walk to a pack around OTHER packs' aggro radii. Sizing a pull
+#        answers "who joins a fight that stays put at the target", which says
+#        nothing about getting there: a pack 40yd off the line aggros nothing by
+#        standing still and everything when the tank jogs past it. With this on,
+#        the engage walk-in, the pull's tag leg, and the pull's approach across a
+#        room all bend around the nearest bystander sphere in the way, one at a
+#        time, and re-aim as each is passed. It is a preference, never a refusal:
+#        when no detour can be pathed the tank walks straight in as before, so a
+#        tight corridor cannot strand a run. The long-range glide honours it
+#        too: each Advance spline window is truncated at the first bystander
+#        sphere any of its legs violates, so the tank glides up to the hazard's
+#        threshold and stops there out of combat — a route that would thread a
+#        dense room now enters it one decision at a time — and a throttled
+#        mid-glide probe halts an in-flight window a patrol has wandered into.
+#        Overridable per run from the companion addon.
+#            0 = off (walk the direct line)
+#            1 = on
+#
+#        Default: 0 (1 in Heroic — see HEROIC DEFAULTS below)
+#
+
+DungeonClear.PullEnRouteAvoid = 0
+
+#
+#    DungeonClear.PullEnRouteMargin
+#        Yards of buffer added on top of a bystander's real aggro reach (plus both
+#        combat reaches and AggroRangeMargin) when PullEnRouteAvoid sizes the
+#        sphere to detour around. The buffer is for the PARTY, not the tank: the
+#        followers trail the tank imperfectly and cut the corner, so a detour that
+#        only just clears the pack for the tank still walks the healer through it.
+#
+#        Default: 4.0
+#
+
+DungeonClear.PullEnRouteMargin = 4.0
+
+#
 #    DungeonClear.AdvanceWindowYards
 #        Cap (yards) on one continuous-spline movement window issued by the
 #        Advance glide — the module's movement quantum on long routes. A window
@@ -1294,11 +1335,26 @@ DungeonClear.SpectateSpeed = 2.5
 #    giving up means committing into a pack that was about to be smaller.
 # DungeonClear.PullPatrolWaitSec.Heroic = 18.0
 
+#    En-route pack avoidance, ON for heroic and off for normal. The pull estimate
+#    answers "who joins a fight that STAYS PUT at the target" — the right question
+#    for sizing a pull, the wrong one for getting there. A pack 40yd off the path
+#    aggros nothing by standing still and everything when the tank jogs past it.
+#    With this on the walk to a pack detours around every OTHER pack's aggro
+#    sphere. It is a preference, never a refusal: if no detour can be snapped the
+#    tank walks straight in as before, so a tight corridor cannot strand the run.
+# DungeonClear.PullEnRouteAvoid.Heroic = 1
+
 #    Bound the Advance movement quantum to the blocking-trash lookahead
 #    (DC_CORRIDOR_LOOKAHEAD = 35): between two route evaluations the tank can
 #    never travel further than the detector can see, so a room is entered one
 #    decision at a time instead of in one 400yd unobserved glide.
 # DungeonClear.AdvanceWindowYards.Heroic = 35.0
+
+#    Unclip the blocking-trash band for heroic elites. With the unified aggro
+#    reach the common heroic elite's band lands at ~32-36yd, which a 30 cap
+#    silently clips — discarding exactly the reach the unification added. 42
+#    still keeps a lvl-70 elite's clamped 45yd notice out of band.
+# DungeonClear.TrashWidthCap.Heroic = 42.0
 
 #    Smart Rest is NOT part of the heroic profile. It was, briefly, forced on
 #    with high triggers; it made heroic runs crawl, because the high triggers

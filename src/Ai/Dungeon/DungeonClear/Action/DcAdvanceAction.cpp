@@ -1156,7 +1156,57 @@ void DungeonClearAdvanceAction::FillHopObs(AdvanceState& st, DungeonClearApproac
     obs.splineRunning =
         mm && mm->GetCurrentMovementGeneratorType() == ESCORT_MOTION_TYPE && bot->isMoving();
     if (obs.splineRunning)
-        return;  // ride outranks off-line / window
+    {
+        // Mid-glide hazard interrupt: the window cap (AdvanceWindowYards) still
+        // leaves a blind hop the length of the window, and a PATROL can walk
+        // into it after launch. Probe the remaining window against the bystander
+        // avoid-spheres on a throttle; on a hit, halt the glide and fall through
+        // so this same tick re-plans (the rebuilt window then truncates at the
+        // hazard below). Interrupt only for something NEW — the sphere behind
+        // the last interrupt is latched and skipped, so the tank can never
+        // ping-pong stop/launch against a pack it already decided to route
+        // around. Gated so normal difficulty pays nothing.
+        bool interrupt = false;
+        uint32 const nowMs = getMSTime();
+        if (DcSettings::GetFloat(bot, "AdvanceWindowYards") > 0.0f &&
+            DcSettings::GetBool(bot, "PullEnRouteAvoid") &&
+            nowMs - appr.glideHazardProbeMs >= DC_GLIDE_HAZARD_PROBE_MS)
+        {
+            appr.glideHazardProbeMs = nowMs;
+            std::vector<G3D::Vector3> const remaining =
+                DungeonPathFollower::BuildSplineWindow(
+                    bot, path, follower, DcSettings::GetFloat(bot, "AdvanceWindowYards"));
+            if (remaining.size() >= 2)
+            {
+                G3D::Vector3 const& end = remaining.back();
+                std::vector<DcEngageGeometry::AvoidSphere> const spheres =
+                    DcEngageGeometry::BystanderSpheres(
+                        bot, Position(end.x, end.y, end.z, 0.0f), nullptr);
+                size_t legIdx = 0;
+                int const idx = DcEngageGeometry::FirstViolatedSphereOnPolyline(
+                    remaining, spheres, legIdx);
+                if (idx >= 0 &&
+                    spheres[static_cast<size_t>(idx)].guid != appr.glideHazardIgnore)
+                {
+                    appr.glideHazardIgnore = spheres[static_cast<size_t>(idx)].guid;
+                    interrupt = true;
+                    DC_PULL_INFO("[DC:{}] mid-glide hazard: sphere {} (r={:.1f}) "
+                                 "entered the committed window at leg {} -> halting "
+                                 "glide to re-plan",
+                                 bot->GetName(),
+                                 spheres[static_cast<size_t>(idx)].guid.ToString(),
+                                 spheres[static_cast<size_t>(idx)].r, legIdx);
+                }
+            }
+        }
+        if (!interrupt)
+            return;  // ride outranks off-line / window
+        // Escort-aware halt is mandatory: Unit::StopMoving() does not cancel a
+        // launched escort spline (see DcMovement.h) — StopMovingOnCurrentPos()
+        // does. Getting this wrong reproduces the dc-stop-escort-spline bug class.
+        bot->StopMovingOnCurrentPos();
+        obs.splineRunning = false;  // fall through to re-plan this tick
+    }
 
     // Off the line? 2D deviation OR — the module's documented metric-mismatch
     // repeat offender — a vertical corridor-band mismatch (RouteDeviation is
@@ -1178,6 +1228,38 @@ void DungeonClearAdvanceAction::FillHopObs(AdvanceState& st, DungeonClearApproac
     // detector between two evaluations; 0 = unbounded, the historical behaviour.
     st.splineWindow = DungeonPathFollower::BuildSplineWindow(
         bot, path, follower, DcSettings::GetFloat(bot, "AdvanceWindowYards"));
+
+    // En-route avoidance on the glide itself (PullEnRouteAvoid): truncate the
+    // window at the first bystander aggro sphere any of its legs violates, so
+    // the tank glides up to the hazard's THRESHOLD and stops there out of
+    // combat — whatever should own the pack (the blocking-trash trigger, or the
+    // pull pipeline once it is inside the detection band) then gets a clean tick
+    // to do so. Deliberately truncate, not detour: a bend in the long route
+    // would need its own navmesh reachability check per bend (the
+    // under-the-map seam class of bug); truncation is safe, cheap, and
+    // composes. A violation on the very first leg leaves just the seed point
+    // (<2 points -> no window), falling through to the normal single-hop
+    // handling rather than freezing the tank.
+    if (st.splineWindow.size() >= 2 && DcSettings::GetBool(bot, "PullEnRouteAvoid"))
+    {
+        G3D::Vector3 const& end = st.splineWindow.back();
+        std::vector<DcEngageGeometry::AvoidSphere> const spheres =
+            DcEngageGeometry::BystanderSpheres(
+                bot, Position(end.x, end.y, end.z, 0.0f), nullptr);
+        size_t legIdx = 0;
+        int const idx = DcEngageGeometry::FirstViolatedSphereOnPolyline(
+            st.splineWindow, spheres, legIdx);
+        if (idx >= 0)
+        {
+            DC_PULL_DEBUG("[DC:{}] advance window: leg {} violates bystander "
+                          "sphere {} (r={:.1f}) -> truncating {} -> {} pts",
+                          bot->GetName(), legIdx,
+                          spheres[static_cast<size_t>(idx)].guid.ToString(),
+                          spheres[static_cast<size_t>(idx)].r,
+                          st.splineWindow.size(), legIdx + 1);
+            st.splineWindow.resize(legIdx + 1);
+        }
+    }
     obs.haveSplineWindow = st.splineWindow.size() >= 2;
 }
 

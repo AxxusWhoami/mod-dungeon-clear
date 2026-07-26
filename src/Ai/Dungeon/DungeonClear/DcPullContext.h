@@ -100,6 +100,28 @@ struct DcPullContext
                                                  // on any tick and it can never
                                                  // silently freeze between them.
 
+    // --- bystander-detour borrow (approach, above commit range) -----------
+    // The tank's walk out to the chosen pack normally belongs to Advance. When a
+    // BYSTANDER pack's aggro sphere sits on that line the pull borrows the tick
+    // and orbits it instead (DcEngageGeometry::EnRoutePackAvoidPoint), which is
+    // what stops a correctly-sized heroic pull arriving with two extra packs
+    // stuck to it. Advance's wedge ladder is idle while we hold the tick, so the
+    // borrow runs on a no-progress clock — see DungeonClearMath::
+    // ShouldKeepAvoidDetour, which owns the arm/restamp/give-up rule.
+    ObjectGuid  avoidLegTarget;                  // pack the clock below belongs to;
+                                                 // a different pack restarts it
+    uint32      avoidSinceMs   = 0;              // getMSTime() of the last tick that
+                                                 // closed real distance; 0 = not
+                                                 // borrowing
+    float       avoidBestDist  = 0.0f;           // closest the tank has been to
+                                                 // avoidLegTarget on this detour
+    bool        avoidGaveUp    = false;          // the borrow expired for THIS pack:
+                                                 // don't take the tick again until
+                                                 // the pack changes. One-shot on
+                                                 // purpose — re-arming would cancel
+                                                 // Advance's spline again the moment
+                                                 // the tank closed a single yard
+
     // --- CC-assist gate ---------------------------------------------------
     uint32      ccSince    = 0;                  // getMSTime() the tank's CURRENT
                                                  // continuous drag-ruining CC

@@ -257,7 +257,15 @@ inline constexpr DcSettingDef kDcSettings[] =
     { "BossEngageRangeFloor",  DcType::Float, 12,   5,  40,  true  },
     { "BossEngageRangeCap",    DcType::Float, 30,  10,  60,  true  },
     { "TrashWidthFloor",       DcType::Float,  8,   4,  30,  true  },
-    { "TrashWidthCap",         DcType::Float, 30,  10,  60,  true  },
+    // TrashWidthCap clamps the per-candidate blocking-trash band (AggroRangeOf).
+    // HEROIC: 42 — with the unified reach (AggroReach) the band includes both
+    // combat reaches and the margin, so a common heroic elite's 22-28yd notice
+    // lands at ~32-36yd of reach and a 30 cap silently clips exactly the yards
+    // the unification added. 42 still keeps a lvl-70 elite's clamped 45yd notice
+    // out of band. The along-route reach (DC_CORRIDOR_LOOKAHEAD) is deliberately
+    // NOT raised with it — that is the window cap's job (AdvanceWindowYards),
+    // and raising both at once makes the live signal unattributable.
+    { "TrashWidthCap",         DcType::Float, 30,  10,  60,  true,  42 },
     { "DynamicAggroRange",     DcType::Bool,   1,   0,   1,  true  },
     { "AggroRangeMargin",      DcType::Float,  2,   0,  10,  true  },
 
@@ -526,6 +534,39 @@ inline constexpr DcSettingDef kDcSettings[] =
     // was about to be two mobs smaller.
     { "PullPatrolWait",        DcType::Bool,   1,   0,   1,  true  },
     { "PullPatrolWaitSec",     DcType::Float,  8,   1,  30,  true,  18 },
+
+    // En-route pack avoidance. The pull estimate answers "who joins a fight that
+    // STAYS PUT at the target" — right for sizing the pull, wrong for getting
+    // there. A pack 40yd off the path aggros nothing by standing still and
+    // everything when the tank jogs past it, and the approach had no notion of
+    // other packs' aggro radii at all. Live Sethekk heroic: a pull predicted at 3
+    // mobs was fought by 11, with three uninvolved packs 36-64yd from the target.
+    //
+    // With this on, the walk to a trash pack detours around every OTHER pack's
+    // aggro sphere, reusing the room-aggro skirt's orbit one sphere at a time
+    // (nearest violator first). It is a PREFERENCE, never a refusal — if no
+    // detour can be snapped the tank walks straight in exactly as before, so a
+    // tight corridor can never strand the run.
+    //
+    // Three legs bend: the engage walk-in (EngageDirect — every trash/room/boss
+    // engage), the pull's tag leg, and the pull's Idle approach above commit
+    // range, which is where a ROOM gets crossed and therefore where the bystander
+    // packs actually are. That last one borrows the tick from Advance and so runs
+    // on a no-progress clock (DcPullContext::avoidGaveUp) — an orbit that stops
+    // closing hands the walk straight back. Advance's long-range glide honours
+    // it too, by TRUNCATION rather than detour: each spline window stops at the
+    // first bystander sphere any of its legs violates (FillHopObs), and a
+    // throttled mid-glide probe halts an in-flight window a patrol has wandered
+    // into — both share BystanderSpheres/FirstViolatedSphereOnPolyline with the
+    // pull legs so the avoidances can never disagree about "inside aggro".
+    //
+    // Heroic-only by default: it costs a grid search per approach tick, and on
+    // normal difficulty an accidental extra pack is a rough fight rather than a
+    // wipe. PullEnRouteMargin is the buffer added on top of the mob's real aggro
+    // reach and both combat reaches, covering the party cutting the corner behind
+    // the tank. See DcEngageGeometry::EnRoutePackAvoidPoint.
+    { "PullEnRouteAvoid",      DcType::Bool,   0,   0,   1,  true,   1 },
+    { "PullEnRouteMargin",     DcType::Float,  4,   0,  20,  true  },
 
     // Advance movement quantum: cap (yards of accumulated 3D length) on one
     // continuous-spline window issued by the Advance glide. A window is a
