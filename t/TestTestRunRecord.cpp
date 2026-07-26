@@ -124,6 +124,91 @@ TEST(DcTestRunRecordTest, WipeFieldsAreAlwaysPresentAndDefaultEmpty)
     EXPECT_NE(line.find("\"wipeOpponent\":\"\""), std::string::npos);
 }
 
+// ---- death log + roster ----------------------------------------------------------
+
+TEST(DcTestRunRecordTest, DeathsSerializeWhoDiedAndToWhat)
+{
+    Record r = SampleRecord();
+    r.result = "disabled";
+    r.failReason = "run disabled: Bero died and no one left alive can resurrect "
+                   "\xe2\x80\x94 killed by Anzu";
+    r.deaths.push_back({410, "Bero", "Anzu", 23035, true});
+    r.deaths.push_back({413, "Olanne", "Anzu", 23035, true});
+
+    std::string const line = ToJsonl(r);
+    EXPECT_NE(line.find("\"deaths\":[{\"t\":410,\"name\":\"Bero\",\"opponent\":\"Anzu\","
+                        "\"opponentEntry\":23035,\"onBoss\":true},"
+                        "{\"t\":413,\"name\":\"Olanne\",\"opponent\":\"Anzu\","
+                        "\"opponentEntry\":23035,\"onBoss\":true}]"),
+              std::string::npos);
+    EXPECT_EQ(Count(line, "\"name\":\"Olanne\""), 1u);
+}
+
+TEST(DcTestRunRecordTest, DeathOutOfCombatCarriesNoOpponent)
+{
+    // A fall, a hazard — nothing was on the party, and the record must say so
+    // rather than borrow the last boss the party fought.
+    Record r = SampleRecord();
+    r.deaths.push_back({88, "Tzaihran", "", 0, false});
+
+    std::string const line = ToJsonl(r);
+    EXPECT_NE(line.find("\"opponent\":\"\",\"opponentEntry\":0,\"onBoss\":false"),
+              std::string::npos);
+}
+
+TEST(DcTestRunRecordTest, DeathsAndRosterKeysArePresentWhenEmpty)
+{
+    std::string const line = ToJsonl(SampleRecord());
+    EXPECT_NE(line.find("\"bossRoster\":[]"), std::string::npos);
+    EXPECT_NE(line.find("\"deaths\":[]"), std::string::npos);
+}
+
+TEST(DcTestRunRecordTest, BossRosterSerializesInProgressionOrder)
+{
+    Record r = SampleRecord();
+    r.bossRoster = {"Rhahk'Zor", "Sneed", "Gilnid", "Mr. Smite", "Cookie",
+                    "Edwin VanCleef"};
+
+    std::string const line = ToJsonl(r);
+    EXPECT_NE(line.find("\"bossRoster\":[\"Rhahk'Zor\",\"Sneed\",\"Gilnid\","
+                        "\"Mr. Smite\",\"Cookie\",\"Edwin VanCleef\"]"),
+              std::string::npos);
+}
+
+TEST(DcTestRunRecordTest, SchemaIsSeven)
+{
+    EXPECT_NE(ToJsonl(SampleRecord()).find("\"schema\":7"), std::string::npos);
+}
+
+// ---- pull log --------------------------------------------------------------------
+
+TEST(DcTestRunRecordTest, PullsSerializePredictedAgainstObserved)
+{
+    Record r = SampleRecord();
+    // A well-called Leeroy, then the pull that ate the run: three predicted,
+    // eight turned up.
+    r.pulls.push_back({120, 17690, 2, 6, 15, 2, 2, false, false});
+    r.pulls.push_back({164, 17691, 3, 9, 15, 8, 8, true, true});
+
+    std::string const line = ToJsonl(r);
+    EXPECT_NE(line.find("\"pulls\":[{\"t\":120,\"entry\":17690,\"predicted\":2,"
+                        "\"predictedThirds\":6,\"ceilingThirds\":15,\"observed\":2,"
+                        "\"observedElites\":2,\"advanced\":false,\"wipedHere\":false},"
+                        "{\"t\":164,\"entry\":17691,\"predicted\":3,"
+                        "\"predictedThirds\":9,\"ceilingThirds\":15,\"observed\":8,"
+                        "\"observedElites\":8,\"advanced\":true,\"wipedHere\":true}]"),
+              std::string::npos);
+}
+
+TEST(DcTestRunRecordTest, PullKeysArePresentWhenEmpty)
+{
+    // Off/On pull modes write no entries; the keys must still be there so a
+    // consumer never has to distinguish "absent" from "none".
+    std::string const line = ToJsonl(SampleRecord());
+    EXPECT_NE(line.find("\"pulls\":[]"), std::string::npos);
+    EXPECT_NE(line.find("\"pullsElided\":0"), std::string::npos);
+}
+
 TEST(DcTestRunRecordTest, HeroicSerializesTrue)
 {
     Record r = SampleRecord();

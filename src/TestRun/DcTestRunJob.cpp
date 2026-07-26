@@ -36,6 +36,7 @@
 #include "DcStrategyGate.h"
 #include "Ai/Dungeon/DungeonClear/Action/DcActionShared.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
+#include "Ai/Dungeon/DungeonClear/DcPullContext.h"
 #include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
@@ -402,9 +403,10 @@ DcTestRunLive::RunSnapshot DcTestRunJob::Snapshot() const
     // rather than only in the finished record.
     if (_wipedForMs > 0)
     {
+        DcTestRun::Engagement const blame = DeathBlame();
         s.wiped = true;
-        s.wipeOnBoss = _engaged.isBoss;
-        s.wipeOpponent = _engaged.name;
+        s.wipeOnBoss = blame.isBoss;
+        s.wipeOpponent = blame.name;
     }
 
     std::lock_guard<std::mutex> lock(_obsMutex);
@@ -779,6 +781,10 @@ void DcTestRunJob::TickStarting()
             ref.name = b.name;
             ref.isBoss = b.kind == DungeonAnchorKind::Boss;
             _roster.push_back(ref);
+            // Objectives (anchor kinds) carry no name worth aggregating across a
+            // plan — only real bosses go into the reported roster.
+            if (ref.isBoss)
+                _record.bossRoster.push_back(ref.name);
         }
         _record.bossesTotal = static_cast<uint32>(_roster.size());
 
@@ -806,6 +812,66 @@ void DcTestRunJob::TickStarting()
 
     if (_stageMs >= START_TIMEOUT_MS)
         FailSetup("dc on did not take (look for 'DC command refused' in the DC log)");
+}
+
+// File a death for every member who went from standing to a corpse since the
+// last sample, stamped with what the party was fighting at the time.
+//
+// MUST run before TrackEngagement folds this tick's sample: `_engaged` still
+// holds the picture from the last tick in which the victim was alive, which is
+// exactly the mob to blame. Folding first would attribute the death to whatever
+// survives the fold — nothing at all, once the survivors drop combat.
+//
+// Only members on the leader's map are watched. A bot who left the instance (or
+// logged out) is not a casualty, and its absence must not be read as a death.
+void DcTestRunJob::TrackDeaths(Player* tank)
+{
+    if (!tank)
+        return;
+
+    auto observe = [this](Player* member)
+    {
+        if (!member || !member->IsInWorld())
+            return;
+        bool const alive = member->IsAlive();
+        auto const [it, fresh] = _aliveLast.emplace(member->GetGUID(), alive);
+        if (fresh)
+            return;  // seeding this member — no edge to report yet
+
+        bool const wasAlive = it->second;
+        it->second = alive;
+        if (wasAlive == alive || alive)
+            return;
+
+        DcTestRunRecord::DeathEntry death;
+        death.t = _totalMs / 1000;
+        death.name = member->GetName();
+        death.opponent = _engaged.name;
+        death.opponentEntry = _engaged.entry;
+        death.onBoss = _engaged.isBoss;
+        _record.deaths.push_back(death);
+        // Deliberately overwritten even when the latch is empty: this means
+        // "what the LAST death was to", not "the last death that had a killer".
+        // A member who dropped combat and then fell off a ledge must not be
+        // filed against the boss the party disengaged from ten minutes earlier.
+        _lastDeathEngaged = _engaged;
+    };
+
+    auto onTankMap = [tank](Player* member)
+    { return member && member->IsInWorld() && member->GetMapId() == tank->GetMapId(); };
+
+    if (onTankMap(tank))
+        observe(tank);
+    if (Group* group = tank->GetGroup())
+        for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+            if (Player* member = ref->GetSource(); member != tank && onTankMap(member))
+                observe(member);
+}
+
+// Who to blame for a run people died in. DcTestRun::BlameFor owns the rule.
+DcTestRun::Engagement DcTestRunJob::DeathBlame() const
+{
+    return DcTestRun::BlameFor(_engaged, _lastDeathEngaged);
 }
 
 // Gather this sample's combat picture off the party and fold it into the
@@ -880,6 +946,112 @@ void DcTestRunJob::TrackEngagement(Player* tank)
                 scan(member);
 
     _engaged = DcTestRun::UpdateEngagement(_engaged, sample);
+}
+
+// File the pull observation currently in flight, if any. `wipedHere` marks the
+// pull the run died on — the single most useful row in the log, since it names
+// the pack that ended the run alongside what the governor thought it was.
+void DcTestRunJob::ClosePull(bool wipedHere)
+{
+    if (!_pullOpen)
+        return;
+    _pullOpen = false;
+    _pullEntry.wipedHere = wipedHere;
+    if (_record.pulls.size() < DcTestRunRecord::kPullLog)
+        _record.pulls.push_back(_pullEntry);
+    else
+        ++_record.pullsElided;
+}
+
+// Pair each Dynamic-pull verdict with the number of mobs that actually turned
+// up for it. See DcTestRunRecord::PullEntry for why the pairing (not either
+// number alone) is what diagnoses an over-pulling tank.
+//
+// The observation runs on the leader's DcPullContext:
+//
+//   decisionSeq changed  -> a NEW pack was latched: close the old record, open
+//                           one stamped with this verdict's prediction.
+//   decision == None     -> the governor dropped its verdict (pack dead, target
+//                           lost past the grace); once the party is also out of
+//                           combat the fight is over and the record closes.
+//
+// The observed count is the union, over every alive on-map member, of what it is
+// swinging at and what is swinging at it — the same reach TrackEngagement uses,
+// widened from "name one opponent" to "count them all". Sampled at MONITOR_STEP_MS,
+// so it is a floor on what was fought: a mob that joined and died inside one
+// second never appears.
+void DcTestRunJob::TrackPulls(Player* tank)
+{
+    if (!tank)
+        return;
+    PlayerbotAI* ai = GET_PLAYERBOT_AI(tank);
+    AiObjectContext* ctx = ai ? ai->GetAiObjectContext() : nullptr;
+    if (!ctx)
+        return;
+
+    DcPullContext const& pull = ctx->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
+
+    if (pull.decisionSeq != _pullSeq)
+    {
+        ClosePull();
+        _pullSeq = pull.decisionSeq;
+        _pullEntry = DcTestRunRecord::PullEntry{};
+        _pullEntry.t = _totalMs / 1000;
+        _pullEntry.targetEntry = pull.decisionTargetEntry;
+        _pullOpen = true;
+    }
+
+    if (!_pullOpen)
+        return;
+
+    // Refresh the prediction every sample while the record is open: the governor
+    // re-checks a standing Leeroy on a throttle and may UPGRADE it to Advanced,
+    // which re-estimates the pack. What we want on file is the estimate the
+    // COMMITTED verdict was taken from, i.e. the last one before the pull ends.
+    _pullEntry.predictedCount = pull.predictedCount;
+    _pullEntry.predictedThirds = pull.predictedThirds;
+    _pullEntry.ceilingThirds = pull.predictedCeiling;
+    if (pull.decision == DcPullDecisionCode::Advanced)
+        _pullEntry.advanced = true;
+
+    std::set<ObjectGuid> engaged;
+    std::uint32_t elites = 0;
+    auto consider = [&](Unit const* u)
+    {
+        if (!u || !u->IsAlive())
+            return;
+        Creature const* c = u->ToCreature();
+        if (!c || c->IsCritter() || c->IsTotem())
+            return;
+        if (engaged.insert(c->GetGUID()).second && c->isElite())
+            ++elites;
+    };
+    auto scan = [&](Player* member)
+    {
+        if (!member || !member->IsAlive() || !member->IsInWorld() ||
+            member->GetMapId() != tank->GetMapId() || !member->IsInCombat())
+            return;
+        consider(member->GetVictim());
+        for (Unit const* attacker : member->getAttackers())
+            consider(attacker);
+    };
+    scan(tank);
+    if (Group* group = tank->GetGroup())
+        for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+            if (Player* member = ref->GetSource(); member && member != tank)
+                scan(member);
+
+    if (engaged.size() > _pullEntry.observedMax)
+    {
+        _pullEntry.observedMax = static_cast<std::uint32_t>(engaged.size());
+        _pullEntry.observedElites = elites;
+    }
+
+    // Verdict dropped AND the fight resolved: this pull is history. Holding the
+    // record open until combat clears is what keeps a Leeroy on file — its
+    // verdict drops the moment the pack dies, which is also when the fight ends.
+    if (pull.decision == DcPullDecisionCode::None && engaged.empty())
+        ClosePull();
 }
 
 // Is anyone in the party on the leader's map a corpse right now? Separates a
@@ -1040,8 +1212,11 @@ void DcTestRunJob::TickMonitoring(uint32 dt)
         _lastVictimHpPct = victimHpPct;
 
         // Sampled every monitor step while somebody is still standing, so the
-        // wipe verdict below can name what took the party down.
+        // wipe verdict below can name what took the party down. Deaths are read
+        // first, against the previous tick's latch — see TrackDeaths.
+        TrackDeaths(tank);
         TrackEngagement(tank);
+        TrackPulls(tank);
 
         if (next.has_value() && next->mapId == tank->GetMapId())
         {
@@ -1145,8 +1320,18 @@ void DcTestRunJob::TickMonitoring(uint32 dt)
             break;
         case DcTestRun::Verdict::FailDisabled:
         {
-            std::lock_guard<std::mutex> lock(_obsMutex);
-            failReason = "run disabled: " + _disableReason;
+            std::string reason;
+            {
+                std::lock_guard<std::mutex> lock(_obsMutex);
+                reason = _disableReason;
+            }
+            failReason = "run disabled: " + DcTestRun::StripResumeHint(reason);
+            // The rez-recovery bailouts ("no one left alive can resurrect",
+            // "couldn't get X resurrected in time") name the corpse but never
+            // what put it there — and both fire after combat has ended, so the
+            // blame has to come off the death log.
+            if (AnyMemberDead(FindTank()))
+                failReason += DcTestRun::BlameSuffix(DeathBlame());
             break;
         }
         case DcTestRun::Verdict::FailPartyWiped:
@@ -1154,12 +1339,13 @@ void DcTestRunJob::TickMonitoring(uint32 dt)
             std::string const who =
                 _lastAliveMember.empty() ? std::string()
                                          : " (last standing: " + _lastAliveMember + ")";
-            if (_engaged.Empty())
+            DcTestRun::Engagement const blame = DeathBlame();
+            if (blame.Empty())
                 failReason = "party wiped out of combat" + who;
-            else if (_engaged.isBoss)
-                failReason = "party wiped on " + _engaged.name + who;
+            else if (blame.isBoss)
+                failReason = "party wiped on " + blame.name + who;
             else
-                failReason = "party wiped to trash: " + _engaged.name + who;
+                failReason = "party wiped to trash: " + blame.name + who;
             break;
         }
         case DcTestRun::Verdict::FailPausedTimeout:
@@ -1211,12 +1397,19 @@ void DcTestRunJob::Finish(DcTestRun::Verdict verdict, std::string const& failRea
     // "disabled" with a corpse in the party, and "what killed us" is the same
     // question there. Left empty for every outcome nobody died in, so a
     // successful run that lost (and rezzed) a member carries no stale opponent.
-    if (verdict == DcTestRun::Verdict::FailPartyWiped || AnyMemberDead(FindTank()))
+    bool const diedHere =
+        verdict == DcTestRun::Verdict::FailPartyWiped || AnyMemberDead(FindTank());
+    if (diedHere)
     {
-        _record.wipeOnBoss = _engaged.isBoss;
-        _record.wipeOpponentEntry = _engaged.entry;
-        _record.wipeOpponent = _engaged.name;
+        DcTestRun::Engagement const blame = DeathBlame();
+        _record.wipeOnBoss = blame.isBoss;
+        _record.wipeOpponentEntry = blame.entry;
+        _record.wipeOpponent = blame.name;
     }
+    // File the pull still in flight, flagged when the run ended on corpses: that
+    // row is the pull the party did not survive, complete with what the governor
+    // predicted for it.
+    ClosePull(diedHere);
     {
         std::lock_guard<std::mutex> lock(_obsMutex);
         _record.disableReason = _disableReason;

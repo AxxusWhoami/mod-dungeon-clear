@@ -149,6 +149,26 @@ struct DcPullContext
                                                  // Grace latch for DungeonClearMath::
                                                  // ShouldDropPullVerdict.
 
+    // --- verdict telemetry (read-only for everyone but the governor) -------
+    // What the classifier PREDICTED for the pack the standing verdict applies to,
+    // kept so an observer can line it up against how many mobs actually turned
+    // up. Nothing in the pull FSM reads these — they exist because "the tank
+    // over-pulls in heroic" is two different bugs (the estimate is wrong / the
+    // ceiling is wrong) that look identical from the outside, and only the
+    // predicted-vs-observed delta tells them apart. Refreshed on every verdict
+    // resolve (a Leeroy->Advanced upgrade re-stamps them); the harness samples
+    // the last values standing before the pull closes.
+    //
+    // `decisionSeq` is the thing an observer actually keys on: a monotone counter
+    // bumped once per NEW pack, so "a new pull started" is detectable even when
+    // the same pack is re-pulled after a fizzle (where decisionTarget alone never
+    // changes) and across the Dynamic verdict being dropped and re-taken.
+    uint32      decisionSeq        = 0;  // ++ per new pack latched
+    uint32      decisionTargetEntry = 0; // creature entry of decisionTarget
+    uint32      predictedThirds    = 0;  // DcPullClassification::fullCount
+    uint32      predictedCount     = 0;  // DcPullClassification::bodyCount
+    uint32      predictedCeiling   = 0;  // DcPullClassification::ceiling
+
     void Reset() { *this = DcPullContext{}; }
 
     // The ONLY way to transition into Engage (used by DcSetPullPhase and

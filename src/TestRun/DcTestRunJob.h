@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -135,7 +136,11 @@ private:
     void TickTeleporting();
     void TickStarting();
     void TickMonitoring(uint32 dt);
+    void TrackDeaths(Player* tank);
     void TrackEngagement(Player* tank);
+    void TrackPulls(Player* tank);
+    void ClosePull(bool wipedHere = false);
+    DcTestRun::Engagement DeathBlame() const;
     static bool AnyMemberDead(Player* tank);
 
     void FailSetup(std::string const& why);
@@ -202,6 +207,27 @@ private:
     // TrackEngagement gathers the sample off live players; the fold rule
     // (including "a wipe never clears the latch") is DcTestRun::UpdateEngagement.
     DcTestRun::Engagement _engaged;
+
+    // Alive/dead as of the previous monitor sample, per member, so TrackDeaths
+    // fires on the alive->dead EDGE (and again after a rez, which is the point:
+    // "died three times to the same pack" is the diagnosis). A guid absent from
+    // the map is being seeded, never reported — the first sample must not file
+    // a death for someone who was already down when monitoring opened.
+    std::unordered_map<ObjectGuid, bool> _aliveLast;
+    // The engagement latched at the most recent death. The live latch clears the
+    // moment the survivors drop combat, so a run that ends on a failed rez has
+    // nothing left to blame; this keeps the killer alive for the post-mortem.
+    DcTestRun::Engagement _lastDeathEngaged;
+
+    // Pull observation in flight. `_pullSeq` mirrors the leader's
+    // DcPullContext::decisionSeq: a change is the edge that closes the previous
+    // pull's record and opens the next, which is why the counter (and not the
+    // target GUID) is what the governor exposes — a re-pull of the same pack
+    // after a fizzle is a new pull and must not be folded into the old one.
+    std::uint32_t _pullSeq = 0;
+    bool _pullOpen = false;
+    DcTestRunRecord::PullEntry _pullEntry;
+
     bool _wasPaused = false;
 
     // --- observer-written (any thread) --------------------------------------

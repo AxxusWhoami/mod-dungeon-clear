@@ -247,9 +247,16 @@ void DcTestRunManager::Tick(uint32 diff)
                     outcome.durationS = rec.durationS;
                     outcome.bossesKilled = rec.bossesKilled;
                     outcome.bossesTotal = rec.bossesTotal;
+                    outcome.bossRoster = rec.bossRoster;
+                    outcome.wipeOpponent = rec.wipeOpponent;
+                    outcome.wipeOnBoss = rec.wipeOnBoss;
                     for (DcTestRunRecord::BossKill const& kill : rec.bossTimeline)
                         if (kill.via == "mask")
                             outcome.bossKills.push_back(kill.name);
+                    outcome.pulls.reserve(rec.pulls.size());
+                    for (DcTestRunRecord::PullEntry const& p : rec.pulls)
+                        outcome.pulls.push_back({p.predictedCount, p.observedMax,
+                                                 p.advanced, p.wipedHere});
                     DcTestPlanManager::Instance().OnRunFinished((*it)->PlanId(),
                                                                 std::move(outcome));
                 }

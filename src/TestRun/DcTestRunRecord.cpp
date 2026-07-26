@@ -106,7 +106,14 @@ namespace DcTestRunRecord
         AppendEscaped(s, rec.disableReason);
         s << ",\"bossesTotal\":" << rec.bossesTotal
           << ",\"bossesKilled\":" << rec.bossesKilled
-          << ",\"bossTimeline\":[";
+          << ",\"bossRoster\":[";
+        for (std::size_t i = 0; i < rec.bossRoster.size(); ++i)
+        {
+            if (i)
+                s << ',';
+            AppendEscaped(s, rec.bossRoster[i]);
+        }
+        s << "],\"bossTimeline\":[";
         for (std::size_t i = 0; i < rec.bossTimeline.size(); ++i)
         {
             BossKill const& b = rec.bossTimeline[i];
@@ -118,7 +125,37 @@ namespace DcTestRunRecord
             AppendEscaped(s, b.via);
             s << '}';
         }
-        s << "],\"statusTimeline\":[";
+        s << "],\"deaths\":[";
+        for (std::size_t i = 0; i < rec.deaths.size(); ++i)
+        {
+            DeathEntry const& d = rec.deaths[i];
+            if (i)
+                s << ',';
+            s << "{\"t\":" << d.t << ",\"name\":";
+            AppendEscaped(s, d.name);
+            s << ",\"opponent\":";
+            AppendEscaped(s, d.opponent);
+            s << ",\"opponentEntry\":" << d.opponentEntry
+              << ",\"onBoss\":" << (d.onBoss ? "true" : "false") << '}';
+        }
+        s << "],\"pulls\":[";
+        for (std::size_t i = 0; i < rec.pulls.size(); ++i)
+        {
+            PullEntry const& p = rec.pulls[i];
+            if (i)
+                s << ',';
+            s << "{\"t\":" << p.t
+              << ",\"entry\":" << p.targetEntry
+              << ",\"predicted\":" << p.predictedCount
+              << ",\"predictedThirds\":" << p.predictedThirds
+              << ",\"ceilingThirds\":" << p.ceilingThirds
+              << ",\"observed\":" << p.observedMax
+              << ",\"observedElites\":" << p.observedElites
+              << ",\"advanced\":" << (p.advanced ? "true" : "false")
+              << ",\"wipedHere\":" << (p.wipedHere ? "true" : "false") << '}';
+        }
+        s << "],\"pullsElided\":" << rec.pullsElided
+          << ",\"statusTimeline\":[";
         {
             std::vector<StatusEntry> const& st = rec.statusTimeline;
             bool first = true;
