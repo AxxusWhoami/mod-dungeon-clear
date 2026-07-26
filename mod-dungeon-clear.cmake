@@ -32,6 +32,7 @@ if (BUILD_TESTING)
             "${MOD_PATH}/t/TestMechanarElevatorProbe.cpp"
             "${MOD_PATH}/t/TestStrategyGate.cpp"
             "${MOD_PATH}/t/TestRelevanceLadder.cpp"
+            "${MOD_PATH}/t/TestSettingsRegistry.cpp"
             "${MOD_PATH}/t/TestTestRunVerdict.cpp"
             "${MOD_PATH}/t/TestTestDungeonRegistry.cpp"
             "${MOD_PATH}/t/TestTestRunRecord.cpp"

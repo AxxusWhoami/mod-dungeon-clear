@@ -17,6 +17,22 @@
 # and clamps every override to the registry range (see DcSettingsRegistry.h);
 # the values here remain the fallback for anyone without an override. The
 # DEBUGGING and ADVANCED PATHING settings are server-only and NOT overridable.
+#
+# HEROIC DIFFICULTY: a handful of settings resolve to a different built-in
+# default while the run is inside a dungeon at Heroic difficulty, because heroic
+# trash is a different problem (every mob elite, a mis-sized pull ends the run).
+# Any setting can be given its own heroic value by appending ".Heroic" to the
+# key:
+#
+#     DungeonClear.PullDynamicMaxLeeroyMobs = 5          # normal difficulty
+#     DungeonClear.PullDynamicMaxLeeroyMobs.Heroic = 2   # heroic difficulty
+#
+# The full resolution order is: per-player override -> "<key>.Heroic" (heroic
+# runs only) -> built-in heroic default -> "<key>" -> built-in default. A player
+# override is difficulty-blind and beats both heroic layers, so a value someone
+# set for their run is never overruled by a heroic default. Every key that ships
+# with a heroic default is listed in the HEROIC DEFAULTS section at the end of
+# the general settings; writing a "<key>.Heroic" line replaces it.
 
 ########################################
 # GENERAL SETTINGS  (per-player overridable — see note above)
@@ -1040,6 +1056,26 @@ DungeonClear.PullCommitRangeCap = 34.0
 DungeonClear.PullDynamicMaxLeeroyMobs = 5
 
 #
+#    DungeonClear.PullForceAdvanced
+#        Dynamic pull only. With 1, EVERY pack is pulled with the careful
+#        Advanced pull-to-camp maneuver regardless of how small the estimate
+#        above says it is. This exists so "always Advanced" can be measured
+#        against a tuned ceiling rather than guessed at — it is not the
+#        recommended way to make heroic runs safe. Advanced runs the full
+#        form/advance/drag-back sequence on single-mob packs too, which is pure
+#        run time, and it has failure modes a Leeroy does not (the drag can
+#        fizzle, the camp can land across a vertical seam).
+#
+#        To force it for heroic runs only, use the difficulty suffix rather than
+#        turning it on globally:
+#            DungeonClear.PullForceAdvanced.Heroic = 1
+#
+#        Default: 0 (let the estimate decide)
+#
+
+DungeonClear.PullForceAdvanced = 0
+
+#
 #    DungeonClear.PullCombatSpread
 #        Dynamic pull only. Yards added to every mob's proximity-aggro reach in the
 #        estimate above, modelling the party drifting to flank/kite/reposition
@@ -1150,6 +1186,80 @@ DungeonClear.SpectateEnable = 1
 #
 
 DungeonClear.SpectateSpeed = 2.5
+
+###############################################################################
+# HEROIC DEFAULTS
+#
+#   Every key below ships with a different built-in default while the run is
+#   inside a dungeon at Heroic difficulty. The lines are COMMENTED OUT and show
+#   the value the module already uses — uncomment one only to change it. Normal
+#   difficulty is untouched by anything in this section.
+#
+#   Why these and not others: in a TBC heroic every trash mob is elite and a
+#   mis-sized pull ends the run rather than costing a rough fight, so the pull
+#   safety profile has to change with the difficulty. Everything else — routing,
+#   doors, looting, events — behaves identically on both.
+###############################################################################
+
+#    The pull ceiling. This is the important one. The Leeroy-vs-Advanced verdict
+#    weighs the estimated pack in thirds of an elite (elite = 3, normal = 1),
+#    which on normal difficulty stops a room of weak trash forcing the careful
+#    maneuver. In a heroic every mob is elite, so the weighting collapses to a
+#    head count and a ceiling of 5 face-pulls five elites. 2 is what a human
+#    tank pulls.
+# DungeonClear.PullDynamicMaxLeeroyMobs.Heroic = 2
+
+#    Pad every mob's proximity reach further, so a neighbour that is merely NEAR
+#    the fight is counted by the estimate instead of joining it uncounted. A
+#    lvl-72 elite has ~24yd of real reach, so 20 counts neighbours to ~44yd of
+#    the pull target — most of a heroic room. Deliberately loud: a pack that
+#    classifies LEEROY gets no camp, no party hold and no drag-back if the pull
+#    goes wrong, so pushing packs to ADVANCED is what arms that machinery. Drop
+#    toward 14-16 if runs trade wipes for stalls.
+# DungeonClear.PullCombatSpread.Heroic = 20.0
+
+#    Camp geometry: drag further back and demand more clearance from other
+#    packs. MaxDrag rises with SafeRadius or the placer cannot satisfy the
+#    bigger radius and silently falls back to the point it would have picked.
+# DungeonClear.PullSetback.Heroic = 35.0
+# DungeonClear.PullCampSafeRadius.Heroic = 35.0
+# DungeonClear.PullMaxDrag.Heroic = 55.0
+# DungeonClear.PullRangedMaxDrag.Heroic = 85.0
+
+#    Stop and form further out from the pack. (The commit-range CAP is NOT
+#    raised: its job is to keep the commit point inside the ~35yd pull-detection
+#    band, which is a property of the code, not of the difficulty.)
+# DungeonClear.PullCommitRangeFloor.Heroic = 20.0
+
+#    Trail the scouting tank further back — the party walking into a pack's
+#    aggro arc before the tank has decided anything is a top source of the pulls
+#    nobody chose.
+# DungeonClear.PullDynamicPartyLag.Heroic = 22.0
+
+#    Give the tank a real threat head start, and hold pets longer still. The
+#    panic bar rises with it: with the party held twice as long, a tank that is
+#    losing must be able to call them in sooner.
+# DungeonClear.PullPlayerReleaseDelay.Heroic = 3.0
+# DungeonClear.PullPetReleaseDelay.Heroic = 4.5
+# DungeonClear.PullThreatLeadPanicHp.Heroic = 70.0
+
+#    Release a held passive member while it still has the health to survive it.
+# DungeonClear.PullSafetyHpPct.Heroic = 65.0
+
+#    Actually wait a patrol out. 8s gives up on plenty of real patrol loops, and
+#    giving up means committing into a pack that was about to be smaller.
+# DungeonClear.PullPatrolWaitSec.Heroic = 18.0
+
+#    Smart Rest is NOT part of the heroic profile. It was, briefly, forced on
+#    with high triggers; it made heroic runs crawl, because the high triggers
+#    latch the whole party at nearly every pack and the stop-and-eat cycles cost
+#    more run time than the deaths they prevent. It is opt-in on both
+#    difficulties now (DungeonClear.SmartRest above, or the addon per run). To
+#    bring it back for heroics only, uncomment these:
+# DungeonClear.SmartRest.Heroic = 1
+# DungeonClear.SmartRestHealthPct.Heroic = 70
+# DungeonClear.SmartRestDpsManaPct.Heroic = 35
+# DungeonClear.SmartRestHealerManaPct.Heroic = 60
 
 ###############################################################################
 # `.dc test` — AUTOMATED DUNGEON TEST RUNS

@@ -643,7 +643,13 @@ void DcPullPlanner::UpdateDynamicPullMode(PlayerbotAI* botAI, AiObjectContext* c
     // shrunk exclusion turns into a dead-band / boss wake. Advanced is always the
     // safe direction, so forcing it for every pack in that room (A, robots, B alike)
     // is fine. See DcTargeting::RoomClearForcesAdvanced + RoomAggroBoss::pullOutRadius.
-    bool const forceAdv = DcTargeting::RoomClearForcesAdvanced(bot, context);
+    //
+    // PullForceAdvanced is the second, operator-driven reason: an A/B lever for
+    // measuring "always Advanced" against the tuned ceiling (off by default on
+    // both difficulties — see the registry row). Same direction as the room-clear
+    // force, so they simply OR together.
+    bool const forceAdv = DcTargeting::RoomClearForcesAdvanced(bot, context) ||
+                          DcSettings::GetBool(bot, "PullForceAdvanced");
 
     // Per-pack latch, UPGRADE-ONLY while approaching the SAME pack.
     //

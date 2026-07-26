@@ -89,9 +89,13 @@ namespace
         Player* leader = DcLeaderSignal::FindLeaderTank(issuer);
         ObjectGuid const runOwner = leader ? leader->GetGUID() : ObjectGuid::Empty;
 
-        handler->SendSysMessage("DungeonClear config (effective values; * = addon override):");
+        handler->SendSysMessage(
+            "DungeonClear config (effective values; * = addon override, H = heroic default):");
         for (DcSettingDef const& d : kDcSettings)
         {
+            // confVal reads with no owner, so it never picks up the heroic layer:
+            // it is the "what this would be outside the run" baseline both markers
+            // are shown against. effVal is what the run is actually using.
             double const confVal = DcSettings::GetEffectiveRaw(ObjectGuid::Empty, d);
             double const effVal  = DcSettings::GetEffectiveRaw(runOwner, d);
             bool const overridden =
@@ -100,6 +104,13 @@ namespace
             std::string line;
             if (overridden)
                 line = Acore::StringFormat("  * DungeonClear.{} = {} (conf {})",
+                                           d.key, FormatDcValue(d, effVal),
+                                           FormatDcValue(d, confVal));
+            else if (effVal != confVal)
+                // Not overridden but not the conf value either: the run is heroic
+                // and this row carries a heroic default. Without the marker the
+                // number looks like the conf line is being ignored.
+                line = Acore::StringFormat("  H DungeonClear.{} = {} (normal {})",
                                            d.key, FormatDcValue(d, effVal),
                                            FormatDcValue(d, confVal));
             else
