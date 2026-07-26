@@ -112,6 +112,7 @@ TEST(DcSettingsRegistryTest, HeroicProfileIsExactlyThePullSafetySet)
         "PullCombatSpread",
         "PullDynamicPartyLag",
         "PullPatrolWaitSec",
+        "AdvanceWindowYards",
     };
 
     std::vector<std::string> actual;

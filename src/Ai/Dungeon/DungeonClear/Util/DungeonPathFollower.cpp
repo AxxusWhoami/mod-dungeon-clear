@@ -362,7 +362,8 @@ bool DungeonPathFollower::Resnap(Player* bot, ChunkedPathfinder::Result const& p
 }
 
 std::vector<G3D::Vector3> DungeonPathFollower::BuildSplineWindow(Player* bot,
-    ChunkedPathfinder::Result const& path, DungeonFollowerState const& state)
+    ChunkedPathfinder::Result const& path, DungeonFollowerState const& state,
+    float maxYards)
 {
     std::vector<G3D::Vector3> window;
     if (!bot || path.segments.empty() || state.segmentIdx >= path.segments.size())
@@ -374,8 +375,19 @@ std::vector<G3D::Vector3> DungeonPathFollower::BuildSplineWindow(Player* bot,
     // convention.
     window.push_back(G3D::Vector3(bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ()));
 
-    uint32 seg = state.segmentIdx;
-    uint32 pt = state.pointIdx;
+    AppendWindowPoints(path, state.segmentIdx, state.pointIdx, maxYards, window);
+    return window;
+}
+
+void DungeonPathFollower::AppendWindowPoints(ChunkedPathfinder::Result const& path,
+                                             uint32 seg, uint32 pt, float maxYards,
+                                             std::vector<G3D::Vector3>& window)
+{
+    if (window.empty())
+        return;  // needs the live-position seed to accumulate length from
+
+    float accumulated = 0.0f;
+    G3D::Vector3 prev = window.back();
     while (seg < path.segments.size() && window.size() < MAX_SPLINE_WINDOW_POINTS)
     {
         PathSegment const& s = path.segments[seg];
@@ -386,8 +398,15 @@ std::vector<G3D::Vector3> DungeonPathFollower::BuildSplineWindow(Player* bot,
 
         if (pt < s.polyline.size())
         {
-            window.push_back(s.polyline[pt]);
+            G3D::Vector3 const& next = s.polyline[pt];
+            window.push_back(next);
             ++pt;
+            // Cap AFTER pushing: the point that crosses the cap is included, and
+            // a cap smaller than the first leg still yields one forward point.
+            accumulated += (next - prev).length();
+            prev = next;
+            if (maxYards > 0.0f && accumulated >= maxYards)
+                break;
         }
         else
         {
@@ -395,8 +414,6 @@ std::vector<G3D::Vector3> DungeonPathFollower::BuildSplineWindow(Player* bot,
             pt = 0;
         }
     }
-
-    return window;
 }
 
 std::optional<G3D::Vector3> DungeonPathFollower::PointBehind(Player* bot,

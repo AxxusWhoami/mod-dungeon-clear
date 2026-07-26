@@ -142,11 +142,36 @@ public:
     // (jumpDown/jumpGap) — jumps need MoveJump, not a spline — so callers
     // still drive jump points through the per-hop JumpTo branch.
     //
+    // maxYards: stop the window once its accumulated 3D length reaches this many
+    // yards (0 = unbounded, the historical behaviour). A spline window is a
+    // MOVEMENT COMMITMENT — while the glide is healthy Advance performs no route
+    // evaluation at all — so an unbounded window on a long route commits the tank
+    // to ~400yd of unobserved travel, far past the ~35yd blocking-trash
+    // lookahead (the heroic over-pull transit leg). The window always contains
+    // at least one polyline point past the live position when one exists, so a
+    // cap smaller than the next leg degrades to a single-hop window rather than
+    // to an empty one (which would drop the caller into the MoveTo fallback and
+    // reintroduce the per-point stutter).
+    //
     // Pure read of `state` (does not mutate the cursor). Returns fewer than 2
     // points when the immediate next leg is a jump or the route is exhausted,
     // signalling the caller to fall back to single-hop movement.
     static std::vector<G3D::Vector3> BuildSplineWindow(Player* bot,
-        ChunkedPathfinder::Result const& path, DungeonFollowerState const& state);
+        ChunkedPathfinder::Result const& path, DungeonFollowerState const& state,
+        float maxYards = 0.0f);
+
+    // Pure collection core of BuildSplineWindow (no Player — gtested directly).
+    // Appends consecutive polyline points from cursor (seg, pt) to `window`,
+    // which must already hold the live-position seed as its last element (length
+    // accumulation starts from window.back()). Stops at the first jump leg, at
+    // MAX_SPLINE_WINDOW_POINTS total, and — when maxYards > 0 — as soon as the
+    // accumulated 3D length of the appended run reaches maxYards. The point that
+    // CROSSES the cap is still appended (the window crosses the cap rather than
+    // stopping short of it), and the cap is only tested after a point has been
+    // appended, so at least one forward point always survives any cap.
+    static void AppendWindowPoints(ChunkedPathfinder::Result const& path,
+                                   uint32 seg, uint32 pt, float maxYards,
+                                   std::vector<G3D::Vector3>& window);
 };
 
 #endif

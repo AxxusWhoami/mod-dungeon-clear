@@ -1177,6 +1177,27 @@ DungeonClear.PullPatrolWait = 1
 DungeonClear.PullPatrolWaitSec = 8.0
 
 #
+#    DungeonClear.AdvanceWindowYards
+#        Cap (yards) on one continuous-spline movement window issued by the
+#        Advance glide — the module's movement quantum on long routes. A window
+#        is a commitment: while the glide is healthy Advance performs no route
+#        evaluation at all, so an unbounded window (observed up to ~400yd)
+#        carries the tank through every pack's aggro bubble en route without a
+#        single blocking-trash or pull decision — the "tank was already in
+#        combat before any pull decision existed" over-pull. Capping the window
+#        makes the tank stop and re-evaluate at least once per this many yards.
+#        Sized to DC_CORRIDOR_LOOKAHEAD (35): the tank never travels further
+#        than the blocking-trash detector can see between two evaluations.
+#        Shorter windows re-issue more often; at the stock ReactDelay the
+#        expected glide duty-cycle loss is ~2%. 0 = unbounded (the historical
+#        behaviour). Overridable per run from the companion addon.
+#
+#        Default: 0.0 (35.0 in Heroic — see HEROIC DEFAULTS below)
+#
+
+DungeonClear.AdvanceWindowYards = 0.0
+
+#
 #    DungeonClear.SpectateEnable
 #        Master gate for the spectator free-camera (`.dc spectate` or the addon's
 #        Spectate button). The camera detaches the player from their character —
@@ -1272,6 +1293,12 @@ DungeonClear.SpectateSpeed = 2.5
 #    Actually wait a patrol out. 8s gives up on plenty of real patrol loops, and
 #    giving up means committing into a pack that was about to be smaller.
 # DungeonClear.PullPatrolWaitSec.Heroic = 18.0
+
+#    Bound the Advance movement quantum to the blocking-trash lookahead
+#    (DC_CORRIDOR_LOOKAHEAD = 35): between two route evaluations the tank can
+#    never travel further than the detector can see, so a room is entered one
+#    decision at a time instead of in one 400yd unobserved glide.
+# DungeonClear.AdvanceWindowYards.Heroic = 35.0
 
 #    Smart Rest is NOT part of the heroic profile. It was, briefly, forced on
 #    with high triggers; it made heroic runs crawl, because the high triggers

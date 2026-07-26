@@ -527,6 +527,22 @@ inline constexpr DcSettingDef kDcSettings[] =
     { "PullPatrolWait",        DcType::Bool,   1,   0,   1,  true  },
     { "PullPatrolWaitSec",     DcType::Float,  8,   1,  30,  true,  18 },
 
+    // Advance movement quantum: cap (yards of accumulated 3D length) on one
+    // continuous-spline window issued by the Advance glide. A window is a
+    // movement COMMITMENT — while the glide is healthy Advance performs no route
+    // evaluation at all — and unbounded windows on long routes were observed
+    // launching 400yd splines, so the tank entered and left every pack's aggro
+    // bubble en route unobserved (the heroic over-pull transit leg). 0 =
+    // unbounded (the historical behaviour; zero change off heroic).
+    //
+    // HEROIC: 35 = one DC_CORRIDOR_LOOKAHEAD, so the tank can never travel
+    // further than the blocking-trash detector can see between two evaluations —
+    // that equality is the whole point of the number; if DC_CORRIDOR_LOOKAHEAD
+    // moves, move this with it. The clamp ceiling 400 ≈ the observed unbounded
+    // maximum, so an admin can express "old behaviour" explicitly as well as
+    // via 0.
+    { "AdvanceWindowYards",    DcType::Float,  0,   0, 400,  true,  35 },
+
     // Liquid avoidance. The route producers include water/magma polys so the
     // bot CAN swim/wade when there is no dry alternative, but with these per-area
     // Detour cost multipliers a crossing only wins when it is genuinely shorter:

@@ -1173,7 +1173,11 @@ void DungeonClearAdvanceAction::FillHopObs(AdvanceState& st, DungeonClearApproac
 
     // Normal case: is a >=2-point spline window available? Build it once here and
     // carry it into DoIssueSplineWindow so the launch reuses this exact window.
-    st.splineWindow = DungeonPathFollower::BuildSplineWindow(bot, path, follower);
+    // The window length is capped (AdvanceWindowYards; heroic 35 = one
+    // DC_CORRIDOR_LOOKAHEAD) so the glide can never outrun the blocking-trash
+    // detector between two evaluations; 0 = unbounded, the historical behaviour.
+    st.splineWindow = DungeonPathFollower::BuildSplineWindow(
+        bot, path, follower, DcSettings::GetFloat(bot, "AdvanceWindowYards"));
     obs.haveSplineWindow = st.splineWindow.size() >= 2;
 }
 
