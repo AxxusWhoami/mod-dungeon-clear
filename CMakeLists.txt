@@ -249,4 +249,10 @@ AC_ADD_CONFIG_FILE("${CMAKE_CURRENT_LIST_DIR}/conf/mod_dungeon_clear.conf.dist")
 #    detector (encounter mask / cleared anchors / closing distance) and the group
 #    teleport. Paired with the leader-only DungeonClearRecoverStranded{Trigger,
 #    Action} rung at DcRel::StrandedRecovery = 42.)
+# Data/Events/BlackMorassEvents.cpp
+#   (map 269: the fully event-driven CoT Opening of the Dark Portal — Sa'at
+#    gossip, portal-grounds pre-clear, Medivh proximity start + garrison via
+#    ObjectiveHook 8, and the repeatable conditional wave-kill event that
+#    closes all 18 time rifts. Objectives-only roster patch — every boss is a
+#    rift TempSummon.)
 # (this comment bumps mtime to force CMake re-glob on next build)

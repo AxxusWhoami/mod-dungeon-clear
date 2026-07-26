@@ -282,6 +282,28 @@ bool DungeonClearEventDueTrigger::IsActive()
     return DungeonEventExecutor::FindDueConditionalEvent(bot, context, map->GetId()) != nullptr;
 }
 
+bool DungeonClearEventDueCombatTrigger::IsActive()
+{
+    if (!IsEnabled(context, bot))
+        return false;
+    // The mirror image of the non-combat gate: this copy exists FOR the in-combat
+    // case, so a bot out of combat is the other rung's business.
+    if (!bot || !bot->IsInCombat() || bot->isDead())
+        return false;
+    if (!DcLeaderSignal::IsDungeonClearLeader(bot))
+        return false;
+    Map* map = bot->GetMap();
+    if (!map || !map->IsDungeon())
+        return false;
+    if (!DungeonEventRegistry::HasEvents(map->GetId()))
+        return false;
+
+    // requireDrivesInCombat: only an opted-in wave event may take a tick from the
+    // stock combat engine. Same call the action makes, so the two agree.
+    return DungeonEventExecutor::FindDueConditionalEvent(bot, context, map->GetId(),
+                                                         /*requireDrivesInCombat*/ true) != nullptr;
+}
+
 bool DungeonClearBlockingTrashTrigger::IsActive()
 {
     if (!IsEnabled(context, bot))

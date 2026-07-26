@@ -58,6 +58,18 @@ EventBuilder& EventBuilder::Persistent()
     return *this;
 }
 
+EventBuilder& EventBuilder::DrivesInCombat()
+{
+    _ev.drivesInCombat = true;
+    return *this;
+}
+
+EventBuilder& EventBuilder::StepsOwnMovement()
+{
+    _ev.stepsOwnMovement = true;
+    return *this;
+}
+
 EventBuilder& EventBuilder::HeroicOnly()
 {
     _ev.gate = DcDifficultyGate::HeroicOnly;
@@ -369,6 +381,7 @@ namespace
             RegisterSteamvaultEvents(t);
             RegisterArcatrazEvents(t);
             RegisterSethekkHallsEvents(t);
+            RegisterBlackMorassEvents(t);
             return t;
         }();
         return kEvents;

@@ -1639,7 +1639,16 @@ bool DcObjectiveArriveAction::Execute(Event /*event*/)
 
     // Hold at the anchor while the event/hook runs — StopBot(Hold) cancels a
     // launched escort glide so the tank doesn't coast past the objective.
-    DcMovement::StopBot(bot, DcMovement::Stop::Hold);
+    //
+    // Skipped for an event whose steps own the tank's movement. This is the same
+    // trap the UseItemOnGO branch above sidesteps by owning the tick: the hold
+    // runs BEFORE Drive, so a Custom hook that walks the tank somewhere with its
+    // own spline has last tick's glide cancelled before it can even see it, and
+    // the bot inches forward one tick at a time while logging healthy spline
+    // issues. Generalised onto the event flag so it does not need a new
+    // per-step special case each time. See DungeonEvent::stepsOwnMovement.
+    if (!ev || !ev->stepsOwnMovement)
+        DcMovement::StopBot(bot, DcMovement::Stop::Hold);
 
     // Prefer a declarative event (DungeonEventRegistry) when the anchor names
     // one; otherwise fall back to the legacy freeform hook (ObjectiveHookRegistry)
@@ -1720,7 +1729,8 @@ bool DcRunEventAction::Execute(Event /*event*/)
         return false;
 
     DungeonEvent const* ev =
-        DungeonEventExecutor::FindDueConditionalEvent(bot, context, map->GetId());
+        DungeonEventExecutor::FindDueConditionalEvent(bot, context, map->GetId(),
+                                                      _requireDrivesInCombat);
     if (!ev)
         return false;  // condition went false between trigger and action — stand down
 
@@ -1824,7 +1834,16 @@ bool DcRunEventAction::Execute(Event /*event*/)
     // launched escort glide (the coast-past from the advance ladder) — it leaves a
     // step's own intra-room MovePoint (HopTo) alone, so MoveTo/Gossip walk-ins
     // still work, unlike the StopMovingOnCurrentPos in StopBot(Hold).
-    DcMovement::ResolveEscortConflict(bot);
+    //
+    // UNLESS the event's steps own the tank's movement. This runs BEFORE Drive, so
+    // for a Custom hook that delivers the tank across the map on its own
+    // long-range spline, the hold cancels last tick's glide before the hook gets
+    // to look at it: the hook re-issues, the next tick cancels again, and the bot
+    // creeps a tick at a time while every log line reports a healthy "spline
+    // issued". That is what kept Black Morass off its portals even after the camp
+    // was moved onto LongRangePathfinder. See DungeonEvent::stepsOwnMovement.
+    if (!ev->stepsOwnMovement)
+        DcMovement::ResolveEscortConflict(bot);
 
     EventDriveOutcome const outcome = DungeonEventExecutor::Drive(bot, context, *ev, prog);
 
@@ -1879,6 +1898,22 @@ bool DcRunEventAction::Execute(Event /*event*/)
     // same property Drive's lapse rewind already relies on).
     if (ev->repeatable)
     {
+        // YIELD THE TICK for a driver event (stepsOwnMovement). Engine::DoNextAction
+        // executes exactly ONE action per tick — it breaks out of its loop on the
+        // first Execute that returns true — so an action that returns true every
+        // tick starves every lower rung, and for a driver registered in the COMBAT
+        // engine above the stock movers that means the bot never attacks, never
+        // casts, and never builds threat. Black Morass wiped parties this way: the
+        // tank drove to the portal, the keeper engaged it, and the tank then stood
+        // there taking hits with no rotation while the DPS pulled aggro and died.
+        //
+        // A driver step reports Done precisely when it has nothing to steer this
+        // tick, so handing the tick back is the whole point. It still runs every
+        // tick (the trigger is unchanged), so its side effects — the Black Morass
+        // force-pull — stay responsive; it just stops CLAIMING ticks it does not
+        // need. Ordinary repeatable events keep the old own-the-tick behaviour.
+        bool const yieldTick = ev->stepsOwnMovement;
+
         prog.stepIndex = 0;
         prog.attempts = 0;
         prog.stepStartMs = getMSTime();
@@ -1890,7 +1925,7 @@ bool DcRunEventAction::Execute(Event /*event*/)
 
         ClearStall(context);
         SetPhase(context, "");
-        return true;
+        return !yieldTick;
     }
 
     // Otherwise latch the event under its synthetic key so the trigger stops
