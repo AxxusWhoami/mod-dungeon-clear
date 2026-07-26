@@ -263,4 +263,14 @@ AC_ADD_CONFIG_FILE("${CMAKE_CURRENT_LIST_DIR}/conf/mod_dungeon_clear.conf.dist")
 #    t/TestWipeContext; DcTestRunJob::TrackEngagement is the engine glue, and
 #    the result rides out on the run record (wipeOnBoss/wipeOpponent) and the
 #    live heartbeat.)
+# Overrides/BlackMorassDriver.cpp
+#   (map 269's CONTROLLER half, lifted out of ObjectiveHookRegistry.cpp. Hooks 8
+#    and 12 are the only on-arrival behaviour in the module that re-decides from
+#    live world state every tick instead of doing one thing on arrival, so they
+#    carry their own movement (StepsOwnMovement + repath/reissue throttling),
+#    engagement (REACT_DEFENSIVE rift adds the normal pipeline cannot see) and
+#    rift/keeper/drainer selection layers. Registered via RegisterBlackMorassHooks,
+#    called explicitly from Hooks() — a static-lib TU with only constructor side
+#    effects gets dropped by the linker. The DECLARATIVE half of 269 stays in
+#    Data/Events/BlackMorassEvents.cpp.)
 # (this comment bumps mtime to force CMake re-glob on next build)
