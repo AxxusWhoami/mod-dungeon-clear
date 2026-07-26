@@ -54,9 +54,11 @@
 #include "ServerFacade.h"
 #include "Timer.h"
 #include "World.h"
+#include "Ai/Dungeon/DungeonClear/Data/BossPullbackRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonEventRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/RoomAggroRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcTickMemo.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonEventExecutor.h"
 #include "Ai/Dungeon/DungeonClear/DcPullContext.h"
 #include "Ai/Dungeon/DungeonClear/Util/ChunkedPathfinder.h"
@@ -457,6 +459,43 @@ Unit* DcTargeting::FindPullTarget(PlayerbotAI* botAI, DungeonBossInfo const& nex
     if (!bot)
         return nullptr;
     AiObjectContext* context = botAI->GetAiObjectContext();
+
+    // PULL-BACK boss (BossPullbackRegistry): the BOSS is the pull target, ahead of
+    // any corridor scan. This is the one case where the pull pipeline is aimed at a
+    // boss on purpose — the boss veto further down exists to stop a boss being
+    // camp-dragged by accident, and this is the deliberate opposite. Handing him to
+    // the pull FSM is what buys the whole maneuver for free: the party parks and
+    // goes passive at the camp (Forming), the tank goes out ALONE to tag
+    // (Advancing), and the drag-back (Returning) hauls him to the anchor before
+    // anyone else is in the fight.
+    //
+    // ARMING is gated on the tank actually being AT the anchor: for a pull-back
+    // boss IsAtBossEngage measures the ANCHOR, not the boss, so the pull commits
+    // exactly when boss navigation has finished walking the party onto the safe
+    // ground and not a step before. Without that gate the pull would commit from
+    // halfway across the dungeon and drag the boss to wherever the party happened
+    // to be standing.
+    //
+    // Once the maneuver IS in flight (`bossPullback`), the gate has to drop, and
+    // this is load-bearing rather than cosmetic: the tag leg may walk the tank off
+    // the anchor to close on a boss that wandered, which takes it outside the
+    // anchor's engage radius. Still requiring the gate would resolve the target to
+    // null mid-leg, the Advancing branch would read that as "target gone", reset
+    // the FSM to Idle, and the maneuver would restart from scratch every time the
+    // tank stepped away — a livelock with the party parked at camp forever.
+    DcPullContext const& pullCtx =
+        context->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
+    if (next.kind == DungeonAnchorKind::Boss &&
+        BossPullbackRegistry::Find(bot->GetMapId(), next.entry) &&
+        (pullCtx.bossPullback || DcTickMemoAccess::AtBossEngage(bot, context, next)))
+    {
+        Creature* const pullbackBoss = GetLiveBoss(bot, context, next.entry);
+        if (pullbackBoss && pullbackBoss->IsAlive())
+            return pullbackBoss;
+        // Not loaded / already dead: fall through. The corridor scan below vetoes
+        // bosses anyway, so this degrades to "no pull target", and the at-boss
+        // engage's own not-present handling reports it.
+    }
 
     // Same look-ahead / band the blocking-trash trigger uses; keep them aligned
     // so the pull aims at the very pack the normal flow would otherwise pull.
@@ -876,6 +915,29 @@ bool DcTargeting::IsRoomClearActive(Player* bot, AiObjectContext* ctx)
     // handing the tick to the boss-bound Advance mid-orbit (the live Jammal'an
     // failure: "ran backwards at a large angle, then snapped straight at the boss").
     return DcEngageGeometry::WithinRoomClearWindow(bot, ctx, *next);
+}
+bool DcTargeting::IsPullbackBossDue(Player* bot, AiObjectContext* ctx)
+{
+    if (!bot || !ctx)
+        return false;
+
+    // Cheapest gate first: most maps have no pull-back boss at all and pay one bool.
+    if (!BossPullbackRegistry::HasRows(bot->GetMapId()))
+        return false;
+
+    std::optional<DungeonBossInfo> next =
+        ctx->GetValue<std::optional<DungeonBossInfo>>(DcKey::NextDungeonBoss)->Get();
+    if (!next.has_value() || next->kind != DungeonAnchorKind::Boss)
+        return false;
+    if (!BossPullbackRegistry::Find(bot->GetMapId(), next->entry))
+        return false;
+
+    // At the ANCHOR (IsAtBossEngage measures the anchor for a pull-back boss), and
+    // the boss actually there to be fetched.
+    if (!DcTickMemoAccess::AtBossEngage(bot, ctx, *next))
+        return false;
+    Creature* const boss = GetLiveBoss(bot, ctx, next->entry);
+    return boss && boss->IsAlive();
 }
 bool DcTargeting::RoomClearForcesAdvanced(Player* bot, AiObjectContext* ctx)
 {

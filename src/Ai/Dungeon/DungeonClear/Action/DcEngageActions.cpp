@@ -38,6 +38,7 @@
 #include "ServerFacade.h"
 #include "SharedDefines.h"
 #include "Ai/Dungeon/DungeonClear/DcApproachState.h"
+#include "Ai/Dungeon/DungeonClear/Data/BossPullbackRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/DcEventDoorRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearApproach.h"
@@ -759,6 +760,43 @@ bool DungeonClearEngageBossAction::Execute(Event event)
             botAI->DoSpecificAction("dc status", event, true);
             return true;
         }
+    }
+
+    // PULL-BACK boss (BossPullbackRegistry): NEVER walk in. The whole registry
+    // exists because the boss's own ground is lethal — EngageDirect would bee-line
+    // the tank at Ghaz'an's live position, i.e. out into the Underbog lake, which
+    // is the wipe. The pull pipeline (relevance 35, above this rung's 30) owns the
+    // engagement and does it by tag-and-drag; reaching here at all means the pull
+    // stood down — a fizzle handoff, or the boss out of reach — so HOLD on the
+    // anchor and say why, rather than substituting the one behaviour that kills the
+    // party. The pull re-arms on its own the next tick it can (the boss wanders
+    // back, the abort latch clears at the Engage cleanup).
+    if (BossPullbackRegistry::Find(bot->GetMapId(), next->entry))
+    {
+        DcMovement::StopBot(bot, DcMovement::Stop::Hold);
+
+        // Both Advancing abort paths latch abortTarget to hand the pack to "the
+        // normal walk-in engage so the run never hangs" — which for a pull-back
+        // boss is the one thing that must not happen, so the pull trigger stands
+        // down on the latch and this rung would otherwise hold forever in silence.
+        // Keep the never-hang contract, pay it in a STALL: say the pull failed and
+        // point at `dc skip`, instead of either swimming out or wedging quietly.
+        // The latch clears at the pull's Engage cleanup, and ClearStall on any
+        // later successful engage, so a recovered pull resumes normally.
+        if (AI_VALUE(DcPullContext&, DcKey::PullContext).abortTarget == boss->GetGUID())
+        {
+            StallDungeonClear(botAI,
+                "Can't pull " + next->name + " back to safe ground (the drag kept "
+                "failing). Use 'dc skip' to move to the next boss.");
+            return true;
+        }
+
+        LOG_DEBUG("playerbots.dungeonclear",
+                  "[DC:{}] {} is a pull-back boss and the pull pipeline is not "
+                  "holding it this tick — waiting on the anchor rather than walking "
+                  "in (boss {:.1f}yd away)",
+                  bot->GetName(), next->name, bot->GetExactDist(boss));
+        return true;
     }
 
     if (!EngageDirect(static_cast<Unit*>(boss)))
