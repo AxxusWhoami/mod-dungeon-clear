@@ -98,6 +98,15 @@ namespace DcTestRunLive
         std::uint32_t sinceProgressS = 0;  // age of the no-progress watchdog
         bool inCombat = false;             // any member in combat
 
+        // Wipe in progress: every member on the leader's map is a corpse and
+        // the wipe grace timer is running. Without this the live card shows a
+        // party doing nothing for 15s with no hint why. wipeOpponent names what
+        // took them down (empty if they died out of combat); wipeOnBoss says
+        // whether that was an encounter boss or a trash pack.
+        bool wiped = false;
+        bool wipeOnBoss = false;
+        std::string wipeOpponent;
+
         std::vector<BotPos> bots;          // per-member positions (may be empty)
         std::vector<StatusEntry> recent;   // already trimmed to <=8 by the caller
     };

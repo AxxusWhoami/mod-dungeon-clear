@@ -221,6 +221,42 @@ TEST(DcTestRunLiveJsonTest, LiveFieldsDefaultToEmptyNotAbsent)
     EXPECT_NE(json.find("\"stall\":\"\""), std::string::npos);
     EXPECT_NE(json.find("\"bossName\":\"\""), std::string::npos);
     EXPECT_NE(json.find("\"sinceProgressS\":0"), std::string::npos);
+    EXPECT_NE(json.find("\"wiped\":false"), std::string::npos);
+    EXPECT_NE(json.find("\"wipeOnBoss\":false"), std::string::npos);
+    EXPECT_NE(json.find("\"wipeOpponent\":\"\""), std::string::npos);
+}
+
+// ---- wipe in progress -------------------------------------------------------
+//
+// The wipe grace window holds a corpse party for 15s before the verdict lands;
+// without these the live card shows a party doing nothing with no hint why.
+
+TEST(DcTestRunLiveJsonTest, WipeOnABossNamesTheBoss)
+{
+    RunSnapshot s = Sample("tr-1", "underbog");
+    s.wiped = true;
+    s.wipeOnBoss = true;
+    s.wipeOpponent = "Ghaz'an";
+
+    std::string const json = Build(1700000000ull, {s});
+
+    EXPECT_NE(json.find("\"wiped\":true"), std::string::npos);
+    EXPECT_NE(json.find("\"wipeOnBoss\":true"), std::string::npos);
+    EXPECT_NE(json.find("\"wipeOpponent\":\"Ghaz'an\""), std::string::npos);
+}
+
+TEST(DcTestRunLiveJsonTest, WipeToTrashNamesTheMobAndClearsTheBossFlag)
+{
+    RunSnapshot s = Sample("tr-1", "underbog");
+    s.wiped = true;
+    s.wipeOnBoss = false;
+    s.wipeOpponent = "Bog Giant";
+
+    std::string const json = Build(1700000000ull, {s});
+
+    EXPECT_NE(json.find("\"wiped\":true"), std::string::npos);
+    EXPECT_NE(json.find("\"wipeOnBoss\":false"), std::string::npos);
+    EXPECT_NE(json.find("\"wipeOpponent\":\"Bog Giant\""), std::string::npos);
 }
 
 // ---- per-bot health / combat ------------------------------------------------

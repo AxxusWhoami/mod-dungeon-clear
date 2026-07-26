@@ -70,6 +70,9 @@ namespace DcTestRunLive
               << ",\"bossName\":\"" << EscapeJson(run.bossName) << '"'
               << ",\"sinceProgressS\":" << run.sinceProgressS
               << ",\"inCombat\":" << (run.inCombat ? "true" : "false")
+              << ",\"wiped\":" << (run.wiped ? "true" : "false")
+              << ",\"wipeOnBoss\":" << (run.wipeOnBoss ? "true" : "false")
+              << ",\"wipeOpponent\":\"" << EscapeJson(run.wipeOpponent) << '"'
               << ",\"bots\":[";
             for (std::size_t b = 0; b < run.bots.size(); ++b)
             {
