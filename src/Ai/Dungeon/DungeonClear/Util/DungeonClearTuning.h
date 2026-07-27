@@ -102,6 +102,16 @@ constexpr float DC_AVOID_MIN_GLIDE = 6.0f;
 // re-derivable. Small on purpose — the sphere is already padded by
 // PullEnRouteMargin, so this is anti-jitter, not safety margin.
 constexpr float DC_AVOID_EDGE_BACKOFF = 1.0f;
+
+// Longest single sidestep the BYSTANDER orbit (DcEngageGeometry::OrbitRing) will
+// issue. The room-aggro boss skirt steps a fixed angle, which is a ~12yd chord at
+// a 20yd stand-off and a ~35yd chord at 60 — fine for a boss orbit the tank is
+// committed to running all the way around, wrong for a trash pack it is merely
+// walking past, because the pull's early-out routinely cancels that leg one tick
+// after issuing it. A leg this size is cheap enough to abandon and still long
+// enough to change the approach line.
+constexpr float DC_ORBIT_MAX_LEG_YARDS = 12.0f;
+
 // Half-width of the path "blocking trash" band. Widened from 8 to 18 so it
 // roughly matches level-80 elite aggro radius: a pack sitting a few yards off the
 // route line still aggros as the tank passes, so it must count as blocking trash.

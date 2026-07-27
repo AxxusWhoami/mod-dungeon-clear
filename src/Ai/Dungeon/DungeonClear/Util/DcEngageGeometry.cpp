@@ -499,7 +499,24 @@ std::optional<Position> DcEngageGeometry::EnRoutePackAvoidPoint(Player* bot,
     // single-segment nearest-the-bot ordering below stays this leg's own (it
     // feeds the orbit — see FirstViolatedSphere's header note).
     Position const legEnd(gx, gy, target->GetPositionZ(), 0.0f);
-    std::vector<AvoidSphere> const spheres = BystanderSpheres(bot, legEnd, target);
+    std::vector<AvoidSphere> spheres = BystanderSpheres(bot, legEnd, target);
+
+    // Drop the spheres the tank is ALREADY STANDING IN. Rounding one of those is
+    // not avoidance, it is a retreat: the only waypoint that gets back outside is
+    // behind the tank, and the phase machine will cancel it within a tick or two
+    // anyway (the straight line clears, or the pull hits its commit range), so
+    // all it produces is a visible run backward followed by a run forward over
+    // the same ground. Whether the pack pulls is decided by the blocking-trash
+    // detector from here — same formula, minus the party buffer. Same rule the
+    // Advance glide's window truncation uses, so the two halves of the avoidance
+    // still agree about what they can and cannot honour.
+    spheres.erase(std::remove_if(spheres.begin(), spheres.end(),
+        [tx, ty](AvoidSphere const& s)
+        {
+            float const dx = s.x - tx;
+            float const dy = s.y - ty;
+            return dx * dx + dy * dy <= s.r * s.r;
+        }), spheres.end());
 
     int const idx = FirstViolatedSphere(tx, ty, gx, gy, spheres);
     if (idx < 0)
@@ -525,7 +542,8 @@ std::optional<Position> DcEngageGeometry::EnRoutePackAvoidPoint(Player* bot,
     }
 
     std::optional<Position> wp =
-        AggroSafeApproachPoint(bot, s.x, s.y, s.z, s.r, target, &appr.avoidOrbitDir);
+        AggroSafeApproachPoint(bot, s.x, s.y, s.z, s.r, target, &appr.avoidOrbitDir,
+                               OrbitProfile::Bystander);
     if (wp)
         DC_PULL_DEBUG("[DC:{}] en-route avoid: {} pack(s) near the leg, rounding {} "
                       "(r={:.1f}) -> detour ({:.1f}, {:.1f}) before approaching {}",
@@ -534,9 +552,43 @@ std::optional<Position> DcEngageGeometry::EnRoutePackAvoidPoint(Player* bot,
     return wp;
 }
 
+DcEngageGeometry::OrbitStep DcEngageGeometry::OrbitRing(
+    OrbitProfile profile, float safeRadius, float botRadius, float partyMargin,
+    float maxLegYards)
+{
+    // ~34 degrees/tick keeps each leg short enough that it hugs the ring exterior.
+    constexpr float kOrbitStep = 0.6f;
+
+    OrbitStep out;
+    if (profile == OrbitProfile::RoomAggroBoss)
+    {
+        out.radius = safeRadius + partyMargin;
+        out.step = kOrbitStep;
+        return out;
+    }
+
+    // Bystander: ride the tank's own stand-off, so the waypoint is neither
+    // further from the pack than the tank already is (the backward run) nor
+    // nearer (walking INTO a pack we are trying to avoid, which the fixed boss
+    // ring did whenever the tank passed wide of one). safeRadius is the floor:
+    // it already includes PullEnRouteMargin, and the caller drops spheres the
+    // tank is inside, so in practice botRadius > safeRadius and the max() is a
+    // guard against a mob that closed the gap between selection and here.
+    out.radius = std::max(botRadius, safeRadius);
+
+    // Bound the LEG, not the angle. At the boss ring's fixed 0.6rad a step is
+    // ~12yd of chord at 20yd of stand-off and ~35yd at 60 — and the long one is
+    // a committed MoveTo that the next tick's early-out routinely throws away.
+    // Keep one sidestep cheap enough to abandon.
+    out.step = out.radius > 0.0f
+        ? std::min(kOrbitStep, maxLegYards / out.radius)
+        : kOrbitStep;
+    return out;
+}
+
 std::optional<Position> DcEngageGeometry::AggroSafeApproachPoint(
     Player* bot, float bx, float by, float bz, float safeRadius, Unit* target,
-    int8* orbitDir)
+    int8* orbitDir, OrbitProfile profile)
 {
     if (!bot || !target || safeRadius <= 0.0f)
         return std::nullopt;
@@ -581,8 +633,16 @@ std::optional<Position> DcEngageGeometry::AggroSafeApproachPoint(
     // target's own distance (else the orbit could never resolve to a straight shot
     // — the target would sit inside the test ring forever, the boss-centre
     // infinite-orbit trap). Never below raw aggro: we always clear the sphere.
-    float const earlyOutR = std::max(safeRadius,
-        std::min(safeRadius + partyMargin, targetDist - 1.0f));
+    //
+    // Bystander: the sphere IS the clearance. safeRadius already carries
+    // PullEnRouteMargin (BystanderSpheres sizes it that way), so demanding a
+    // second RoomAggroPartyMargin on top asks the tank to swing wide of a
+    // ~40yd phantom around a trash pack — an arc most corridors cannot offer, and
+    // the reason the orbit kept running when the walk was already clear of aggro.
+    float const earlyOutR = profile == OrbitProfile::Bystander
+        ? safeRadius
+        : std::max(safeRadius,
+                   std::min(safeRadius + partyMargin, targetDist - 1.0f));
 
     // Does the straight 2D approach bot->target already keep that clearance from
     // the boss's aggro sphere? Then no detour — engage directly. Release the orbit
@@ -604,15 +664,21 @@ std::optional<Position> DcEngageGeometry::AggroSafeApproachPoint(
     float const angG = std::atan2(gy - by, gx - bx);  // target bearing from boss
     // Shortest signed turn phi->angG, in (-pi, pi].
     float const delta = std::atan2(std::sin(angG - phi), std::cos(angG - phi));
-    // ~34 degrees/tick keeps each leg short enough that it hugs the ring exterior.
-    constexpr float kOrbitStep = 0.6f;
-    // Orbit ring: the aggro sphere PLUS the party buffer, so the tank arcs wide
-    // around the OUTSIDE with the followers clear of aggro. For a pack that sits
-    // closer in than this ring (the edge packs at the room's inner wall), the tank
-    // backs out past it to the ring, lines up the bearing, then steps straight IN —
-    // a radial leg that clears the sphere — instead of hugging the aggro edge the
-    // whole way around. Capped to the room via the navmesh snap below.
-    float const wpR = safeRadius + partyMargin;
+
+    // Orbit ring and angular step, per profile (OrbitRing):
+    //   RoomAggroBoss — the aggro sphere PLUS the party buffer, so the tank arcs
+    //     wide around the OUTSIDE with the followers clear of aggro. For a pack
+    //     that sits closer in than this ring (the edge packs at the room's inner
+    //     wall), the tank backs out past it to the ring, lines up the bearing,
+    //     then steps straight IN — a radial leg that clears the sphere — instead
+    //     of hugging the aggro edge the whole way around.
+    //   Bystander — the tank's OWN stand-off, so the step is pure sidestep.
+    // Capped to the room via the navmesh snap below either way.
+    float const botR = std::sqrt((tx - bx) * (tx - bx) + (ty - by) * (ty - by));
+    OrbitStep const orbit = OrbitRing(profile, safeRadius, botR, partyMargin,
+                                      DC_ORBIT_MAX_LEG_YARDS);
+    float const kOrbitStep = orbit.step;
+    float const wpR = orbit.radius;
 
     // Snap a ring waypoint at `bearing` to the navmesh.
     auto ringPoint = [&](float bearing) -> std::optional<Position>

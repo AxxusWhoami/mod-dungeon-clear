@@ -436,3 +436,87 @@ TEST(DcWindowTruncateTest, DeclinedTruncationNeverShortensTheWindow)
     for (size_t i = 0; i < window.size(); ++i)
         EXPECT_FLOAT_EQ(window[i].x, original[i].x);
 }
+
+// ===========================================================================
+// Pure geometry: OrbitRing — the ring an avoidance orbit rides.
+//
+// The bug these pin: EnRoutePackAvoidPoint reused the room-aggro BOSS orbit for
+// ordinary bystander trash, which places the waypoint on a FIXED ring
+// (safeRadius + RoomAggroPartyMargin). safeRadius already carries
+// PullEnRouteMargin, so a trash pack got a second party buffer on top and the
+// waypoint landed ~40yd out — behind a tank standing at 35. The tank ran
+// backward, which by itself cleared the bot->target line, which cancelled the
+// detour, which sent it forward again over the same ground.
+// ===========================================================================
+
+using OrbitProfile = DcEngageGeometry::OrbitProfile;
+
+TEST(DcOrbitRingTest, BossProfileKeepsTheFixedWideRing)
+{
+    DcEngageGeometry::OrbitStep const o = DcEngageGeometry::OrbitRing(
+        OrbitProfile::RoomAggroBoss, 30.0f, 12.0f, 10.0f, 12.0f);
+    EXPECT_FLOAT_EQ(o.radius, 40.0f);   // safeRadius + partyMargin, wherever the bot is
+    EXPECT_FLOAT_EQ(o.step, 0.6f);      // fixed angle, leg length unbounded
+}
+
+// The regression, in numbers taken from a live heroic detour (r=29.3 sphere,
+// RoomAggroPartyMargin 10, tank standing 35yd off): the boss ring puts the
+// waypoint 4.3yd FURTHER from the pack than the tank already is. Bystander puts
+// it exactly where the tank stands.
+TEST(DcOrbitRingTest, BystanderNeverStepsRadiallyOutward)
+{
+    DcEngageGeometry::OrbitStep const boss = DcEngageGeometry::OrbitRing(
+        OrbitProfile::RoomAggroBoss, 29.3f, 35.0f, 10.0f, 12.0f);
+    EXPECT_GT(boss.radius, 35.0f);      // backward — the reported behaviour
+
+    DcEngageGeometry::OrbitStep const by = DcEngageGeometry::OrbitRing(
+        OrbitProfile::Bystander, 29.3f, 35.0f, 10.0f, 12.0f);
+    EXPECT_FLOAT_EQ(by.radius, 35.0f);  // pure sidestep
+}
+
+// The other half of the same contract: a tank passing WIDE of a pack must not be
+// dragged in toward it either, which the fixed ring did whenever botRadius
+// exceeded safeRadius + partyMargin.
+TEST(DcOrbitRingTest, BystanderNeverStepsRadiallyInward)
+{
+    DcEngageGeometry::OrbitStep const boss = DcEngageGeometry::OrbitRing(
+        OrbitProfile::RoomAggroBoss, 20.0f, 60.0f, 10.0f, 12.0f);
+    EXPECT_LT(boss.radius, 60.0f);      // pulled 30yd toward the pack
+
+    DcEngageGeometry::OrbitStep const by = DcEngageGeometry::OrbitRing(
+        OrbitProfile::Bystander, 20.0f, 60.0f, 10.0f, 12.0f);
+    EXPECT_FLOAT_EQ(by.radius, 60.0f);
+}
+
+// safeRadius is the floor: a mob that closed the gap after the caller selected
+// it must not leave the orbit riding a ring inside its own aggro sphere.
+TEST(DcOrbitRingTest, BystanderRadiusFloorsAtTheSphere)
+{
+    DcEngageGeometry::OrbitStep const o = DcEngageGeometry::OrbitRing(
+        OrbitProfile::Bystander, 25.0f, 18.0f, 10.0f, 12.0f);
+    EXPECT_FLOAT_EQ(o.radius, 25.0f);
+}
+
+// Bound the LEG, not the angle: one sidestep stays cheap enough that the pull's
+// early-out can throw it away without the tank having run half a room.
+TEST(DcOrbitRingTest, BystanderBoundsTheChordNotTheAngle)
+{
+    // Wide stand-off: the angle shrinks so the chord stays at the cap.
+    DcEngageGeometry::OrbitStep const wide = DcEngageGeometry::OrbitRing(
+        OrbitProfile::Bystander, 20.0f, 60.0f, 10.0f, 12.0f);
+    EXPECT_LT(wide.step, 0.6f);
+    EXPECT_NEAR(wide.radius * wide.step, 12.0f, 0.01f);
+
+    // Close in, where 0.6rad is already under the cap: the angle binds instead,
+    // so the orbit never speeds UP to burn its whole budget.
+    DcEngageGeometry::OrbitStep const close = DcEngageGeometry::OrbitRing(
+        OrbitProfile::Bystander, 10.0f, 15.0f, 10.0f, 12.0f);
+    EXPECT_FLOAT_EQ(close.step, 0.6f);
+    EXPECT_LT(close.radius * close.step, 12.0f);
+
+    // The boss profile is deliberately NOT bounded — a 60yd stand-off still
+    // steps the full angle, a 36yd leg.
+    DcEngageGeometry::OrbitStep const boss = DcEngageGeometry::OrbitRing(
+        OrbitProfile::RoomAggroBoss, 50.0f, 60.0f, 10.0f, 12.0f);
+    EXPECT_GT(boss.radius * boss.step, 12.0f);
+}

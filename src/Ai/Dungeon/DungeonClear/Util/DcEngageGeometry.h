@@ -126,9 +126,55 @@ public:
     // flipping back toward the target every tick and bouncing between two ring
     // points forever. Pass nullptr for a one-shot, latch-free skirt (followers).
     // Reset to 0 by this function the instant the straight approach clears.
+    //
+    // `profile` picks the ring the orbit rides — see OrbitProfile.
+    enum class OrbitProfile : uint8
+    {
+        // A room-aggro BOSS, the case this function was written for. The orbit
+        // rides a FIXED wide ring (safeRadius + RoomAggroPartyMargin), so a tank
+        // standing inside it deliberately backs out to the ring before arcing.
+        // Correct there: the boss must not be woken at all, the whole room-clear
+        // happens from outside that ring, and the backing-out is a one-time cost
+        // paid at the start of a long orbit.
+        RoomAggroBoss,
+        // A BYSTANDER trash pack the tank is merely walking past. Rides the
+        // tank's OWN current stand-off instead of a fixed ring, so the step is
+        // purely tangential — never radially in, never radially out.
+        //
+        // The fixed ring is wrong here and it showed: safeRadius already carries
+        // PullEnRouteMargin, so the boss ring added a SECOND party buffer
+        // (RoomAggroPartyMargin, 10) on top, putting the waypoint ~40yd from a
+        // pack with ~15yd of real aggro. A 34-degree step at that radius is a
+        // ~23yd leg, most of it radial — the tank visibly ran BACKWARD away from
+        // the pack it was approaching. And backing out is itself what clears the
+        // bot->target line, so the very next tick the early-out fired, the detour
+        // was dropped, and the tank snapped forward again: an excursion that
+        // bought nothing and cost two reversals. Live heroic logged 73 of these,
+        // only 3 of which ran long enough to be given up on — the rest were
+        // one-tick round trips.
+        Bystander,
+    };
     static std::optional<Position> AggroSafeApproachPoint(
         Player* bot, float bx, float by, float bz, float safeRadius, Unit* target,
-        int8* orbitDir = nullptr);
+        int8* orbitDir = nullptr,
+        OrbitProfile profile = OrbitProfile::RoomAggroBoss);
+
+    // Pure: the ring radius and angular step one orbit tick should use, split out
+    // of AggroSafeApproachPoint so the "never radially outward, never radially
+    // inward" contract of the Bystander profile is gtestable without a live map.
+    //
+    // Bystander also bounds the LEG rather than the ANGLE: a fixed 34-degree step
+    // is a 12yd leg at 20yd of stand-off and a 35yd leg at 60yd, and the long one
+    // is a committed MoveTo the next tick may throw away. Capping the chord keeps
+    // one sidestep cheap enough to abandon.
+    struct OrbitStep
+    {
+        float radius = 0.0f;   // distance from the sphere centre to place the waypoint
+        float step = 0.0f;     // radians of arc for this tick
+    };
+    static OrbitStep OrbitRing(OrbitProfile profile, float safeRadius,
+                               float botRadius, float partyMargin,
+                               float maxLegYards);
 
     // The chooser behind AggroSafeApproachPoint, factored out as pure geometry so
     // it can be unit-tested without a live map: true when the straight 2D line
