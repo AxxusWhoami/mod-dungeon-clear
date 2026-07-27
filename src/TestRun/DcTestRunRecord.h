@@ -38,9 +38,11 @@ namespace DcTestRunRecord
         std::string detectedRole;    // what the talents say: "tank"|"heal"|"dps"
         bool roleMismatch = false;   // detectedRole != role
 
-        // Where the character was standing when the run claimed it. A roster run
-        // does not teleport survivors home (deliberately out of scope), so this
-        // is what makes a manual recall possible after the fact.
+        // Where the character was standing when the run claimed it. Teardown
+        // sends the party to its BIND point rather than back here (see
+        // DcTestRunJob::ReviveAndSendHome — an entry position can be another
+        // instance, or a spot the character may no longer legally stand in),
+        // so this is what makes a manual recall to the original spot possible.
         std::uint32_t fromMap = 0;
         float fromX = 0.f, fromY = 0.f, fromZ = 0.f, fromO = 0.f;
     };

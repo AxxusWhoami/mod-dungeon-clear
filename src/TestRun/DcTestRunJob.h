@@ -213,6 +213,12 @@ private:
     void FailSetup(std::string const& why);
     void Finish(DcTestRun::Verdict verdict, std::string const& failReason);
     void Teardown();
+    // Put the party back the way the run found it: alive, and out of the
+    // instance. Resurrects every dead member and sends the party to its bind
+    // point (where its own hearthstone would land it). Must run BEFORE
+    // LogoutBots — it is the logout that would otherwise save a wiped party as
+    // five ghosts at the instance graveyard.
+    void ReviveAndSendHome();
     void LogoutBots(Player* gm);
 
     Player* FindGm() const;

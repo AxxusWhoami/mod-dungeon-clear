@@ -1754,6 +1754,100 @@ void DcTestRunJob::Finish(DcTestRun::Verdict verdict, std::string const& failRea
     Teardown();
 }
 
+// Put the party back the way the run found it: alive, and out of the instance.
+//
+// The bug this closes is a wipe. Every logout path below ends in
+// WorldSession::LogoutPlayer, which repops a character that is still dead
+// (BuildPlayerRepop -> RepopAtGraveyard) and then saves it — so a wiped party
+// was written to the DB as five ghosts at the instance graveyard, and somebody's
+// real character came out of a test run dead in a dungeon they never chose to
+// enter. Being resurrected here is what stops LogoutPlayer taking that branch at
+// all; the recall is the second half of the same promise.
+//
+// Ordering is load-bearing in two places:
+//   * this must run BEFORE LogoutBots, for the reason above;
+//   * the teleport may nonetheless be issued in the same tick as the logout,
+//     because LogoutPlayer drains a pending far transfer first
+//     (`while (IsBeingTeleportedFar()) HandleMoveWorldportAck()`), and until it
+//     does, TeleportTo has already stored the destination for SaveToDB to use
+//     in place of the live position.
+//
+// Nothing happens at all if the run never teleported the party in: a setup
+// failure before Teleporting leaves the characters exactly where they were
+// standing, which for a hand-picked real character is the only defensible
+// outcome — the run never moved it, so the run does not get to move it.
+void DcTestRunJob::ReviveAndSendHome()
+{
+    if (!_teleportIssued)
+        return;
+
+    for (Slot const& slot : _slots)
+    {
+        if (!slot.guid)
+            continue;
+
+        // Pool slots have no rosterName; the guid is the only handle that exists
+        // before the character resolves, and the only one left if it never does.
+        std::string const who = slot.rosterName.empty() ? slot.guid.ToString() : slot.rosterName;
+
+        Player* bot = ObjectAccessor::FindPlayer(slot.guid);
+        if (!bot || !bot->IsInWorld())
+        {
+            LOG_WARN("playerbots.dungeonclear",
+                     "TESTRUN {} member {} is not in world at teardown — cannot revive or recall it",
+                     _record.runId, who);
+            continue;
+        }
+
+        bot->CombatStop(true);
+
+        // Dead OR a released ghost: DeathState covers the un-released corpse,
+        // PLAYER_FLAGS_GHOST (from the ghost aura, spell 8326) covers the member
+        // that already ran back.
+        if (!bot->IsAlive() || bot->HasPlayerFlag(PLAYER_FLAGS_GHOST))
+        {
+            // Spirit of Redemption is a death the aura is only postponing —
+            // LogoutPlayer kills the character outright when it sees this aura,
+            // so it has to come off before the resurrect, not after.
+            bot->RemoveAurasDueToSpell(27827);
+            // No resurrection sickness. The character did not choose this death,
+            // and a regression harness must not hand somebody's raider ten
+            // minutes of it as the price of being volunteered.
+            bot->ResurrectPlayer(1.0f, /*applySickness*/ false);
+            // Turn the corpse to bones, or the character keeps a resurrectable
+            // corpse inside an instance that is about to be unbound and reset.
+            // Resurrect + SpawnCorpseBones is exactly what `.revive` does.
+            bot->SpawnCorpseBones();
+            LOG_INFO("playerbots.dungeonclear", "TESTRUN {} resurrected {} at teardown",
+                     _record.runId, bot->GetName());
+        }
+
+        // A transfer already in flight owns the destination; issuing a second one
+        // would be refused anyway (TeleportTo returns false while a semaphore is
+        // set), so say where it landed instead of pretending it went home.
+        if (bot->IsBeingTeleported())
+        {
+            LOG_WARN("playerbots.dungeonclear",
+                     "TESTRUN {} {} is mid-transfer at teardown — left wherever that transfer lands",
+                     _record.runId, bot->GetName());
+            continue;
+        }
+
+        // The bind point: the innkeeper/hearthstone destination, read from the
+        // same homebind fields the hearthstone spell itself uses. Deliberately
+        // NOT the recorded entry position — that can be another instance, or a
+        // spot the character can no longer legally be in an hour later, whereas
+        // the bind point is by construction somewhere the character may stand.
+        // The entry position stays in the record either way, so a manual recall
+        // to it is still possible.
+        if (!bot->TeleportTo(bot->m_homebindMapId, bot->m_homebindX, bot->m_homebindY,
+                             bot->m_homebindZ, bot->GetOrientation()))
+            LOG_WARN("playerbots.dungeonclear",
+                     "TESTRUN {} could not send {} home to map {} — left in the instance",
+                     _record.runId, bot->GetName(), bot->m_homebindMapId);
+    }
+}
+
 // Log the party out, whichever holder owns it.
 //
 // A bot's login is filed under the holder that owns its master *at callback
@@ -1835,6 +1929,10 @@ void DcTestRunJob::Teardown()
         for (Slot const& slot : _slots)
             if (Player* bot = ObjectAccessor::FindPlayer(slot.guid))
                 UndoUnwantedGuild(bot, slot);
+
+    // Alive and out of the dungeon before anything logs the party out — a dead
+    // member reaching LogoutPlayer is saved as a ghost at the instance graveyard.
+    ReviveAndSendHome();
 
     Player* gm = FindGm();
     LogoutBots(gm);
