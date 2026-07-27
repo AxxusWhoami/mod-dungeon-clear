@@ -273,4 +273,14 @@ AC_ADD_CONFIG_FILE("${CMAKE_CURRENT_LIST_DIR}/conf/mod_dungeon_clear.conf.dist")
 #    called explicitly from Hooks() — a static-lib TU with only constructor side
 #    effects gets dropped by the linker. The DECLARATIVE half of 269 stays in
 #    Data/Events/BlackMorassEvents.cpp.)
+# TestRun/DcTestRoster.{h,cpp}
+#   (`.dc test start <d> party=Tank,Heal,D1,D2,D3` — hand-picked parties of REAL
+#    player characters, from any account, launchable from the Command Deck. This
+#    is only the pure grammar (split, trim, positional roles, refuse a bad list),
+#    edge-pinned by t/TestTestRoster; the engine half is
+#    DcTestRunJob::CreateFromRoster + DcTestRunManager::StartRoster. Roster runs
+#    log in MASTERLESS (AddPlayerBot with masterAccountId 0 — the ownership gate
+#    refuses a hand-picked party on any other path), never roll the factory (no
+#    respec/regear/relevel: the characters fight as they are), and always unbind
+#    both difficulties first so every run gets a fresh instance.)
 # (this comment bumps mtime to force CMake re-glob on next build)

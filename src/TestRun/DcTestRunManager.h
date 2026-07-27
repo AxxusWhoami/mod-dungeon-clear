@@ -53,7 +53,11 @@ public:
         NoMgr,           // permanent
         CapHit,          // transient — a run will finish
         BotBudget,       // transient — MaxAddedBots pre-check
-        PoolExhausted    // transient — other runs hold the pool chars
+        PoolExhausted,   // transient — other runs hold the pool chars
+        BadRoster,       // permanent — malformed party=, unknown/duplicate name
+        FactionMismatch, // permanent — a roster cannot span factions
+        CharacterOnline, // transient — a human is playing that character
+        CharacterBusy    // transient — another live run holds that character
     };
 
     // Validate + launch a run. On success sets *msg to the start confirmation
@@ -69,6 +73,21 @@ public:
     bool Start(Player* gm, std::string const& dungeonToken, uint32 levelOverride, uint32 seed,
                bool heroic, std::string* msg, std::string const& planId = "",
                StartErr* errOut = nullptr, std::string* runIdOut = nullptr);
+
+    // Validate + launch a HAND-PICKED party (`.dc test start <d> party=a,b,c,d,e`).
+    // `partySpec` is the raw comma-separated name list; roles are positional
+    // (tank, heal, dps, dps, dps — see DcTestRoster).
+    //
+    // Refuses on: malformed list, a name no character answers to, a character a
+    // human is currently playing, a character another live run already holds, and
+    // a roster spanning both factions (which cannot be grouped). Level comes from
+    // the characters, so there is no level override and no comp seed.
+    //
+    // The characters are NOT respecced, regeared, or releveled — see
+    // DcTestRunJob::CreateFromRoster.
+    bool StartRoster(Player* gm, std::string const& dungeonToken, std::string const& partySpec,
+                     bool heroic, std::string* msg, std::string const& planId = "",
+                     StartErr* errOut = nullptr, std::string* runIdOut = nullptr);
 
     // Stop the run(s) the selector resolves to (see DcTestRunSelect). Bare
     // selector = the single active run. False (with an explanatory *msg) on
