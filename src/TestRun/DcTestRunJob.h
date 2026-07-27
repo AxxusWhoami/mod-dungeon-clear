@@ -152,6 +152,9 @@ private:
         // named in a refusal before its character has ever been resolved to a
         // Player (the pool path reads the name off the resolved bot instead).
         std::string rosterName;
+        // The character's guild as of BEFORE the run logged it in, so an
+        // unwanted join can be detected and undone. See UndoUnwantedGuild.
+        uint32 guildBefore = 0;
     };
 
     // Boss-roster snapshot taken at Starting so mask deltas can be named
@@ -179,6 +182,11 @@ private:
     // Roster variant: read the characters out into the record and leave them
     // otherwise untouched. No factory roll, so no per-tick budget.
     void TickProvisioningRoster();
+    // Undo the guild stock playerbots silently joins a guildless bot to at login
+    // (RandomPlayerbotMgr::OnBotLoginInternal -> PlayerbotFactory::InitGuild).
+    // That path has no random-bot gate, so it fires for a hand-picked real
+    // character too — which must come out of a run in the guild it went in with.
+    void UndoUnwantedGuild(Player* bot, Slot const& slot) const;
     // Unbind every member from this map so the run always gets a FRESH instance.
     // Both difficulties, because a normal-difficulty bind is just as capable of
     // dragging the party into a half-cleared save — and a stale bind poisons the

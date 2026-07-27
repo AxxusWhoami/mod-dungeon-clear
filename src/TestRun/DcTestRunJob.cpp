@@ -16,6 +16,8 @@
 #include "Creature.h"
 #include "Group.h"
 #include "GroupMgr.h"
+#include "Guild.h"
+#include "GuildMgr.h"
 #include "InstanceSaveMgr.h"
 #include "InstanceScript.h"
 #include "Log.h"
@@ -343,6 +345,9 @@ std::unique_ptr<DcTestRunJob> DcTestRunJob::CreateFromRoster(Player* gm,
         s.guid = e.guid;
         s.role = e.role;
         s.rosterName = e.name;
+        // Snapshot the guild BEFORE the login: stock playerbots guilds a guildless
+        // bot on login, and this is the only moment the original state is knowable.
+        s.guildBefore = sCharacterCache->GetCharacterGuildIdByGuid(e.guid);
         // classId off the cache so the record and the live map overlay have it
         // before the character is in world; spec templates are never applied to
         // a real character, so specName/fallbackSpec stay empty.
@@ -719,6 +724,55 @@ void DcTestRunJob::TickProvisioning(bool& provisionBudget)
 //
 // All five slots are read in one tick — there is no factory roll to spend the
 // shared per-tick provision budget on.
+// Stock playerbots joins any guildless bot to a random bot guild the moment it
+// logs in: RandomPlayerbotMgr::OnBotLoginInternal calls
+// PlayerbotFactory::InitGuild whenever AiPlayerbot.RandomBotGuildCount > 0, with
+// no check that the character actually IS a random bot. A roster member logs in
+// through that same holder (the masterless path is the only one whose ownership
+// gate a hand-picked character clears), so it gets caught too — and a real
+// character must come out of a test run in the guild it went in with.
+//
+// So put it back. The decisive signal is that the character was guildless when
+// the run claimed it (captured in CreateFromRoster, moments before the login) and
+// is guilded now: that change provably happened inside our window, and the only
+// actor in that window is playerbots' own InitGuild.
+//
+// Deliberately NOT gated on PlayerbotGuildMgr::IsRealGuild. That flag is computed
+// from the guild LEADER's account, and InitGuild's create path makes the drafted
+// character itself the leader — so a guild freshly conjured around a real
+// character is classified "real" and the gate would refuse to undo exactly the
+// case that needs undoing. The classification is logged instead of obeyed.
+//
+// A character that already had a guild is never touched (InitGuild returns early
+// on those anyway). Guild::DeleteMember handles the leader case properly: it
+// promotes the next-ranked member, or disbands when this was the only one, which
+// is right for a guild that exists solely because of this bug.
+void DcTestRunJob::UndoUnwantedGuild(Player* bot, Slot const& slot) const
+{
+    if (slot.guildBefore)
+        return;  // came in with a guild — not ours to touch
+    uint32 const now = bot->GetGuildId();
+    if (!now)
+        return;  // still guildless — nothing happened
+
+    Guild* guild = sGuildMgr->GetGuildById(now);
+    if (!guild)
+        return;
+
+    bool const classedReal = PlayerbotGuildMgr::instance().IsRealGuild(now);
+    std::string const guildName = guild->GetName();
+    bool const wasLeader = guild->GetLeaderGUID() == bot->GetGUID();
+
+    guild->DeleteMember(bot->GetGUID(), /*isDisbanding*/ false, /*isKicked*/ false,
+                        /*canDeleteGuild*/ true);
+    LOG_INFO("playerbots.dungeonclear",
+             "TESTRUN {} removed {} from guild '{}' ({}) it was auto-joined to at login — "
+             "character was guildless (leader={}, playerbots classed it {}); "
+             "stock RandomBotGuildCount behaviour",
+             _record.runId, bot->GetName(), guildName, now, wasLeader ? "yes" : "no",
+             classedReal ? "real" : "bot");
+}
+
 void DcTestRunJob::TickProvisioningRoster()
 {
     for (Slot& slot : _slots)
@@ -731,6 +785,7 @@ void DcTestRunJob::TickProvisioningRoster()
         if (!bot || !bot->IsInWorld() || !botAI)
             return;  // transient — retry next tick; the stage timeout bounds it
 
+        UndoUnwantedGuild(bot, slot);
         botAI->ResetStrategies();
 
         // What the character's talents actually say, next to what the human
@@ -1770,6 +1825,16 @@ void DcTestRunJob::Teardown()
     if (tank)
         if (Group* group = tank->GetGroup())
             group->Disband(true);
+
+    // Second guild sweep, while the party is still in world. Provisioning undoes
+    // the join stock playerbots makes at LOGIN; this catches anything that guilded
+    // a member later in the run (a guild strategy/task acting mid-run), so the
+    // guarantee is about the state a character comes OUT with, not just the moment
+    // after it logged in. No-op in the normal case.
+    if (_realChars)
+        for (Slot const& slot : _slots)
+            if (Player* bot = ObjectAccessor::FindPlayer(slot.guid))
+                UndoUnwantedGuild(bot, slot);
 
     Player* gm = FindGm();
     LogoutBots(gm);
