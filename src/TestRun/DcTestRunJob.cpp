@@ -23,7 +23,9 @@
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "StringFormat.h"
+#include "World.h"
 
+#include "AiFactory.h"
 #include "Playerbots.h"
 #include "PlayerbotAI.h"
 #include "PlayerbotAIConfig.h"
@@ -157,6 +159,41 @@ Player* DcTestRunJob::FindTank() const
     return ObjectAccessor::FindPlayer(_tankGuid);
 }
 
+void DcTestRunJob::InitIdentity(Player* gm, DcTestDungeonRegistry::Row const& row, uint32 level,
+                                bool heroic, uint32 seed, std::string const& planId)
+{
+    _dungeonToken = row.token;
+    _mapId = row.mapId;
+    _x = row.x;
+    _y = row.y;
+    _z = row.z;
+    _o = row.o;
+    _heroic = heroic;
+    _level = level;
+    _gmGuid = gm->GetGUID();
+
+    _limits.pauseGraceMs = DcSettings::GetUInt(ObjectGuid::Empty, "TestRun.PauseGraceS") * 1000;
+    _limits.stallGraceMs = DcSettings::GetUInt(ObjectGuid::Empty, "TestRun.StallGraceS") * 1000;
+    _limits.noProgressMs = DcSettings::GetUInt(ObjectGuid::Empty, "TestRun.NoProgressS") * 1000;
+    _limits.overallTimeoutMs = DcSettings::GetUInt(ObjectGuid::Empty, "TestRun.OverallTimeoutS") * 1000;
+
+    _record = DcTestRunRecord::Record{};
+    _record.runId = MakeRunId();
+    _record.planId = planId;
+    _record.dungeon = row.token;
+    _record.dungeonName = row.name;
+    _record.wing = row.wing;
+    _record.mapId = row.mapId;
+    _record.level = _level;
+    _record.heroic = heroic;
+    _record.compSeed = seed;
+    _record.startedAtMs = NowUnixMs();
+    _record.pauseGraceS = _limits.pauseGraceMs / 1000;
+    _record.stallGraceS = _limits.stallGraceMs / 1000;
+    _record.noProgressS = _limits.noProgressMs / 1000;
+    _record.overallS = _limits.overallTimeoutMs / 1000;
+}
+
 std::unique_ptr<DcTestRunJob> DcTestRunJob::Create(Player* gm, DcTestDungeonRegistry::Row const& row,
                                                    uint32 levelOverride, uint32 seed, bool heroic,
                                                    std::unordered_set<ObjectGuid> const& reservedGuids,
@@ -167,42 +204,14 @@ std::unique_ptr<DcTestRunJob> DcTestRunJob::Create(Player* gm, DcTestDungeonRegi
     // that gm has a playerbot manager.
     std::unique_ptr<DcTestRunJob> job(new DcTestRunJob());
 
-    job->_dungeonToken = row.token;
-    job->_mapId = row.mapId;
-    job->_x = row.x;
-    job->_y = row.y;
-    job->_z = row.z;
-    job->_o = row.o;
-    job->_heroic = heroic;
-    job->_level = levelOverride ? std::min<uint32>(levelOverride, 80u)
-                                : (heroic ? row.heroicLevel : row.recommendedLevel);
-    job->_gmGuid = gm->GetGUID();
-
     // seed 0 = "roll one" — pick a nonzero seed so the comp varies per run yet
     // is recorded for exact replay via `.dc test start <d> seed=N`.
     if (seed == 0)
         seed = rand32() | 1u;
 
-    job->_limits.pauseGraceMs = DcSettings::GetUInt(ObjectGuid::Empty, "TestRun.PauseGraceS") * 1000;
-    job->_limits.stallGraceMs = DcSettings::GetUInt(ObjectGuid::Empty, "TestRun.StallGraceS") * 1000;
-    job->_limits.noProgressMs = DcSettings::GetUInt(ObjectGuid::Empty, "TestRun.NoProgressS") * 1000;
-    job->_limits.overallTimeoutMs = DcSettings::GetUInt(ObjectGuid::Empty, "TestRun.OverallTimeoutS") * 1000;
-
-    job->_record = DcTestRunRecord::Record{};
-    job->_record.runId = MakeRunId();
-    job->_record.planId = planId;
-    job->_record.dungeon = row.token;
-    job->_record.dungeonName = row.name;
-    job->_record.wing = row.wing;
-    job->_record.mapId = row.mapId;
-    job->_record.level = job->_level;
-    job->_record.heroic = heroic;
-    job->_record.compSeed = seed;
-    job->_record.startedAtMs = NowUnixMs();
-    job->_record.pauseGraceS = job->_limits.pauseGraceMs / 1000;
-    job->_record.stallGraceS = job->_limits.stallGraceMs / 1000;
-    job->_record.noProgressS = job->_limits.noProgressMs / 1000;
-    job->_record.overallS = job->_limits.overallTimeoutMs / 1000;
+    uint32 const level = levelOverride ? std::min<uint32>(levelOverride, 80u)
+                                       : (heroic ? row.heroicLevel : row.recommendedLevel);
+    job->InitIdentity(gm, row, level, heroic, seed, planId);
 
     std::array<DcTestComp::Slot, DcTestComp::kPartySize> const comp = DcTestComp::BuildComp(seed);
     for (DcTestComp::Slot const& c : comp)
@@ -294,6 +303,85 @@ std::unique_ptr<DcTestRunJob> DcTestRunJob::Create(Player* gm, DcTestDungeonRegi
              "TESTRUN START {} dungeon={} map={} level={} heroic={} seed={} gm={}",
              job->_record.runId, job->_record.dungeon, job->_mapId, job->_level,
              heroic ? 1 : 0, seed, gm->GetName());
+
+    job->EnterStage(Stage::SpawningBots);
+    return job;
+}
+
+std::unique_ptr<DcTestRunJob> DcTestRunJob::CreateFromRoster(Player* gm,
+                                                             DcTestDungeonRegistry::Row const& row,
+                                                             bool heroic,
+                                                             std::vector<RosterEntry> const& roster,
+                                                             std::string const& planId,
+                                                             std::string* err)
+{
+    if (roster.size() != DcTestComp::kPartySize)
+    {
+        if (err)
+            *err = "a roster must be exactly " + std::to_string(DcTestComp::kPartySize) + " characters";
+        return nullptr;
+    }
+
+    std::unique_ptr<DcTestRunJob> job(new DcTestRunJob());
+    job->_realChars = true;
+
+    // Level is whatever the characters are. The highest of the five stands in
+    // for the run until provisioning reads the live values, so the status line
+    // and the dungeon's own level expectations have something sane to show; the
+    // record's per-member levels are the real answer.
+    uint32 level = 0;
+    for (RosterEntry const& e : roster)
+        level = std::max<uint32>(level, sCharacterCache->GetCharacterLevelByGuid(e.guid));
+
+    // seed 0: a roster IS the comp, so there is nothing to replay from a seed.
+    job->InitIdentity(gm, row, level, heroic, /*seed*/ 0, planId);
+    job->_record.roster = true;
+
+    for (RosterEntry const& e : roster)
+    {
+        Slot s;
+        s.guid = e.guid;
+        s.role = e.role;
+        s.rosterName = e.name;
+        // classId off the cache so the record and the live map overlay have it
+        // before the character is in world; spec templates are never applied to
+        // a real character, so specName/fallbackSpec stay empty.
+        if (CharacterCacheEntry const* cache = sCharacterCache->GetCharacterCacheByGuid(e.guid))
+            s.classId = cache->Class;
+        job->_slots.push_back(std::move(s));
+    }
+
+    // MASTERLESS login. AddPlayerBot's ownership gate (PlayerbotMgr.cpp) clears
+    // only for same-account / same-guild / addclass-pool / linked characters —
+    // a hand-picked party is none of those, and passing the GM's account id would
+    // see every slot refused with "not allowed to control bot". masterAccountId 0
+    // takes the isRndbot branch, which skips the gate; it is the same call the
+    // headless test driver logs itself in with. The party therefore lands in
+    // sRandomPlayerbotMgr rather than the GM's PlayerbotMgr, which LogoutBots
+    // already handles, and Grouping still installs the GM as playerbots master
+    // so HasRealPlayerMaster (and the react-delay fast path) is unaffected.
+    //
+    // Landing in sRandomPlayerbotMgr does NOT enrol the character in the
+    // random-bot rotation — the thing that would periodically re-Randomize (i.e.
+    // regear) or relocate it. That rotation walks `currentBots`, populated purely
+    // from the playerbots DB's own enrolment rows (RandomPlayerbotMgr::GetBots),
+    // and IsRandomBot additionally demands the account be in
+    // AiPlayerbot.RandomBotAccounts. A real player's character satisfies neither,
+    // so the holder only owns its login/logout here.
+    for (Slot const& slot : job->_slots)
+        sRandomPlayerbotMgr.AddPlayerBot(slot.guid, 0);
+
+    std::string names;
+    for (Slot const& slot : job->_slots)
+    {
+        if (!names.empty())
+            names += ",";
+        names += slot.rosterName + "(" + slot.role + ")";
+    }
+    LOG_INFO("playerbots.dungeonclear",
+             "TESTRUN START {} dungeon={} map={} heroic={} roster={} gm={}",
+             job->_record.runId, job->_record.dungeon, job->_mapId, heroic ? 1 : 0,
+             names, gm->GetName());
 
     job->EnterStage(Stage::SpawningBots);
     return job;
@@ -501,8 +589,29 @@ void DcTestRunJob::TickSpawning()
     }
 
     if (_stageMs >= SPAWN_TIMEOUT_MS)
+    {
+        if (_realChars)
+        {
+            // Name the character that never arrived: for a hand-picked party the
+            // usual cause is somebody logging in on it between the pre-flight
+            // check and the login, which the pool path cannot experience.
+            std::string missing;
+            for (Slot const& slot : _slots)
+            {
+                Player* bot = ObjectAccessor::FindPlayer(slot.guid);
+                if (bot && bot->IsInWorld() && GET_PLAYERBOT_AI(bot))
+                    continue;
+                if (!missing.empty())
+                    missing += ", ";
+                missing += slot.rosterName;
+            }
+            FailSetup("roster characters did not finish logging in (" + missing +
+                      ") — logged in as a real player, or a login failure (see server log)");
+            return;
+        }
         FailSetup("bots did not finish logging in (addclass pool empty, "
                   "maxAddedBots cap, or login failure — see server log)");
+    }
 }
 
 void DcTestRunJob::TickProvisioning(bool& provisionBudget)
@@ -510,6 +619,13 @@ void DcTestRunJob::TickProvisioning(bool& provisionBudget)
     if (_stageMs >= PROVISION_TIMEOUT_MS)
     {
         FailSetup("provisioning timed out");
+        return;
+    }
+
+    // Real characters are never rolled — read them out and move on.
+    if (_realChars)
+    {
+        TickProvisioningRoster();
         return;
     }
 
@@ -586,6 +702,80 @@ void DcTestRunJob::TickProvisioning(bool& provisionBudget)
 
     slot.provisioned = true;
     ++_provisionIdx;
+}
+
+// The whole of "provisioning" for a hand-picked party: describe the characters,
+// change nothing about them.
+//
+// Deliberately absent, and none of it may come back: PlayerbotFactory::Randomize
+// (re-rolls gear AND talents AND level), InitTalentsBySpecNo / InitEquipment /
+// InitGlyphs / ApplyEnchantAndGemsNew (the `autogear`/`maintenance` pass), and
+// InitPet/InitAmmo (a hunter's real pet is not ours to replace). A character
+// marked for a run accepts dying, looting, and durability loss — it does not
+// accept coming back a different character.
+//
+// ResetStrategies stays: it reloads strategies from config (which is how the
+// dungeon-clear stack gets installed) without touching the character sheet.
+//
+// All five slots are read in one tick — there is no factory roll to spend the
+// shared per-tick provision budget on.
+void DcTestRunJob::TickProvisioningRoster()
+{
+    for (Slot& slot : _slots)
+    {
+        if (slot.provisioned)
+            continue;
+
+        Player* bot = ObjectAccessor::FindPlayer(slot.guid);
+        PlayerbotAI* botAI = bot ? GET_PLAYERBOT_AI(bot) : nullptr;
+        if (!bot || !bot->IsInWorld() || !botAI)
+            return;  // transient — retry next tick; the stage timeout bounds it
+
+        botAI->ResetStrategies();
+
+        // What the character's talents actually say, next to what the human
+        // marked it as. A wrong marking is human error at roster time and the run
+        // proceeds anyway (that is the stated policy), but it is the first thing
+        // anyone will want to see in the post-mortem of a run where the "tank"
+        // died in six seconds.
+        char const* detected = PlayerbotAI::IsTank(bot, /*bySpec*/ true)   ? "tank"
+                               : PlayerbotAI::IsHeal(bot, /*bySpec*/ true) ? "heal"
+                                                                          : "dps";
+
+        DcTestRunRecord::CompEntry entry;
+        entry.name = bot->GetName();
+        entry.className = ClassToken(bot->getClass());
+        entry.spec = AiFactory::GetPlayerSpecName(bot);
+        entry.role = slot.role;
+        entry.detectedRole = detected;
+        entry.roleMismatch = slot.role != std::string(detected);
+        entry.guid = slot.guid.GetRawValue();
+        entry.level = bot->GetLevel();
+        entry.fromMap = bot->GetMapId();
+        entry.fromX = bot->GetPositionX();
+        entry.fromY = bot->GetPositionY();
+        entry.fromZ = bot->GetPositionZ();
+        entry.fromO = bot->GetOrientation();
+        _record.comp.push_back(entry);
+
+        // classId was taken from the character cache at Create; trust the live
+        // character over the cache now that it is resolvable.
+        slot.classId = bot->getClass();
+        slot.provisioned = true;
+
+        LOG_INFO("playerbots.dungeonclear",
+                 "TESTRUN {} roster member {} ({} {}, level {}){}",
+                 _record.runId, entry.name, entry.spec, entry.role, entry.level,
+                 entry.roleMismatch ? std::string(" — WARNING: spec reads as ") + detected : "");
+    }
+
+    // Highest level present is the run's headline level (Create only had the
+    // cache's view; this is the live one).
+    for (DcTestRunRecord::CompEntry const& e : _record.comp)
+        _level = std::max(_level, e.level);
+    _record.level = _level;
+
+    EnterStage(Stage::Grouping);
 }
 
 void DcTestRunJob::TickGrouping()
@@ -676,6 +866,64 @@ void DcTestRunJob::TickGrouping()
         FailSetup("group did not form");
 }
 
+void DcTestRunJob::UnbindFromMap() const
+{
+    // Guid-keyed and offline-safe, which is why the teardown copy can run after
+    // the party has logged out.
+    for (Slot const& slot : _slots)
+    {
+        if (!slot.guid)
+            continue;
+        sInstanceSaveMgr->PlayerUnbindInstance(slot.guid, _mapId, DUNGEON_DIFFICULTY_NORMAL,
+                                               /*deleteFromDB*/ true);
+        sInstanceSaveMgr->PlayerUnbindInstance(slot.guid, _mapId, DUNGEON_DIFFICULTY_HEROIC,
+                                               /*deleteFromDB*/ true);
+    }
+}
+
+bool DcTestRunJob::CheckInstanceBudget()
+{
+    // Player::CheckInstanceCount is exactly the gate MapMgr::PlayerCannotEnter
+    // applies, and reads the same in-memory per-account table the core loads at
+    // login (account_instance_times) and prunes as entries expire — so asking the
+    // logged-in character is both cheaper and more faithful than re-deriving the
+    // count in SQL. Instance id 0 = "a brand-new instance", which is what an
+    // unbound party is about to create.
+    uint32 const perHour = sWorld->getIntConfig(CONFIG_MAX_INSTANCES_PER_HOUR);
+    if (perHour == 0)
+        return true;
+
+    for (Slot const& slot : _slots)
+    {
+        Player* bot = ObjectAccessor::FindPlayer(slot.guid);
+        if (!bot)
+            continue;  // not resolvable yet; the stage timeout covers it
+
+        // Mirror MapMgr::PlayerCannotEnter exactly, including its escape hatch:
+        // a member still bound to an instance of this map is re-entering one it
+        // has already paid for, so the count check passes on the found id. A
+        // roster run has just unbound everybody, so the lookup misses and the id
+        // is 0 ("a brand-new instance") — but a pool run on normal difficulty
+        // keeps its bind, and hard-coding 0 here would refuse runs the core would
+        // have allowed.
+        uint32 idToCheck = 0;
+        if (InstanceSave* save = sInstanceSaveMgr->PlayerGetInstanceSave(
+                bot->GetGUID(), _mapId, bot->GetDifficulty(/*isRaid*/ false)))
+            idToCheck = save->GetInstanceId();
+
+        if (bot->CheckInstanceCount(idToCheck))
+            continue;
+
+        FailSetup(Acore::StringFormat(
+            "{} has entered {} instances in the last hour (AccountInstancesPerHour) — "
+            "the core would refuse the teleport. Wait for a slot to free, use different "
+            "characters, or raise AccountInstancesPerHour.",
+            bot->GetName(), perHour));
+        return false;
+    }
+    return true;
+}
+
 void DcTestRunJob::TickTeleporting()
 {
     if (!_teleportIssued)
@@ -696,11 +944,25 @@ void DcTestRunJob::TickTeleporting()
         // shed any leftover heroic bind first so a fresh instance is created.
         // (Normal 5-man saves are non-permanent and reset when the map empties,
         // so they need no such hygiene.)
-        if (_heroic)
+        //
+        // A roster run unbinds BOTH difficulties instead: a real character can
+        // easily be sitting on a half-cleared normal save, and unlike the pool
+        // that is not merely untidy — the party would be dragged into the saved
+        // instance and the verdict's GetCompletedEncounterMask baseline would
+        // start with bosses already dead.
+        if (_realChars)
+            UnbindFromMap();
+        else if (_heroic)
             for (Slot const& slot : _slots)
                 sInstanceSaveMgr->PlayerUnbindInstance(slot.guid, _mapId,
                                                        DUNGEON_DIFFICULTY_HEROIC,
                                                        /*deleteFromDB*/ true);
+
+        // Now that no member is bound, entering costs each account one of its
+        // AccountInstancesPerHour slots — refuse by name here rather than let the
+        // core silently abort the transfer and time this stage out.
+        if (!CheckInstanceBudget())
+            return;
 
         for (Slot const& slot : _slots)
             if (Player* bot = ObjectAccessor::FindPlayer(slot.guid))
@@ -1102,6 +1364,26 @@ void DcTestRunJob::TickMonitoring(uint32 dt)
     if (tank && tankAI && (!tank->IsInWorld() || tank->IsBeingTeleported()))
         return;  // mid-teleport — skip this sample, timers resume next tick
 
+    // A roster member vanishing from the world mid-run means its owner logged in:
+    // playerbots' secure-login hook force-logs-out an active altbot when a real
+    // CMSG_PLAYER_LOGIN arrives for it, so the human cleanly takes their character
+    // back. Name that outcome. Without this the run limps on a member short and
+    // eventually files a no-progress or wipe failure — a real regression report
+    // for something that was never the AI's doing. Session-based lookup, so DC's
+    // own mid-run teleports (handled above) cannot trip it.
+    if (_realChars)
+    {
+        for (Slot const& slot : _slots)
+        {
+            if (!slot.guid || ObjectAccessor::FindConnectedPlayer(slot.guid))
+                continue;
+            Finish(DcTestRun::Verdict::FailAborted,
+                   "roster member " + slot.rosterName +
+                       " left the run (owner logged in, or the character was logged out)");
+            return;
+        }
+    }
+
     if (!tank || !tankAI)
     {
         obs.leaderMissing = true;
@@ -1492,10 +1774,13 @@ void DcTestRunJob::Teardown()
     Player* gm = FindGm();
     LogoutBots(gm);
 
-    // Shed the permanent heroic saves the run just created so the pool bots go
-    // back clean (and the instance can reset) — the mirror of the pre-teleport
-    // unbind. Guid-keyed, so it works after the logout.
-    if (_heroic)
+    // Shed the saves the run just created so the characters go back clean (and
+    // the instance can reset) — the mirror of the pre-teleport unbind.
+    // Guid-keyed, so it works after the logout. Note this does NOT give back the
+    // AccountInstancesPerHour slot the entry consumed; that is time-based.
+    if (_realChars)
+        UnbindFromMap();
+    else if (_heroic)
         for (Slot const& slot : _slots)
             if (slot.guid)
                 sInstanceSaveMgr->PlayerUnbindInstance(slot.guid, _mapId,

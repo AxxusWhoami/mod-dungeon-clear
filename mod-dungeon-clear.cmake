@@ -38,6 +38,7 @@ if (BUILD_TESTING)
             "${MOD_PATH}/t/TestTestDungeonRegistry.cpp"
             "${MOD_PATH}/t/TestTestRunRecord.cpp"
             "${MOD_PATH}/t/TestTestRunSelect.cpp"
+            "${MOD_PATH}/t/TestTestRoster.cpp"
             "${MOD_PATH}/t/TestTestRunLiveJson.cpp"
             "${MOD_PATH}/t/TestWipeContext.cpp"
             "${MOD_PATH}/t/TestDcDiagSnapshot.cpp"

@@ -78,6 +78,7 @@ namespace DcTestRunRecord
           << ",\"level\":" << rec.level
           << ",\"heroic\":" << (rec.heroic ? "true" : "false")
           << ",\"compSeed\":" << rec.compSeed
+          << ",\"roster\":" << (rec.roster ? "true" : "false")
           << ",\"comp\":[";
         for (std::size_t i = 0; i < rec.comp.size(); ++i)
         {
@@ -93,7 +94,13 @@ namespace DcTestRunRecord
             s << ",\"role\":";
             AppendEscaped(s, c.role);
             s << ",\"guid\":" << c.guid
-              << ",\"level\":" << c.level << '}';
+              << ",\"level\":" << c.level
+              << ",\"detectedRole\":";
+            AppendEscaped(s, c.detectedRole);
+            s << ",\"roleMismatch\":" << (c.roleMismatch ? "true" : "false")
+              << ",\"from\":{\"map\":" << c.fromMap
+              << ",\"x\":" << c.fromX << ",\"y\":" << c.fromY << ",\"z\":" << c.fromZ
+              << ",\"o\":" << c.fromO << "}}";
         }
         s << "],\"startedAtMs\":" << rec.startedAtMs
           << ",\"endedAtMs\":" << rec.endedAtMs

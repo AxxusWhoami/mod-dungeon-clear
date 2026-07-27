@@ -53,6 +53,41 @@ public:
                                                  std::unordered_set<ObjectGuid> const& reservedGuids,
                                                  std::string const& planId, std::string* err);
 
+    // One hand-picked party slot: a real player character and the role the human
+    // marked it for. Resolved (name -> guid, faction/liveness checked) by
+    // DcTestRunManager::StartRoster before it gets here.
+    struct RosterEntry
+    {
+        ObjectGuid guid;
+        std::string name;   // as typed, for log/refusal messages
+        char const* role;   // "tank" | "heal" | "dps"
+    };
+
+    // Factory for a roster run: the five slots are given, not drawn. Differs
+    // from Create in three ways, all because these are somebody's real
+    // characters rather than disposable pool bots:
+    //
+    //   * login goes through the MASTERLESS playerbots path
+    //     (sRandomPlayerbotMgr.AddPlayerBot(guid, 0)) — AddPlayerBot's ownership
+    //     gate only clears for same-account / same-guild / addclass-pool / linked
+    //     characters, none of which a hand-picked party satisfies, and the
+    //     masterless branch (isRndbot) skips the gate outright. The GM is still
+    //     installed as playerbots master at Grouping, so the HasRealPlayerMaster
+    //     fast path is unaffected;
+    //   * provisioning does NOT roll the factory — no Randomize, no spec force,
+    //     no re-gear, no glyphs, no pet reroll. The characters fight as they are;
+    //   * `level` comes from the characters, so there is no level argument.
+    //
+    // No seed: a roster IS the comp. Returns nullptr + err only if the roster is
+    // not exactly the expected party size (the manager has already validated the
+    // characters themselves).
+    static std::unique_ptr<DcTestRunJob> CreateFromRoster(Player* gm,
+                                                          DcTestDungeonRegistry::Row const& row,
+                                                          bool heroic,
+                                                          std::vector<RosterEntry> const& roster,
+                                                          std::string const& planId,
+                                                          std::string* err);
+
     // Drive from the world thread. provisionBudget is shared across all runs
     // this tick: the one heavyweight PlayerbotFactory::Randomize roll a run
     // performs consumes it (sets it false), so at most one factory roll runs
@@ -113,6 +148,10 @@ private:
         char const* role = "";
         ObjectGuid guid;
         bool provisioned = false;
+        // Roster runs only: the name as the human typed it, so a slot can be
+        // named in a refusal before its character has ever been resolved to a
+        // Player (the pool path reads the name off the resolved bot instead).
+        std::string rosterName;
     };
 
     // Boss-roster snapshot taken at Starting so mask deltas can be named
@@ -127,11 +166,31 @@ private:
 
     DcTestRunJob() = default;
 
+    // Shared prologue of both factories: identity, watchdog limits, record
+    // header. Everything that does not depend on how the party was chosen.
+    void InitIdentity(Player* gm, DcTestDungeonRegistry::Row const& row, uint32 level,
+                      bool heroic, uint32 seed, std::string const& planId);
+
     void EnterStage(Stage s);
     static char const* StageName(Stage s);
 
     void TickSpawning();
     void TickProvisioning(bool& provisionBudget);
+    // Roster variant: read the characters out into the record and leave them
+    // otherwise untouched. No factory roll, so no per-tick budget.
+    void TickProvisioningRoster();
+    // Unbind every member from this map so the run always gets a FRESH instance.
+    // Both difficulties, because a normal-difficulty bind is just as capable of
+    // dragging the party into a half-cleared save — and a stale bind poisons the
+    // GetCompletedEncounterMask baseline the verdict counts bosses from, which
+    // corrupts the test result rather than merely inconveniencing a character.
+    void UnbindFromMap() const;
+    // Refuse before teleporting when a member's account has burned its
+    // AccountInstancesPerHour budget. Without this the core silently refuses the
+    // transfer and the run dies as "party did not arrive at the dungeon
+    // entrance" — a false diagnosis, and the worst kind in a regression harness.
+    // Returns false and calls FailSetup naming the character.
+    bool CheckInstanceBudget();
     void TickGrouping();
     void TickTeleporting();
     void TickStarting();
@@ -159,6 +218,10 @@ private:
     float _x = 0.f, _y = 0.f, _z = 0.f, _o = 0.f;
     uint32 _level = 0;
     bool _heroic = false;  // run at DUNGEON_DIFFICULTY_HEROIC
+    // Hand-picked real player characters (`party=`) rather than pool bots. Gates
+    // every path that would mutate what a character IS, and switches the login
+    // to the masterless holder. See CreateFromRoster.
+    bool _realChars = false;
     ObjectGuid _gmGuid;
     ObjectGuid _tankGuid;
     std::vector<Slot> _slots;

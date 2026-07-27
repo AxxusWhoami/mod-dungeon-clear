@@ -284,15 +284,26 @@ public:
         return nullptr;
     }
 
-    // `.dc test start <dungeon> [heroic] [level=N]` — dungeon is a registry
-    // token (`.dc test list`) or a mapId.
+    // `.dc test start <dungeon> [heroic] [level=N] [seed=N]` — random comp drawn
+    // from the addclass pool; dungeon is a registry token (`.dc test list`) or a
+    // mapId.
+    //
+    // `.dc test start <dungeon> party=Tank,Heal,D1,D2,D3 [heroic]` — a hand-picked
+    // party of REAL player characters instead (roles positional). level= and seed=
+    // are meaningless there: the level comes from the characters and the roster is
+    // the comp.
     static bool HandleTestStart(ChatHandler* handler, Tail args)
     {
         Player* issuer = ResolveTestIssuer(handler);
         if (!issuer)
             return true;
 
+        static constexpr char const* kUsage =
+            "Usage: .dc test start <dungeon> [heroic] [level=N] [seed=N]\n"
+            "   or: .dc test start <dungeon> party=Tank,Heal,Dps1,Dps2,Dps3 [heroic]";
+
         std::string token;
+        std::string party;
         uint32 level = 0;
         uint32 seed = 0;  // 0 = roll a random comp; seed=N replays a specific one
         bool heroic = false;
@@ -304,24 +315,41 @@ public:
                 level = static_cast<uint32>(std::strtoul(word.c_str() + 6, nullptr, 10));
             else if (word.rfind("seed=", 0) == 0)
                 seed = static_cast<uint32>(std::strtoul(word.c_str() + 5, nullptr, 10));
+            else if (word.rfind("party=", 0) == 0)
+                party = word.substr(6);
             else if (word == "heroic")
                 heroic = true;
             else if (token.empty())
                 token = word;
             else
             {
-                handler->SendSysMessage("Usage: .dc test start <dungeon> [heroic] [level=N] [seed=N]");
+                handler->SendSysMessage(kUsage);
                 return true;
             }
         }
         if (token.empty())
         {
-            handler->SendSysMessage("Usage: .dc test start <dungeon> [heroic] [level=N] [seed=N] — see .dc test list");
+            handler->SendSysMessage(kUsage);
             return true;
         }
 
         std::string msg;
-        DcTestRunManager::Instance().Start(issuer, token, level, seed, heroic, &msg);
+        if (!party.empty())
+        {
+            // Reject rather than silently ignore: somebody passing level= with a
+            // roster believes it will be applied, and applying it would mean
+            // relevelling their character.
+            if (level || seed)
+            {
+                handler->SendSysMessage(
+                    "level= and seed= do not apply to party= runs: the level comes from the "
+                    "characters (they are never relevelled) and the roster is the comp.");
+                return true;
+            }
+            DcTestRunManager::Instance().StartRoster(issuer, token, party, heroic, &msg);
+        }
+        else
+            DcTestRunManager::Instance().Start(issuer, token, level, seed, heroic, &msg);
         handler->SendSysMessage(msg);
         return true;
     }

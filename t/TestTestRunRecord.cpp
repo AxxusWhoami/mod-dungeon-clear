@@ -10,6 +10,7 @@
 
 #include "TestRun/DcTestRunRecord.h"
 
+using DcTestRunRecord::CompEntry;
 using DcTestRunRecord::EscapeJson;
 using DcTestRunRecord::Record;
 using DcTestRunRecord::StatusEntry;
@@ -175,9 +176,52 @@ TEST(DcTestRunRecordTest, BossRosterSerializesInProgressionOrder)
               std::string::npos);
 }
 
-TEST(DcTestRunRecordTest, SchemaIsSeven)
+TEST(DcTestRunRecordTest, SchemaIsEight)
 {
-    EXPECT_NE(ToJsonl(SampleRecord()).find("\"schema\":7"), std::string::npos);
+    EXPECT_NE(ToJsonl(SampleRecord()).find("\"schema\":8"), std::string::npos);
+}
+
+// ---- roster runs (hand-picked real characters) ------------------------------
+
+// A pool run must keep saying roster:false — the dashboard and the plan summary
+// both read this to tell "the harness drew this party" from "a human picked it",
+// and a run whose comp was randomly rolled must never claim the latter.
+TEST(DcTestRunRecordTest, PoolRunsAreNotRosterRuns)
+{
+    std::string const json = ToJsonl(SampleRecord());
+    EXPECT_NE(json.find("\"roster\":false"), std::string::npos);
+}
+
+TEST(DcTestRunRecordTest, RosterRunSerializesMarkedAgainstDetectedRole)
+{
+    Record r = SampleRecord();
+    r.roster = true;
+    r.compSeed = 0;  // a roster IS the comp; nothing to replay from a seed
+    r.comp.clear();
+
+    CompEntry tank;
+    tank.name = "Olanne";
+    tank.className = "warrior";
+    tank.spec = "arms";
+    tank.role = "tank";        // what the human marked
+    tank.detectedRole = "dps"; // what the talents say
+    tank.roleMismatch = true;
+    tank.guid = 1234;
+    tank.level = 70;
+    tank.fromMap = 1;
+    tank.fromX = -1.5f;
+    tank.fromY = 2.5f;
+    tank.fromZ = 3.5f;
+    tank.fromO = 1.f;
+    r.comp.push_back(tank);
+
+    std::string const json = ToJsonl(r);
+    EXPECT_NE(json.find("\"roster\":true"), std::string::npos);
+    EXPECT_NE(json.find("\"role\":\"tank\""), std::string::npos);
+    EXPECT_NE(json.find("\"detectedRole\":\"dps\""), std::string::npos);
+    EXPECT_NE(json.find("\"roleMismatch\":true"), std::string::npos);
+    // Origin position is what makes a manual recall possible after the run.
+    EXPECT_NE(json.find("\"from\":{\"map\":1"), std::string::npos);
 }
 
 // ---- pull log --------------------------------------------------------------------

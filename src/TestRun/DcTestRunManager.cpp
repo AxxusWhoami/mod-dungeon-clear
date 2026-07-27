@@ -9,7 +9,10 @@
 #include <fstream>
 #include <limits>
 
+#include "CharacterCache.h"
+#include "ObjectAccessor.h"
 #include "ObjectGuid.h"
+#include "ObjectMgr.h"
 #include "Player.h"
 
 #include "Playerbots.h"
@@ -22,6 +25,7 @@
 #include "TestRun/DcTestDungeonRegistry.h"
 #include "TestRun/DcTestPlanManager.h"
 #include "TestRun/DcTestRunJob.h"
+#include "TestRun/DcTestRoster.h"
 #include "TestRun/DcTestRunLiveJson.h"
 #include "TestRun/DcTestRunRecord.h"
 #include "TestRun/DcTestRunSelect.h"
@@ -104,6 +108,112 @@ bool DcTestRunManager::Start(Player* gm, std::string const& dungeonToken,
 
     // Reserve the slot guids for the life of the run (covers both the async
     // login and the async logout windows — released only at job erase).
+    for (ObjectGuid const& g : job->BotGuids())
+        _reservedGuids.insert(g);
+
+    std::string const started = "Test run started: " + job->StatusLine();
+    {
+        std::lock_guard<std::mutex> lock(_runsMutex);
+        _runs.push_back(std::move(job));
+    }
+    if (msg)
+        *msg = started;
+    return true;
+}
+
+bool DcTestRunManager::StartRoster(Player* gm, std::string const& dungeonToken,
+                                   std::string const& partySpec, bool heroic, std::string* msg,
+                                   std::string const& planId, StartErr* errOut,
+                                   std::string* runIdOut)
+{
+    if (errOut)
+        *errOut = StartErr::None;
+
+    auto fail = [&](StartErr kind, std::string const& why) -> bool
+    {
+        if (msg)
+            *msg = "Test run not started: " + why;
+        if (errOut)
+            *errOut = kind;
+        return false;
+    };
+
+    DcTestDungeonRegistry::Row const* row = DcTestDungeonRegistry::Find(dungeonToken);
+    if (!row)
+        return fail(StartErr::UnknownDungeon,
+                    "unknown dungeon '" + dungeonToken + "' — see .dc test list");
+
+    if (heroic && row->heroicLevel == 0)
+        return fail(StartErr::UnknownDungeon,
+                    "'" + std::string(row->token) + "' has no heroic mode (TBC heroics only for now)");
+
+    if (!gm || !GET_PLAYERBOT_MGR(gm))
+        return fail(StartErr::NoMgr, "no playerbot manager on this account");
+
+    uint32 const maxConcurrent = DcSettings::GetUInt(ObjectGuid::Empty, "TestRun.MaxConcurrent");
+    if (maxConcurrent != 0 && _runs.size() >= maxConcurrent)
+        return fail(StartErr::CapHit,
+                    "max concurrent test runs reached (" + std::to_string(maxConcurrent) +
+                    ") — .dc test stop <run> first");
+
+    // No MaxAddedBots pre-check here: roster members log in masterless
+    // (AddPlayerBot with masterAccountId 0), and that cap is only applied to bots
+    // added against a master's account.
+
+    DcTestRoster::Result const parsed = DcTestRoster::Parse(partySpec);
+    if (parsed.kind != DcTestRoster::Kind::Ok)
+        return fail(StartErr::BadRoster, parsed.detail);
+
+    std::vector<DcTestRunJob::RosterEntry> roster;
+    roster.reserve(parsed.members.size());
+    uint32 team = 0;
+    bool teamKnown = false;
+
+    for (DcTestRoster::Member const& m : parsed.members)
+    {
+        // The cache is keyed by the stored (capitalised) name; accept whatever
+        // case the Command Deck or the typist used.
+        std::string name = m.name;
+        normalizePlayerName(name);
+        ObjectGuid const guid = sCharacterCache->GetCharacterGuidByName(name);
+        if (!guid)
+            return fail(StartErr::BadRoster, "no character named '" + m.name + "'");
+
+        // A human playing the character wins: AddPlayerBot no-ops on a connected
+        // character, so without this the run would sit out its spawn timeout.
+        if (ObjectAccessor::FindConnectedPlayer(guid))
+            return fail(StartErr::CharacterOnline,
+                        "'" + name + "' is logged in — a roster character must be offline");
+
+        if (_reservedGuids.find(guid) != _reservedGuids.end())
+            return fail(StartErr::CharacterBusy,
+                        "'" + name + "' is already in another live test run");
+
+        // GetCharacterTeamByGuid returns TeamId, and 0 both for Alliance and for
+        // an unknown guid — safe here only because the guid resolved above.
+        uint32 const memberTeam = sCharacterCache->GetCharacterTeamByGuid(guid);
+        if (!teamKnown)
+        {
+            team = memberTeam;
+            teamKnown = true;
+        }
+        else if (memberTeam != team)
+            return fail(StartErr::FactionMismatch,
+                        "'" + name + "' is not the same faction as the rest of the roster — "
+                        "a cross-faction party cannot be grouped");
+
+        roster.push_back({guid, name, m.role});
+    }
+
+    std::string err;
+    std::unique_ptr<DcTestRunJob> job =
+        DcTestRunJob::CreateFromRoster(gm, *row, heroic, roster, planId, &err);
+    if (!job)
+        return fail(StartErr::BadRoster, err);
+
+    if (runIdOut)
+        *runIdOut = job->RunId();
+
     for (ObjectGuid const& g : job->BotGuids())
         _reservedGuids.insert(g);
 

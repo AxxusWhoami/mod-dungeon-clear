@@ -25,10 +25,24 @@ namespace DcTestRunRecord
     {
         std::string name;
         std::string className;   // "warrior", ...
-        std::string spec;        // premade-spec name actually applied
-        std::string role;        // "tank" | "heal" | "dps"
+        std::string spec;        // premade-spec name applied; on a roster run, the
+                                 // character's own spec as read from its talents
+        std::string role;        // "tank" | "heal" | "dps" — as MARKED
         std::uint64_t guid = 0;
         std::uint32_t level = 0; // actual post-factory level (may be clamped)
+
+        // Roster runs only. A hand-picked party is never respecced, so the human
+        // can mark a fury warrior as the tank; the run proceeds (that is the
+        // policy) and this is how the post-mortem says so. Empty on pool runs,
+        // where the spec is forced to match the role by construction.
+        std::string detectedRole;    // what the talents say: "tank"|"heal"|"dps"
+        bool roleMismatch = false;   // detectedRole != role
+
+        // Where the character was standing when the run claimed it. A roster run
+        // does not teleport survivors home (deliberately out of scope), so this
+        // is what makes a manual recall possible after the fact.
+        std::uint32_t fromMap = 0;
+        float fromX = 0.f, fromY = 0.f, fromZ = 0.f, fromO = 0.f;
     };
 
     struct StatusEntry
@@ -101,7 +115,9 @@ namespace DcTestRunRecord
         // 5: added the wipe post-mortem (wipeOnBoss/wipeOpponent*)
         // 6: added bossRoster + the per-member death log (deaths)
         // 7: added the per-pull predicted-vs-observed log (pulls)
-        std::uint32_t schema = 7;
+        // 8: added roster (hand-picked real characters) + per-member
+        //    detectedRole/roleMismatch and origin position
+        std::uint32_t schema = 8;
         std::string runId;
         std::string planId;       // owning `.dc test plan`, "" for ad-hoc runs
         std::string dungeon;      // registry token
@@ -112,6 +128,10 @@ namespace DcTestRunRecord
         std::uint32_t level = 0;  // requested level
         bool heroic = false;      // run at DUNGEON_DIFFICULTY_HEROIC
         std::uint32_t compSeed = 0;  // seed BuildComp rolled this comp from (for replay)
+        // Hand-picked party of real player characters (`party=`) rather than a
+        // seeded draw from the addclass pool. compSeed is 0 on these runs: the
+        // roster IS the comp, so there is nothing to replay from a seed.
+        bool roster = false;
         std::vector<CompEntry> comp;
         std::uint64_t startedAtMs = 0;  // unix ms
         std::uint64_t endedAtMs = 0;
