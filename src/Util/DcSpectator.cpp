@@ -446,6 +446,28 @@ namespace DcSpectator
         dummy->SetUnitFlag(UNIT_FLAG_NON_ATTACKABLE | UNIT_FLAG_NOT_SELECTABLE);
         dummy->SetReactState(REACT_PASSIVE);
 
+        // Pin the invisible model instead of trusting the template's roll.
+        // WORLD_TRIGGER (12999) ships TWO models — 17519 and 11686 — and which
+        // one a summon gets runs through ObjectMgr::ChooseDisplayId ->
+        // GetFirstInvisibleModel, which returns the first model whose DBC-derived
+        // modelInfo->is_trigger is set and otherwise falls back to
+        // DefaultInvisibleModel. That detection reads CreatureModelData out of
+        // the client DBCs against a hardcoded 14-entry table, so on data where
+        // neither model resolves as a trigger the camera can end up wearing a
+        // model that RENDERS.
+        //
+        // It matters here more than for an ordinary trigger because the one
+        // person guaranteed to be looking is a GM, and GM mode is exactly what
+        // strips every other layer of hiding: CanSeeOrDetect short-circuits to
+        // "return true" for any viewer with GM detect (Object.cpp, "Stop
+        // checking other things for GMs"), skipping the invisibility and stealth
+        // checks entirely. The MODEL is therefore the only thing still hiding
+        // the camera from its own pilot — so state it outright rather than
+        // inferring it. Never use Unit::SetVisible(false) for this: that sets
+        // server-side GM visibility, i.e. hides it from players and shows it to
+        // GMs, which is precisely backwards.
+        dummy->SetDisplayId(CreatureModel::DefaultInvisibleModel.CreatureDisplayID);
+
         if (!dummy->SetCharmedBy(player, CHARM_TYPE_POSSESS))
         {
             dummy->DespawnOrUnsummon();
