@@ -552,6 +552,144 @@ std::optional<Position> DcEngageGeometry::EnRoutePackAvoidPoint(Player* bot,
     return wp;
 }
 
+bool DcEngageGeometry::TargetInsideBystanderPack(Player* bot, Unit* target)
+{
+    if (!bot || !target)
+        return false;
+    if (!DcSettings::GetBool(bot, "PullEnRouteAvoid"))
+        return false;
+
+    float const margin = DcSettings::GetFloat(bot, "PullEnRouteMargin");
+
+    // Search around the TARGET, wide enough to hold any mob whose own padded
+    // reach could still cover it. kMaxAggroReach mirrors the pull classifier's
+    // clamp (45yd notice + reach) — the same number BystanderSpheres uses.
+    constexpr float kMaxAggroReach = 50.0f;
+    float const searchRadius = kMaxAggroReach + margin;
+
+    std::list<Creature*> nearby;
+    Acore::AnyUnitInObjectRangeCheck check(target, searchRadius);
+    Acore::CreatureListSearcher<Acore::AnyUnitInObjectRangeCheck> searcher(
+        target, nearby, check);
+    Cell::VisitObjects(target, searcher, searchRadius);
+
+    // Same packmate exclusions as BystanderSpheres: a formation-mate or anything
+    // within the pack radius comes along with the pull anyway, so it can never
+    // make its own packmate unreachable.
+    CreatureGroup const* targetGroup =
+        target->ToCreature() ? target->ToCreature()->GetFormation() : nullptr;
+    uint32 const targetFormation = targetGroup ? targetGroup->GetId() : 0u;
+    constexpr float kPackRadius = 12.0f;
+
+    for (Creature* c : nearby)
+    {
+        if (!c || !c->IsAlive() || c == target)
+            continue;
+        if (!bot->IsHostileTo(c) || c->IsCritter() || c->IsTotem())
+            continue;
+        // Already fighting us: its aggro is spent — it is not a pack we can wake.
+        if (c->IsInCombat())
+            continue;
+        CreatureGroup const* grp = c->GetFormation();
+        if (targetFormation && grp && grp->GetId() == targetFormation)
+            continue;
+        if (target->GetExactDist2d(c) <= kPackRadius)
+            continue;
+        // Another floor: near in plan view, unreachable in fact.
+        if (std::fabs(c->GetPositionZ() - target->GetPositionZ()) > DC_Z_LEVEL_TOLERANCE)
+            continue;
+
+        if (target->GetExactDist2d(c) <= AggroReach(bot, c, margin))
+        {
+            DC_PULL_DEBUG("[DC:{}] chase leash: target {} has walked inside {}'s "
+                          "aggro sphere ({:.1f}yd) — no approach to it is clean",
+                          bot->GetName(), target->GetGUID().ToString(),
+                          c->GetGUID().ToString(), target->GetExactDist2d(c));
+            return true;
+        }
+    }
+    return false;
+}
+
+void DcEngageGeometry::AnchorChase(Player* bot, AiObjectContext* ctx, Unit* target)
+{
+    if (!bot || !ctx || !target)
+        return;
+    DcApproachState& appr = ctx->GetValue<DcApproachState&>(DcKey::ApproachState)->Get();
+    appr.chaseTarget = target->GetGUID();
+    appr.chaseAnchor = target->GetPosition();
+    appr.chaseOrigin = bot->GetPosition();
+    appr.chaseHoldSince = 0;
+}
+
+DungeonClearMath::ChaseVerdict DcEngageGeometry::ChaseLeash(Player* bot,
+                                                            AiObjectContext* ctx,
+                                                            Unit* target)
+{
+    using DungeonClearMath::ChaseVerdict;
+    if (!bot || !ctx || !target)
+        return ChaseVerdict::Follow;
+
+    float const leash = DcSettings::GetFloat(bot, "PullChaseLeash");
+    if (leash <= 0.0f)
+        return ChaseVerdict::Follow;
+
+    // A mob already in combat is a fight, not a pull: whatever it is doing (kiting
+    // a follower, fleeing at low HP) the tank has to run it down, and holding for
+    // it to "come back" would abandon the party member it is chewing on.
+    if (target->IsInCombat())
+        return ChaseVerdict::Follow;
+
+    DcApproachState& appr = ctx->GetValue<DcApproachState&>(DcKey::ApproachState)->Get();
+
+    // First walk at this pack: anchor to the ground the plan was made against and
+    // let this tick through untouched.
+    if (appr.chaseTarget != target->GetGUID())
+    {
+        appr.chaseTarget = target->GetGUID();
+        appr.chaseAnchor = target->GetPosition();
+        appr.chaseOrigin = bot->GetPosition();
+        appr.chaseHoldSince = 0;
+        return ChaseVerdict::Follow;
+    }
+
+    float const drift = target->GetExactDist2d(&appr.chaseAnchor);
+    float const gapAtAnchor = appr.chaseOrigin.GetExactDist2d(&appr.chaseAnchor);
+    float const gapNow = appr.chaseOrigin.GetExactDist2d(target);
+    // Only pay for the grid search once the cheap drift test says the mob has
+    // actually gone somewhere; a pack sitting on its spawn never reaches here.
+    bool const hot = drift > leash && TargetInsideBystanderPack(bot, target);
+
+    uint32 const holdMs =
+        static_cast<uint32>(DcSettings::GetFloat(bot, "PullChaseWaitSec") * 1000.0f);
+    ChaseVerdict const v = DungeonClearMath::DecideChase(
+        drift, gapAtAnchor, gapNow, hot, leash, getMSTime(), holdMs,
+        appr.chaseHoldSince);
+
+    if (v != ChaseVerdict::Follow)
+        DC_PULL_DEBUG("[DC:{}] chase leash: {} has drifted {:.1f}yd from where we "
+                      "picked it (leash {:.0f}, gap {:.1f} -> {:.1f}{}) -> {}",
+                      bot->GetName(), target->GetGUID().ToString(), drift, leash,
+                      gapAtAnchor, gapNow, hot ? ", inside another pack" : "",
+                      v == ChaseVerdict::Hold ? "HOLD" : "GIVE UP");
+
+    // GiveUp re-anchors. The hold is over either way — what it means is the
+    // CALLER's decision (the pull abandons the pack to the walk-in engage; the
+    // walk-in has nowhere left to hand it to and simply walks) and both want a
+    // clean slate rather than a latch that keeps reporting GiveUp forever. For
+    // the walk-in this is what makes the leash a PACING rule instead of a refusal:
+    // the chase resumes from here and is leashed again from the new spot, so
+    // pursuing a mob across a room costs a hold per leash-length instead of one
+    // uninterrupted sprint — and the run can never wedge on a patrol that left.
+    if (v == ChaseVerdict::GiveUp)
+    {
+        appr.chaseAnchor = target->GetPosition();
+        appr.chaseOrigin = bot->GetPosition();
+        appr.chaseHoldSince = 0;
+    }
+    return v;
+}
+
 DcEngageGeometry::OrbitStep DcEngageGeometry::OrbitRing(
     OrbitProfile profile, float safeRadius, float botRadius, float partyMargin,
     float maxLegYards)

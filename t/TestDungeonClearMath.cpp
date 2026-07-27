@@ -1446,3 +1446,121 @@ TEST(DungeonClearAssistRangeTest, MeleeKeepsItsOwnReachInclusiveThreshold)
     // Well inside spell range but outside melee reach: still not engageable.
     EXPECT_FALSE(DungeonClearMath::IsWithinAssistAttackRange(true, 20.0f, /*meleeRange*/ 4.2f, 28.5f, 3.2f));
 }
+
+// --- DecideChase (the chase leash) ---------------------------------------
+// A pull/engage target is latched by GUID and re-aimed at its live position every
+// tick, so a mob that WALKS turns the approach into a pursuit across the room —
+// waking every pack the mob's route passes behind. The leash pins the approach to
+// the ground the plan was made against and waits a receding target out instead.
+
+using DungeonClearMath::ChaseVerdict;
+using DungeonClearMath::DecideChase;
+
+namespace
+{
+    // Named wrapper so the call sites below read as the scenario they are.
+    ChaseVerdict Chase(float drift, float gapAtAnchor, float gapNow, bool hot,
+                       float leash, std::uint32_t now, std::uint32_t holdMs,
+                       std::uint32_t& hold)
+    {
+        return DecideChase(drift, gapAtAnchor, gapNow, hot, leash, now, holdMs, hold);
+    }
+}
+
+TEST(DungeonClearChaseLeashTest, AStationaryPackIsAlwaysFollowed)
+{
+    std::uint32_t hold = 0;
+    EXPECT_EQ(Chase(0.0f, 30.0f, 30.0f, false, 15.0f, 1000u, 6000u, hold),
+              ChaseVerdict::Follow);
+    EXPECT_EQ(hold, 0u);
+}
+
+TEST(DungeonClearChaseLeashTest, WobbleInsideTheLeashIsNotAChase)
+{
+    // Ordinary wander/patrol wobble around a spawn must never hold the tank —
+    // a RANDOM_MOTION radius is typically 5-10yd and the leash sits above it.
+    std::uint32_t hold = 0;
+    EXPECT_EQ(Chase(14.9f, 30.0f, 44.0f, false, 15.0f, 1000u, 6000u, hold),
+              ChaseVerdict::Follow);
+    EXPECT_EQ(hold, 0u);
+}
+
+TEST(DungeonClearChaseLeashTest, ARecedingTargetIsHeldThenGivenUpOn)
+{
+    std::uint32_t hold = 0;
+    // Past the leash AND further from our commit spot than when we picked it.
+    EXPECT_EQ(Chase(20.0f, 30.0f, 44.0f, false, 15.0f, 1000u, 6000u, hold),
+              ChaseVerdict::Hold);
+    EXPECT_EQ(hold, 1000u);           // latch armed at first receding tick
+    // Still holding partway through the wait, latch untouched.
+    EXPECT_EQ(Chase(26.0f, 30.0f, 50.0f, false, 15.0f, 5000u, 6000u, hold),
+              ChaseVerdict::Hold);
+    EXPECT_EQ(hold, 1000u);
+    // Wait elapsed: give up rather than stall the run on a patrol that left.
+    EXPECT_EQ(Chase(30.0f, 30.0f, 55.0f, false, 15.0f, 7000u, 6000u, hold),
+              ChaseVerdict::GiveUp);
+}
+
+TEST(DungeonClearChaseLeashTest, AnInboundPatrolIsFollowedDespiteTheDrift)
+{
+    // The whole point of holding is that a patrol loops back. A mob that has come
+    // at least as close to our commit spot as it was when picked is that return
+    // leg — following it is what lets the tank tag it without ever advancing.
+    std::uint32_t hold = 1000u;
+    EXPECT_EQ(Chase(40.0f, 30.0f, 22.0f, false, 15.0f, 3000u, 6000u, hold),
+              ChaseVerdict::Follow);
+    EXPECT_EQ(hold, 0u) << "the hold must disarm the moment it comes back";
+}
+
+TEST(DungeonClearChaseLeashTest, AHotDestinationIsHeldEvenWhenItIsComingToUs)
+{
+    // Standing inside another pack's aggro sphere is not walkable ground however
+    // close it is: reaching it wakes that pack no matter how the route bends. This
+    // is the half en-route avoidance structurally cannot cover — it steers around
+    // spheres IN THE WAY, and a sphere containing the destination has no way past.
+    std::uint32_t hold = 0;
+    EXPECT_EQ(Chase(2.0f, 30.0f, 10.0f, /*hot*/ true, 15.0f, 1000u, 6000u, hold),
+              ChaseVerdict::Hold);
+    EXPECT_EQ(hold, 1000u);
+    // It steps clear of the neighbour: resume at once, latch disarmed.
+    EXPECT_EQ(Chase(2.0f, 30.0f, 10.0f, /*hot*/ false, 15.0f, 1200u, 6000u, hold),
+              ChaseVerdict::Follow);
+    EXPECT_EQ(hold, 0u);
+}
+
+TEST(DungeonClearChaseLeashTest, ZeroLeashIsTheHistoricalAlwaysChase)
+{
+    std::uint32_t hold = 4242u;
+    EXPECT_EQ(Chase(500.0f, 5.0f, 500.0f, true, 0.0f, 1000u, 6000u, hold),
+              ChaseVerdict::Follow);
+    EXPECT_EQ(hold, 0u) << "a disabled gate must not leave a latch behind";
+}
+
+TEST(DungeonClearChaseLeashTest, ZeroHoldGivesUpImmediatelyWithoutArming)
+{
+    std::uint32_t hold = 0;
+    EXPECT_EQ(Chase(20.0f, 30.0f, 44.0f, false, 15.0f, 1000u, 0u, hold),
+              ChaseVerdict::GiveUp);
+    EXPECT_EQ(hold, 0u);
+}
+
+TEST(DungeonClearChaseLeashTest, ArmingOnMillisecondZeroDoesNotReadAsUnarmed)
+{
+    // Same corner every latch in this file guards: 0 is the "unarmed" sentinel, so
+    // arming at getMSTime() == 0 must nudge to 1 or the hold restarts every tick.
+    std::uint32_t hold = 0;
+    EXPECT_EQ(Chase(20.0f, 30.0f, 44.0f, false, 15.0f, 0u, 6000u, hold),
+              ChaseVerdict::Hold);
+    EXPECT_EQ(hold, 1u);
+}
+
+TEST(DungeonClearChaseLeashTest, ABackwardClockStepCannotFakeAnExpiry)
+{
+    // getMSTime() wrap / a backward step must read as "no time has elapsed", not as
+    // a huge unsigned elapsed that gives up on a target we only just started
+    // waiting for.
+    std::uint32_t hold = 5000u;
+    EXPECT_EQ(Chase(20.0f, 30.0f, 44.0f, false, 15.0f, /*now*/ 100u, 6000u, hold),
+              ChaseVerdict::Hold);
+    EXPECT_EQ(hold, 5000u);
+}

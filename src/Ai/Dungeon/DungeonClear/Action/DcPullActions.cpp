@@ -652,6 +652,14 @@ bool DungeonClearPullAction::Execute(Event /*event*/)
             // camp fight) and latch the pack over to the walk-in engage.
             pull.pullTarget = trash->GetGUID();
 
+            // Anchor the chase leash HERE, not on the tag leg's first tick. This is
+            // the moment the plan exists: the camp above was measured against this
+            // spot and the aggro estimate was taken here. The tank then stands still
+            // for the whole Forming dwell while the party sets, so a lazily-anchored
+            // leash would stamp seconds later at wherever the pack had wandered to
+            // and measure drift from ground the plan never saw.
+            DcEngageGeometry::AnchorChase(bot, context, trash);
+
             // Halt the escort glide for real before committing. A plain StopMoving
             // does NOT cancel a launched escort spline (the door-blocked park is the
             // other witness), so without StopBot(Hold) the tank keeps gliding
@@ -728,6 +736,50 @@ bool DungeonClearPullAction::Execute(Event /*event*/)
                              "{:.1f}yd) -> normal engage", bot->GetName(),
                              trash->GetGUID().ToString(), bot->GetExactDist(trash));
                 return false;
+            }
+
+            // CHASE LEASH. The tag leg re-aims at the target's LIVE position every
+            // tick, so a pack that WALKS turns it into a pursuit: the tank follows
+            // a patrol wherever its route takes it — including back behind other
+            // packs — and arrives at the camp with the whole room. The plan this
+            // leg is executing (the size estimate, the camp) was measured against
+            // where the pack stood at commit; once it has receded from there, the
+            // leg is walking at ground the plan never covered.
+            //
+            // So hold instead of chasing. A patrol is a loop and comes back to us;
+            // holding is also what the party is set up for — they are already
+            // passive at the camp, so a few seconds of the tank standing at its
+            // commit spot costs nothing and risks nothing. GiveUp hands the pack to
+            // the normal walk-in engage exactly like the leg watchdog above (which
+            // is deliberately the longer of the two clocks), so a patrol that never
+            // comes back can never stall the run.
+            //
+            // The pull-back maneuver is exempt: its whole point is a long deliberate
+            // haul out to a boss that may be swimming/roaming, and its own
+            // distance-sized watchdog already bounds it.
+            if (!pull.bossPullback)
+            {
+                DungeonClearMath::ChaseVerdict const chase =
+                    DcEngageGeometry::ChaseLeash(bot, context, trash);
+                if (chase == DungeonClearMath::ChaseVerdict::Hold)
+                {
+                    DcMovement::StopBot(bot, DcMovement::Stop::Hold);
+                    DcFaceIfNeeded(bot, trash);
+                    DC_PULL_TRACE("[DC:{}] pull advancing: holding at the commit spot "
+                                  "for {} to come back ({:.1f}yd)", bot->GetName(),
+                                  trash->GetGUID().ToString(), bot->GetExactDist(trash));
+                    return true;
+                }
+                if (chase == DungeonClearMath::ChaseVerdict::GiveUp)
+                {
+                    pull.abortTarget = trash->GetGUID();
+                    DcSetPullPhase(context, DcPullPhase::Idle);
+                    DC_PULL_INFO("[DC:{}] advanced-pull: {} kept walking away from the "
+                                 "spot we planned the pull against ({:.1f}yd out) -> "
+                                 "normal engage", bot->GetName(),
+                                 trash->GetGUID().ToString(), bot->GetExactDist(trash));
+                    return false;
+                }
             }
 
             // FORCE-AGGRO — per-encounter opt-in, keyed off the boss's own registry

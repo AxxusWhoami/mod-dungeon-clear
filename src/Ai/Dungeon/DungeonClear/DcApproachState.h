@@ -82,6 +82,26 @@ struct DcApproachState
     int8 avoidOrbitDir         = 0;  // 0 = unlatched, +/-1 = committed rotation
     ObjectGuid avoidOrbitSphere;     // pack GUID the current avoid orbit is for
 
+    // --- chase leash (approach to a MOVING trash target) ------------------
+    // A trash target is latched by GUID and read live, so a walking mob turns
+    // every approach into a pursuit: the tank follows it across the room and
+    // wakes everything its route passes behind. The leash pins the approach to
+    // the ground the pull was PLANNED against — `chaseAnchor` is where the mob
+    // stood when we committed to walking at it, `chaseOrigin` where the tank
+    // stood then (the fixed origin the receding test is measured from; from the
+    // tank's live position the gap always shrinks as we walk and the leash could
+    // never engage). A target that recedes past the leash is waited out rather
+    // than chased — see DungeonClearMath::DecideChase.
+    //
+    // Keyed by `chaseTarget`, so a different pack simply re-anchors; there is no
+    // stale-latch window. Shared by BOTH walks that aim at a live trash unit (the
+    // pull's tag leg and the engage walk-in) so they can never disagree about how
+    // far the same mob has drifted.
+    ObjectGuid chaseTarget;          // target the anchor below belongs to
+    Position   chaseAnchor;          // where THAT MOB stood when we committed
+    Position   chaseOrigin;          // where the TANK stood then (gap origin)
+    uint32     chaseHoldSince  = 0;  // getMSTime() the current hold began; 0 = not holding
+
     // Mid-glide hazard probe (Advance). While a continuous escort spline is in
     // flight the hop ladder short-circuits (the ride outranks everything), so a
     // PATROL can wander into the committed window after launch unobserved. The
@@ -167,6 +187,10 @@ struct DcApproachState
         skirtOrbitTarget.Clear();
         avoidOrbitDir       = 0;
         avoidOrbitSphere.Clear();
+        chaseTarget.Clear();
+        chaseAnchor         = Position();
+        chaseOrigin         = Position();
+        chaseHoldSince      = 0;
         glideHazardProbeMs  = 0;
         glideHazardIgnore.Clear();
         doorStallGuid.Clear();
