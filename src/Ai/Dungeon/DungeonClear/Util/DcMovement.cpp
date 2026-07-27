@@ -45,6 +45,13 @@ namespace DcMovement
         ZeroLastMovementWait(bot);
     }
 
+    void ClearMovementWait(Player* bot)
+    {
+        if (!bot)
+            return;
+        ZeroLastMovementWait(bot);
+    }
+
     void ResolveEscortConflict(Player* bot)
     {
         if (!bot)
