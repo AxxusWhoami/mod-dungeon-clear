@@ -81,6 +81,27 @@ constexpr float DC_CORRIDOR_LOOKAHEAD = 35.0f;
 // visit per half-second per tank. Gated on AdvanceWindowYards > 0 and
 // PullEnRouteAvoid, so normal difficulty pays nothing.
 constexpr uint32 DC_GLIDE_HAZARD_PROBE_MS = 500;
+
+// En-route truncation shaping (Advance; DcEngageGeometry::TruncateWindowAtSphere).
+//
+// DC_AVOID_MIN_GLIDE is the floor on what a truncated window is allowed to be.
+// Below it the "stop at the hazard threshold" is indistinguishable from standing
+// still, and Advance would spend the tick either issuing a 2yd spline or — when
+// the truncation leaves the lone seed point — dropping into the per-point MoveTo
+// walk, whose per-hop LastMovement delay is the ~2yd/s crawl the spline window
+// exists to eliminate. A tank that close to a pack has nothing left to avoid, so
+// the truncation is declined and the glide runs; the pack is owned from there by
+// the blocking-trash detector and the pull pipeline. Sized just above one
+// polyline point spacing (~4yd) so a truncation always buys at least one real
+// leg of travel.
+constexpr float DC_AVOID_MIN_GLIDE = 6.0f;
+// How far OUTSIDE the sphere the truncated window's last point sits. Parking
+// exactly on the boundary reads as "inside" to the next tick's test (the
+// crossing solve rejects a start point already within r), which would decline
+// every following truncation for that sphere; a yard of clearance keeps the stop
+// re-derivable. Small on purpose — the sphere is already padded by
+// PullEnRouteMargin, so this is anti-jitter, not safety margin.
+constexpr float DC_AVOID_EDGE_BACKOFF = 1.0f;
 // Half-width of the path "blocking trash" band. Widened from 8 to 18 so it
 // roughly matches level-80 elite aggro radius: a pack sitting a few yards off the
 // route line still aggros as the tank passes, so it must count as blocking trash.

@@ -201,6 +201,52 @@ public:
         std::vector<G3D::Vector3> const& polyline,
         std::vector<AvoidSphere> const& spheres, size_t& legOut);
 
+    // Pure: the point along the segment a->b where it FIRST crosses INTO the
+    // circle (cx, cy, r), pulled `backoff` yards back along the segment so the
+    // walker parks a hair outside rather than exactly on the boundary (a stop
+    // dead on the edge reads as "inside" to the next tick and flip-flops). Z is
+    // interpolated. nullopt when `a` is already inside the circle (there is no
+    // threshold ahead of the walker to stop at), when the segment never reaches
+    // the circle, or when the backoff eats the whole approach.
+    static std::optional<G3D::Vector3> SegmentCircleEntry(
+        G3D::Vector3 const& a, G3D::Vector3 const& b,
+        float cx, float cy, float r, float backoff);
+
+    // Truncate a spline window (window[0] IS the walker's live position) at the
+    // first bystander sphere on it, so the glide runs up to that pack's aggro
+    // THRESHOLD and stops there out of combat. Returns true and rewrites
+    // `window` when the truncation is honourable; returns false leaving
+    // `window` UNTOUCHED when it is not.
+    //
+    // That second half is the whole point of this function. The first cut of
+    // this avoidance truncated to the last polyline VERTEX before the hazard
+    // (window.resize(legOut + 1)), which collapses the window to the lone seed
+    // point whenever the tank is at or inside a sphere — and a <2-point window
+    // is not a stop, it drops Advance into the legacy per-point MoveTo walk.
+    // Each hop then costs its own LastMovement delay, so the tank CRAWLED
+    // through the hazard at ~2yd/s instead of gliding past it at ~7. With
+    // heroic elites padded to ~30yd of reach the tank is nearly always inside
+    // someone's sphere, so that was most of the approach: live Sethekk heroic,
+    // 181 of 302 truncations collapsed to a single point — the "takes a few
+    // steps, stops, takes a few steps" report, and the same stutter-creep the
+    // spline window exists to kill (see BossEngageRange's header note).
+    //
+    // So: stop at the threshold, not at a vertex, and when the surviving glide
+    // would be shorter than `minGlideYards` — the tank is already at or inside
+    // the sphere, and there is no walk left to keep out of it — decline the
+    // truncation and let the caller glide through at full speed. Preference,
+    // never refusal, and never a crawl: the pack is still owned downstream by
+    // the blocking-trash detector (same formula, minus the party buffer) and by
+    // the pull pipeline's own orbit.
+    //
+    // `legOut` / `sphereOut` report the violation whether or not it was
+    // honoured, for logging and for the mid-glide probe's ignore latch;
+    // sphereOut is -1 when the window was clear.
+    static bool TruncateWindowAtSphere(std::vector<G3D::Vector3>& window,
+                                       std::vector<AvoidSphere> const& spheres,
+                                       float minGlideYards, float backoff,
+                                       size_t& legOut, int& sphereOut);
+
     // A detour waypoint that keeps the walk to `target` out of every OTHER
     // pack's aggro range, or nullopt when the straight approach is already clear
     // (or avoidance is off / nothing can be snapped — always degrade to walking

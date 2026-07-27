@@ -224,8 +224,10 @@ TEST(DcPolylineAvoidTest, WindowTruncatesBeforeSphereEntry)
 }
 
 // A sphere already covering the walker violates from the very first leg:
-// legOut == 0, and the caller's truncation leaves <2 points — the "no window,
-// fall through to normal handling" signal, never an empty vector or a freeze.
+// legOut == 0, and a naive vertex truncation leaves <2 points. That degenerate
+// case is WHY callers go through TruncateWindowAtSphere (below) rather than
+// resizing themselves — a 1-point window is not a stop, it is the per-point
+// MoveTo crawl.
 TEST(DcPolylineAvoidTest, TruncationLeavesAtLeastOneForwardPoint)
 {
     std::vector<G3D::Vector3> line = StraightPolyline(5, 10.0f);
@@ -295,4 +297,142 @@ TEST(DcAggroReachTest, AggroReachIncludesBotCombatReachAndMargin)
 TEST(DcAggroReachTest, TrashBandRespectsLookahead)
 {
     EXPECT_FLOAT_EQ(DC_CORRIDOR_LOOKAHEAD, 35.0f);
+}
+
+// ===========================================================================
+// Pure geometry: threshold-accurate window truncation
+// (SegmentCircleEntry / TruncateWindowAtSphere).
+//
+// The bug these pin: truncating a spline window to the last VERTEX before a
+// bystander sphere collapses it to the lone seed point whenever the tank is at
+// or inside that sphere, and a <2-point window drops Advance into the legacy
+// per-point MoveTo walk — the ~2yd/s crawl on approach ("a few steps, stop, a
+// few steps, stop"). Live heroic: 181 of 302 truncations collapsed that way.
+// ===========================================================================
+
+TEST(DcWindowTruncateTest, EntryPointLandsJustOutsideTheCircle)
+{
+    // Leg along +X, circle centred at 20 with r=5 -> crossing at x=15, backed
+    // off 1yd to x=14.
+    std::optional<G3D::Vector3> const p = DcEngageGeometry::SegmentCircleEntry(
+        G3D::Vector3(0.0f, 0.0f, 0.0f), G3D::Vector3(30.0f, 0.0f, 0.0f),
+        20.0f, 0.0f, 5.0f, 1.0f);
+    ASSERT_TRUE(p.has_value());
+    EXPECT_NEAR(p->x, 14.0f, 0.01f);
+    EXPECT_NEAR(p->y, 0.0f, 0.01f);
+}
+
+// Z rides the leg so the stop point stays ON the route, not at the leg start's
+// height — a window point off the floor is the vertical-mismatch bug class.
+TEST(DcWindowTruncateTest, EntryPointInterpolatesZ)
+{
+    std::optional<G3D::Vector3> const p = DcEngageGeometry::SegmentCircleEntry(
+        G3D::Vector3(0.0f, 0.0f, 0.0f), G3D::Vector3(40.0f, 0.0f, 20.0f),
+        40.0f, 0.0f, 20.0f, 0.0f);
+    ASSERT_TRUE(p.has_value());
+    EXPECT_NEAR(p->x, 20.0f, 0.01f);
+    EXPECT_NEAR(p->z, 10.0f, 0.01f);
+}
+
+// Already inside: there is no threshold ahead of the walker to stop at. This is
+// the case the vertex truncation answered with "stop where you stand".
+TEST(DcWindowTruncateTest, NoEntryPointWhenWalkerIsAlreadyInside)
+{
+    EXPECT_FALSE(DcEngageGeometry::SegmentCircleEntry(
+        G3D::Vector3(0.0f, 0.0f, 0.0f), G3D::Vector3(30.0f, 0.0f, 0.0f),
+        2.0f, 0.0f, 10.0f, 1.0f).has_value());
+    // A leg that never reaches the circle, and one that passes it by.
+    EXPECT_FALSE(DcEngageGeometry::SegmentCircleEntry(
+        G3D::Vector3(0.0f, 0.0f, 0.0f), G3D::Vector3(5.0f, 0.0f, 0.0f),
+        40.0f, 0.0f, 5.0f, 1.0f).has_value());
+    EXPECT_FALSE(DcEngageGeometry::SegmentCircleEntry(
+        G3D::Vector3(0.0f, 0.0f, 0.0f), G3D::Vector3(30.0f, 0.0f, 0.0f),
+        15.0f, 40.0f, 5.0f, 1.0f).has_value());
+}
+
+TEST(DcWindowTruncateTest, ClearWindowIsLeftAlone)
+{
+    std::vector<G3D::Vector3> window = StraightPolyline(6, 10.0f);
+    std::vector<AvoidSphere> const spheres{ Sphere(20.0f, 40.0f, 5.0f) };
+    size_t leg = 999;
+    int idx = 99;
+    EXPECT_FALSE(DcEngageGeometry::TruncateWindowAtSphere(
+        window, spheres, 6.0f, 1.0f, leg, idx));
+    EXPECT_EQ(window.size(), 6u);
+    EXPECT_EQ(idx, -1);
+}
+
+// The honoured case: the window ends ON the sphere threshold, not at the vertex
+// before it — the ~26yd of route the vertex truncation used to throw away.
+TEST(DcWindowTruncateTest, HonouredTruncationEndsAtTheThresholdNotTheVertex)
+{
+    std::vector<G3D::Vector3> window = StraightPolyline(8, 10.0f);  // 0..70
+    std::vector<AvoidSphere> const spheres{ Sphere(55.0f, 0.0f, 10.0f) };
+    size_t leg = 999;
+    int idx = 99;
+    ASSERT_TRUE(DcEngageGeometry::TruncateWindowAtSphere(
+        window, spheres, 6.0f, 1.0f, leg, idx));
+    EXPECT_EQ(idx, 0);
+    EXPECT_EQ(leg, 4u);                    // the 40->50 leg first clips r=10
+    // The vertex truncation would have stopped at x=40, throwing away 5yd of
+    // clean route; the threshold is x=45, less the 1yd backoff.
+    EXPECT_EQ(window.size(), 6u);
+    EXPECT_NEAR(window.back().x, 44.0f, 0.01f);
+    float const dx = window.back().x - spheres[0].x;
+    EXPECT_GT(std::fabs(dx), spheres[0].r);  // outside, by construction
+}
+
+// The anti-crawl rule. A sphere already covering the tank cannot be avoided by
+// stopping, so the truncation is DECLINED and the full window survives — the
+// glide runs at full speed instead of degenerating into the per-point walk. The
+// violation is still reported so the caller can log it.
+TEST(DcWindowTruncateTest, TruncationDeclinedWhenTankIsInsideTheSphere)
+{
+    std::vector<G3D::Vector3> window = StraightPolyline(6, 10.0f);
+    std::vector<AvoidSphere> const spheres{ Sphere(0.0f, 0.0f, 30.0f) };
+    size_t leg = 999;
+    int idx = -1;
+    EXPECT_FALSE(DcEngageGeometry::TruncateWindowAtSphere(
+        window, spheres, 6.0f, 1.0f, leg, idx));
+    EXPECT_EQ(window.size(), 6u);   // untouched — never 1 point
+    EXPECT_EQ(idx, 0);              // but the violation is reported
+    EXPECT_EQ(leg, 0u);
+}
+
+// Parked AT a threshold from a previous truncation: the surviving glide would be
+// a yard or two, which is a stutter, not a glide. Declined for the same reason.
+TEST(DcWindowTruncateTest, TruncationDeclinedWhenTheSurvivingGlideIsTooShort)
+{
+    // Tank at the origin, sphere edge 3yd ahead — below the 6yd floor.
+    std::vector<G3D::Vector3> window = StraightPolyline(6, 10.0f);
+    std::vector<AvoidSphere> const spheres{ Sphere(13.0f, 0.0f, 10.0f) };
+    size_t leg = 999;
+    int idx = -1;
+    EXPECT_FALSE(DcEngageGeometry::TruncateWindowAtSphere(
+        window, spheres, 6.0f, 1.0f, leg, idx));
+    EXPECT_EQ(window.size(), 6u);
+    EXPECT_EQ(idx, 0);
+
+    // Push the same sphere out so the glide clears the floor and it is honoured.
+    std::vector<AvoidSphere> const further{ Sphere(25.0f, 0.0f, 10.0f) };
+    ASSERT_TRUE(DcEngageGeometry::TruncateWindowAtSphere(
+        window, further, 6.0f, 1.0f, leg, idx));
+    EXPECT_NEAR(window.back().x, 14.0f, 0.01f);
+}
+
+// A too-short window can never be handed back shorter than it came in: the
+// caller reads window.size() >= 2 as "glide available", so a truncation that
+// returns false must leave a launchable window behind.
+TEST(DcWindowTruncateTest, DeclinedTruncationNeverShortensTheWindow)
+{
+    std::vector<G3D::Vector3> const original = StraightPolyline(4, 10.0f);
+    std::vector<G3D::Vector3> window = original;
+    std::vector<AvoidSphere> const spheres{ Sphere(0.0f, 0.0f, 25.0f) };
+    size_t leg = 0;
+    int idx = -1;
+    ASSERT_FALSE(DcEngageGeometry::TruncateWindowAtSphere(
+        window, spheres, 6.0f, 1.0f, leg, idx));
+    ASSERT_EQ(window.size(), original.size());
+    for (size_t i = 0; i < window.size(); ++i)
+        EXPECT_FLOAT_EQ(window[i].x, original[i].x);
 }

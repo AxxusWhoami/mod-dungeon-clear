@@ -351,6 +351,22 @@ namespace
     }
 
 
+    // The pack the pull pipeline is walking TO, for BystanderSpheres' `exclude`.
+    // It is the glide's destination, never an obstacle to it: pull-idle above the
+    // commit range yields the tick to Advance precisely so the tank can close on
+    // it, and a glide that truncates on its own destination cannot.
+    //
+    // nullptr unless an advanced pull is the active mode (heroic always is). That
+    // gate is not just semantics — it keeps the sticky pull-target value's
+    // corridor scan off runs with no pull pipeline to serve, so a difficulty that
+    // never asked for advanced pulls pays nothing for this.
+    Unit* PullDestinationPack(PlayerbotAI* botAI, AiObjectContext* context)
+    {
+        if (!botAI || !context || !context->GetValue<bool>(DcKey::PullMode)->Get())
+            return nullptr;
+        return DcTargeting::GetPullTarget(botAI);
+    }
+
     // Drive an in-progress swim leg. Returns true if a leg is active and owned
     // the tick (caller must return true); false if no leg is active or the leg
     // just completed (caller falls through to normal navmesh navigation).
@@ -1166,6 +1182,12 @@ void DungeonClearAdvanceAction::FillHopObs(AdvanceState& st, DungeonClearApproac
         // the last interrupt is latched and skipped, so the tank can never
         // ping-pong stop/launch against a pack it already decided to route
         // around. Gated so normal difficulty pays nothing.
+        //
+        // The probe asks the SAME question the truncation below answers
+        // (TruncateWindowAtSphere), not merely "is a sphere violated": halting a
+        // healthy glide for a hazard the re-plan will then decline to truncate
+        // for is a dead stop bought for nothing, and back-to-back dead stops are
+        // exactly the step-pause the tank was reported doing on approach.
         bool interrupt = false;
         uint32 const nowMs = getMSTime();
         if (DcSettings::GetFloat(bot, "AdvanceWindowYards") > 0.0f &&
@@ -1173,7 +1195,7 @@ void DungeonClearAdvanceAction::FillHopObs(AdvanceState& st, DungeonClearApproac
             nowMs - appr.glideHazardProbeMs >= DC_GLIDE_HAZARD_PROBE_MS)
         {
             appr.glideHazardProbeMs = nowMs;
-            std::vector<G3D::Vector3> const remaining =
+            std::vector<G3D::Vector3> remaining =
                 DungeonPathFollower::BuildSplineWindow(
                     bot, path, follower, DcSettings::GetFloat(bot, "AdvanceWindowYards"));
             if (remaining.size() >= 2)
@@ -1181,11 +1203,14 @@ void DungeonClearAdvanceAction::FillHopObs(AdvanceState& st, DungeonClearApproac
                 G3D::Vector3 const& end = remaining.back();
                 std::vector<DcEngageGeometry::AvoidSphere> const spheres =
                     DcEngageGeometry::BystanderSpheres(
-                        bot, Position(end.x, end.y, end.z, 0.0f), nullptr);
+                        bot, Position(end.x, end.y, end.z, 0.0f),
+                        PullDestinationPack(botAI, context));
                 size_t legIdx = 0;
-                int const idx = DcEngageGeometry::FirstViolatedSphereOnPolyline(
-                    remaining, spheres, legIdx);
-                if (idx >= 0 &&
+                int idx = -1;
+                bool const honoured = DcEngageGeometry::TruncateWindowAtSphere(
+                    remaining, spheres, DC_AVOID_MIN_GLIDE, DC_AVOID_EDGE_BACKOFF,
+                    legIdx, idx);
+                if (honoured &&
                     spheres[static_cast<size_t>(idx)].guid != appr.glideHazardIgnore)
                 {
                     appr.glideHazardIgnore = spheres[static_cast<size_t>(idx)].guid;
@@ -1237,28 +1262,42 @@ void DungeonClearAdvanceAction::FillHopObs(AdvanceState& st, DungeonClearApproac
     // to do so. Deliberately truncate, not detour: a bend in the long route
     // would need its own navmesh reachability check per bend (the
     // under-the-map seam class of bug); truncation is safe, cheap, and
-    // composes. A violation on the very first leg leaves just the seed point
-    // (<2 points -> no window), falling through to the normal single-hop
-    // handling rather than freezing the tank.
+    // composes.
+    //
+    // The pack the PULL PIPELINE is walking to is excluded from the sphere set.
+    // It is the destination, not a bystander: pull-idle above the commit range
+    // yields the tick to this glide precisely so the tank can close on it
+    // ("glide closer before committing"), and then the glide refused to move
+    // because the destination was in the way. Live Sethekk heroic caught it
+    // exactly — a window truncated on the very pack whose pull verdict had just
+    // been logged one line earlier.
+    //
+    // TruncateWindowAtSphere owns the rest of the shaping: it stops the window
+    // ON the threshold rather than at the last vertex before it, and it DECLINES
+    // a truncation that would leave less than DC_AVOID_MIN_GLIDE of travel —
+    // because a sub-2-point window is not a stop, it is the per-point MoveTo
+    // crawl, which is both slower than gliding through and no safer.
     if (st.splineWindow.size() >= 2 && DcSettings::GetBool(bot, "PullEnRouteAvoid"))
     {
         G3D::Vector3 const& end = st.splineWindow.back();
         std::vector<DcEngageGeometry::AvoidSphere> const spheres =
             DcEngageGeometry::BystanderSpheres(
-                bot, Position(end.x, end.y, end.z, 0.0f), nullptr);
+                bot, Position(end.x, end.y, end.z, 0.0f),
+                PullDestinationPack(botAI, context));
         size_t legIdx = 0;
-        int const idx = DcEngageGeometry::FirstViolatedSphereOnPolyline(
-            st.splineWindow, spheres, legIdx);
+        int idx = -1;
+        size_t const before = st.splineWindow.size();
+        bool const honoured = DcEngageGeometry::TruncateWindowAtSphere(
+            st.splineWindow, spheres, DC_AVOID_MIN_GLIDE, DC_AVOID_EDGE_BACKOFF,
+            legIdx, idx);
         if (idx >= 0)
-        {
             DC_PULL_DEBUG("[DC:{}] advance window: leg {} violates bystander "
-                          "sphere {} (r={:.1f}) -> truncating {} -> {} pts",
+                          "sphere {} (r={:.1f}) -> {} {} -> {} pts",
                           bot->GetName(), legIdx,
                           spheres[static_cast<size_t>(idx)].guid.ToString(),
                           spheres[static_cast<size_t>(idx)].r,
-                          st.splineWindow.size(), legIdx + 1);
-            st.splineWindow.resize(legIdx + 1);
-        }
+                          honoured ? "truncating" : "too close to honour, gliding",
+                          before, st.splineWindow.size());
     }
     obs.haveSplineWindow = st.splineWindow.size() >= 2;
 }

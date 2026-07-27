@@ -401,6 +401,80 @@ int DcEngageGeometry::FirstViolatedSphereOnPolyline(
     return -1;
 }
 
+std::optional<G3D::Vector3> DcEngageGeometry::SegmentCircleEntry(
+    G3D::Vector3 const& a, G3D::Vector3 const& b, float cx, float cy, float r,
+    float backoff)
+{
+    if (r <= 0.0f)
+        return std::nullopt;
+
+    float const dx = b.x - a.x;
+    float const dy = b.y - a.y;
+    float const len2 = dx * dx + dy * dy;
+    if (len2 <= 0.0001f)
+        return std::nullopt;            // degenerate leg
+
+    float const fx = a.x - cx;
+    float const fy = a.y - cy;
+    if (fx * fx + fy * fy <= r * r)
+        return std::nullopt;            // already inside — no threshold ahead
+
+    // |a + t*(b-a) - c|^2 = r^2; the SMALLER root is the entry crossing.
+    float const bq = 2.0f * (fx * dx + fy * dy);
+    float const cq = fx * fx + fy * fy - r * r;
+    float const disc = bq * bq - 4.0f * len2 * cq;
+    if (disc < 0.0f)
+        return std::nullopt;            // the leg's line misses the circle
+
+    float const t = (-bq - std::sqrt(disc)) / (2.0f * len2);
+    if (t <= 0.0f || t > 1.0f)
+        return std::nullopt;            // crossing is behind `a` or beyond `b`
+
+    float const stop = t - backoff / std::sqrt(len2);
+    if (stop <= 0.0f)
+        return std::nullopt;            // the backoff eats the whole approach
+
+    return G3D::Vector3(a.x + dx * stop, a.y + dy * stop,
+                        a.z + (b.z - a.z) * stop);
+}
+
+bool DcEngageGeometry::TruncateWindowAtSphere(
+    std::vector<G3D::Vector3>& window, std::vector<AvoidSphere> const& spheres,
+    float minGlideYards, float backoff, size_t& legOut, int& sphereOut)
+{
+    legOut = 0;
+    sphereOut = -1;
+    if (window.size() < 2)
+        return false;
+
+    size_t leg = 0;
+    int const idx = FirstViolatedSphereOnPolyline(window, spheres, leg);
+    if (idx < 0)
+        return false;
+
+    legOut = leg;
+    sphereOut = idx;
+
+    AvoidSphere const& s = spheres[static_cast<size_t>(idx)];
+    std::vector<G3D::Vector3> cut(window.begin(),
+                                  window.begin() + static_cast<ptrdiff_t>(leg) + 1);
+    if (std::optional<G3D::Vector3> const edge =
+            SegmentCircleEntry(window[leg], window[leg + 1], s.x, s.y, s.r, backoff))
+        cut.push_back(*edge);
+
+    if (cut.size() < 2)
+        return false;                   // nothing left to glide — caller rides on
+
+    float glide = 0.0f;
+    for (size_t i = 1; i < cut.size(); ++i)
+        glide += (cut[i] - cut[i - 1]).magnitude();
+    if (glide < minGlideYards)
+        return false;                   // a stutter, not a glide — decline
+
+    window.swap(cut);
+    return true;
+}
+
 std::optional<Position> DcEngageGeometry::EnRoutePackAvoidPoint(Player* bot,
                                                                 AiObjectContext* ctx,
                                                                 Unit* target)
