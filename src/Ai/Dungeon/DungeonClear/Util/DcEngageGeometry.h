@@ -13,6 +13,7 @@
 #include "ObjectGuid.h"
 #include "Position.h"
 #include "Ai/Dungeon/DungeonClear/Util/ChunkedPathfinder.h"
+#include "Ai/Dungeon/DungeonClear/Util/DungeonClearMath.h"
 
 class Player;
 class Unit;
@@ -312,6 +313,53 @@ public:
     static std::optional<Position> EnRoutePackAvoidPoint(Player* bot,
                                                          AiObjectContext* ctx,
                                                          Unit* target);
+
+    // True when `target` is itself STANDING INSIDE another pack's aggro sphere,
+    // i.e. there is no approach to it — however the route bends — that does not
+    // wake that pack. This is the half EnRoutePackAvoidPoint structurally cannot
+    // cover: it steers the LEG around spheres in the way, but a sphere containing
+    // the DESTINATION has no way around it, and the orbit's exit test ("a straight
+    // shot at the target clears the sphere") can never come true, so the tank
+    // either orbits until the borrow watchdog gives up or walks straight in.
+    //
+    // Same sizing as BystanderSpheres (AggroReach + PullEnRouteMargin) and the
+    // same exclusions (the target's own packmates by formation or 12yd proximity,
+    // dead / non-hostile / critter / totem / already-in-combat / other-floor), so
+    // "inside aggro" means one thing across the module. One grid search around the
+    // TARGET (not the leg), so it is cheaper than a full BystanderSpheres build.
+    // Gated by PullEnRouteAvoid — returns false when avoidance is off.
+    static bool TargetInsideBystanderPack(Player* bot, Unit* target);
+
+    // Chase-leash gate: what the walk toward a live trash target should do this
+    // tick. Resolves the game state — the per-approach anchor (DcApproachState::
+    // chaseTarget/chaseAnchor/chaseOrigin), the drift, the hot-destination test —
+    // and hands the decision to the unit-tested DungeonClearMath::DecideChase.
+    //
+    // Re-anchors (and returns Follow) whenever the target changes, so the anchor
+    // is stamped on the first tick a walk to that mob is actually attempted: the
+    // moment we committed. Persists the hold latch back into the approach state,
+    // and re-anchors again on GiveUp so neither caller can be left holding a latch
+    // that reports GiveUp forever (see the note at the re-anchor).
+    //
+    // Exempt by construction: a target already IN COMBAT is a fight, not a pull —
+    // a mob kiting a follower must still be run down — and a leash of 0
+    // (PullChaseLeash) disables the gate entirely.
+    static DungeonClearMath::ChaseVerdict ChaseLeash(Player* bot,
+                                                     AiObjectContext* ctx,
+                                                     Unit* target);
+
+    // Stamp the chase anchor explicitly, for a caller that knows the exact moment
+    // the plan was made and does not walk on that same tick.
+    //
+    // The advanced pull is that caller: it COMMITS at the Idle->Forming edge (the
+    // camp is measured and the aggro estimate taken there) and then stands still
+    // for the whole Forming dwell while the party sets. Left to ChaseLeash's own
+    // lazy anchoring the anchor would be stamped on the first Advancing tick —
+    // seconds later, at wherever the pack had wandered to by then — and the leash
+    // would measure drift from a position the plan knows nothing about. Anchor at
+    // the commit and the leg is leashed to the ground the pull was actually
+    // planned against.
+    static void AnchorChase(Player* bot, AiObjectContext* ctx, Unit* target);
 
     // True when the tank is close enough AND on a navigable level with the boss
     // to hand off from route-following to the decisive engage pull. The 3D

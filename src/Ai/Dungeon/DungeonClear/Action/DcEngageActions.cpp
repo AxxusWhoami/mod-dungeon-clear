@@ -724,6 +724,34 @@ bool DungeonClearEngageTrashAction::Execute(Event /*event*/)
         !IsDirectlyReachable(bot, target))
         return false;
 
+    // CHASE LEASH. The sticky above is deliberately commit-and-hold — it never
+    // releases on distance, because releasing on distance is what made the tank
+    // flip-flop between two equidistant mobs. The cost of that is a target which
+    // WALKS: the pick is pinned, EngageDirect re-aims at its live position every
+    // tick, and the tank follows a patrol wherever its route goes — including back
+    // behind other packs, waking every one it passes.
+    //
+    // The leash keeps the commitment (the sticky is untouched) and takes away the
+    // pursuit: while the mob stays near the ground we picked it on, walk in as
+    // before; once it recedes past the leash, stand still and let it come back —
+    // a patrol is a loop. Own the tick while holding so Advance can't glide the
+    // tank past the very pack we are waiting on. GiveUp re-anchors and walks, so
+    // this can only ever pace a chase, never refuse one.
+    switch (DcEngageGeometry::ChaseLeash(bot, context, target))
+    {
+        case DungeonClearMath::ChaseVerdict::Hold:
+            DcMovement::StopBot(bot, DcMovement::Stop::Hold);
+            DcFaceIfNeeded(bot, target);
+            LOG_DEBUG("playerbots.dungeonclear",
+                      "[DC:{}] engage trash: holding for {} to come back around "
+                      "rather than chasing it ({:.1f}yd)",
+                      bot->GetName(), target->GetGUID().ToString(),
+                      bot->GetExactDist(target));
+            return true;
+        default:
+            break;
+    }
+
     return EngageDirect(target);
 }
 

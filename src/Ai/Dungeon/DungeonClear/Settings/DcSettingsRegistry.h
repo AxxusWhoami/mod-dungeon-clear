@@ -535,6 +535,37 @@ inline constexpr DcSettingDef kDcSettings[] =
     { "PullPatrolWait",        DcType::Bool,   1,   0,   1,  true  },
     { "PullPatrolWaitSec",     DcType::Float,  8,   1,  30,  true,  18 },
 
+    // Chase leash. Patrol-wait above handles a patroller that CONTENDS a pack we
+    // are pulling; this handles the patroller that IS the pack. A pull target is
+    // latched by GUID and read live, so a mob that walks turns the approach into a
+    // pursuit: the tank follows it wherever its route goes, and when that route
+    // runs back behind other packs the tank walks through every one of their aggro
+    // arcs and arrives at the camp with the room. The pull was planned against the
+    // ground the mob stood on when it was picked (that is what sized the estimate
+    // and where the camp was measured from), so once it has left that ground the
+    // walk is executing a plan about somewhere else.
+    //
+    // PullChaseLeash is how far (yd) the target may drift from where we picked it
+    // before the tank stops walking and waits for it instead — a patrol is a loop
+    // and comes back. Sized above ordinary wander/patrol wobble (a RANDOM_MOTION
+    // radius is typically 5-10yd) so a pack milling on its spawn never trips it;
+    // a mob genuinely leaving on a waypoint leg does. A target that has come at
+    // least as close to our commit spot as it was when picked is never held — that
+    // is an inbound patrol, exactly what the wait is for. 0 disables the gate
+    // (always chase — the historical behaviour).
+    //
+    // PullChaseWaitSec bounds the hold: past it the tank re-anchors and walks on,
+    // so a mob that has genuinely left can never stall the run. Deliberately
+    // shorter than the pull's own 10s tag-leg watchdog, so on the tag leg the
+    // leash — which knows WHY the leg is failing — is the clock that fires.
+    //
+    // No heroic layer: the pursuit is not a heroic-only failure. Heroic already
+    // gets the sharper half of this through PullEnRouteAvoid, which is what arms
+    // the "target is standing inside another pack" test (see
+    // DcEngageGeometry::TargetInsideBystanderPack).
+    { "PullChaseLeash",        DcType::Float, 15,   0,  60,  true  },
+    { "PullChaseWaitSec",      DcType::Float,  6,   0,  30,  true  },
+
     // En-route pack avoidance. The pull estimate answers "who joins a fight that
     // STAYS PUT at the target" — right for sizing the pull, wrong for getting
     // there. A pack 40yd off the path aggros nothing by standing still and

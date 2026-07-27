@@ -413,6 +413,83 @@ namespace DungeonClearMath
         return !(now >= sinceMs && (now - sinceMs) >= timeoutMs);
     }
 
+    // --- chase leash -------------------------------------------------------
+    // What the walk toward a MOVING trash target should do this tick.
+    enum class ChaseVerdict : std::uint32_t
+    {
+        Follow = 0,   // walk in as planned
+        Hold   = 1,   // stand still; let the mob come back to us
+        GiveUp = 2,   // the hold ran out — the caller decides what that means
+    };
+
+    // Chase-leash gate (pure, by-reference latch).
+    //
+    // A pull target is latched by GUID and its position is re-read live every
+    // tick, so a target that WALKS — a DB patrol, a wanderer, a mob repositioned
+    // by its own script — turns every approach into a pursuit. The tank follows it
+    // wherever it goes, and when the route it walks passes behind other packs the
+    // tank walks through those packs' aggro arcs and arrives at the camp with the
+    // whole room. That is a pursuit nobody chose: the pull was planned against the
+    // pack's position AT SELECTION TIME (that is what sized the estimate and where
+    // the camp was measured from), and the moment the pack leaves that spot the
+    // plan is about ground the mob is no longer standing on.
+    //
+    // A human tank does not chase a patrol. It waits at the spot it picked, and
+    // the patrol — by definition a loop — comes back. This is that rule:
+    //
+    //   `driftFromAnchor` : how far the target has moved from where it stood when
+    //                       we committed to it (2D).
+    //   `gapAtAnchor`     : distance from the tank's commit spot to that anchor.
+    //   `gapNow`          : distance from the SAME commit spot to the target now.
+    //                       Measured from the fixed origin, not the tank's live
+    //                       position — from a moving origin the gap always shrinks
+    //                       as we walk and the leash could never engage.
+    //   `destinationHot`  : the target is currently standing inside ANOTHER pack's
+    //                       aggro sphere. Reaching it means waking that pack no
+    //                       matter how the route bends, so it is never walkable
+    //                       ground however small the drift is.
+    //
+    // Follow while the target is still near where we picked it (`drift <=
+    // leashYards`) OR while it has come at least as close to our commit spot as it
+    // was then (`gapNow <= gapAtAnchor` — an inbound patrol rounding a wide loop
+    // is exactly what we are waiting for, and must not be held on drift alone).
+    // Otherwise the target is RECEDING or standing somewhere we must not follow it
+    // to: arm the hold latch and stand still until it comes back, and report
+    // GiveUp once the hold has burned `holdMs` so no patrol can stall a run.
+    //
+    // `leashYards` <= 0 disables the gate outright (Follow, latch cleared) —
+    // the historical always-chase behaviour, expressible from config.
+    // `holdMs` == 0 gives up on the first receding tick (never holds).
+    // Latch/clear contract mirrors ShouldWaitForPatrol: the latch stays armed past
+    // the timeout, so GiveUp repeats until the caller re-anchors or drops the
+    // target rather than silently re-entering a fresh hold.
+    inline ChaseVerdict DecideChase(float driftFromAnchor, float gapAtAnchor,
+                                    float gapNow, bool destinationHot,
+                                    float leashYards, std::uint32_t now,
+                                    std::uint32_t holdMs, std::uint32_t& holdSince)
+    {
+        if (leashYards <= 0.0f)
+        {
+            holdSince = 0;
+            return ChaseVerdict::Follow;
+        }
+        if (!destinationHot &&
+            (driftFromAnchor <= leashYards || gapNow <= gapAtAnchor))
+        {
+            holdSince = 0;
+            return ChaseVerdict::Follow;
+        }
+        if (holdMs == 0)
+            return ChaseVerdict::GiveUp;
+        if (holdSince == 0)
+            holdSince = now ? now : 1;   // arm; avoid the 0 "unarmed" sentinel on ms 0
+        // `now >= holdSince` guards the unsigned subtraction against a backward
+        // clock step / getMSTime wrap, where "no time has elapsed" is right.
+        if (now >= holdSince && (now - holdSince) >= holdMs)
+            return ChaseVerdict::GiveUp;
+        return ChaseVerdict::Hold;
+    }
+
     // Engage-fizzle handoff latch (pure). An advanced-pull "camp fight" ended with
     // the tank out of combat but the pulled pack still ALIVE and IDLE — the drag
     // fizzled (a planted caster evaded home the moment the tank broke LOS at camp).

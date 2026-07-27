@@ -1180,6 +1180,48 @@ DungeonClear.PullPatrolWait = 1
 DungeonClear.PullPatrolWaitSec = 8.0
 
 #
+#    DungeonClear.PullChaseLeash
+#        How far (yards) a pull/engage target may drift from the spot it was
+#        standing on when the tank picked it, before the tank stops walking at it
+#        and waits for it to come back instead of chasing it. PullPatrolWait above
+#        handles a patrol that CONTENDS the pack being pulled; this handles the
+#        patrol that IS the pack. Targets are latched by GUID and re-aimed at their
+#        live position every tick, so a mob that walks turns the approach into a
+#        pursuit — and when its route runs back behind other packs the tank walks
+#        through all of their aggro arcs and arrives with the whole room. The plan
+#        being executed (the pull size estimate, the camp placement) was measured
+#        against where the mob stood at selection, so once it has left that ground
+#        the walk is chasing a plan about somewhere else. A human tank waits: a
+#        patrol is a loop and comes back to you.
+#
+#        Sized above ordinary wander/patrol wobble so a pack milling around its
+#        spawn never trips it. A target that has come at least as close to the
+#        tank's commit spot as it was when picked is never held — that is an
+#        inbound patrol, which is exactly what the wait is for.
+#            0 = off (always chase, the historical behaviour)
+#
+#        Default: 15.0
+#
+
+DungeonClear.PullChaseLeash = 15.0
+
+#
+#    DungeonClear.PullChaseWaitSec
+#        The longest (seconds) the tank stands and waits for a target that has
+#        drifted past PullChaseLeash, before re-anchoring and walking at it anyway
+#        — so a mob that has genuinely left (despawned patrol route, script
+#        relocation) can never stall a run. On the advanced pull's tag leg the pack
+#        is instead handed to the normal walk-in engage, exactly as the tag-leg
+#        watchdog does. Deliberately shorter than that 10s watchdog so the leash,
+#        which knows why the leg is failing, is the clock that fires.
+#            0 = never hold (give up on the first receding tick)
+#
+#        Default: 6.0
+#
+
+DungeonClear.PullChaseWaitSec = 6.0
+
+#
 #    DungeonClear.PullEnRouteAvoid
 #        Detour the walk to a pack around OTHER packs' aggro radii. Sizing a pull
 #        answers "who joins a fight that stays put at the target", which says
