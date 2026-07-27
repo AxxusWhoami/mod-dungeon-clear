@@ -131,3 +131,70 @@ TEST(DcSplineWindowTest, WindowRequiresTheSeed)
     DungeonPathFollower::AppendWindowPoints(path, 0, 0, 35.0f, window);
     EXPECT_TRUE(window.empty());
 }
+
+// ===========================================================================
+// Pure geometry: PointIsBehind — the direction half of the stale-cursor guard.
+//
+// The bug it closes: RouteDeviation is a PERPENDICULAR distance, so a bot
+// carried straight PAST its cursor along the same corridor reads as barely off
+// the line. The off-line rejoin (OFF_PATH_THRESHOLD, 6yd) then issues a MoveTo
+// to a hop point BEHIND the bot, while the distance-based re-anchor
+// (DC_REANCHOR_DISTANCE, 12yd) does not fire. Everything in that 6-12yd band
+// walked backward, re-anchored, and glided forward again — the short
+// back-and-forth on approach.
+// ===========================================================================
+
+#include "Ai/Dungeon/DungeonClear/Util/DungeonPathFollower.h"
+
+namespace
+{
+    // Bot at the origin, route heading +X.
+    bool Behind(float px, float py, float dirX = 1.0f, float dirY = 0.0f)
+    {
+        return DungeonPathFollower::PointIsBehind(0.0f, 0.0f, px, py, dirX, dirY);
+    }
+}
+
+TEST(DcHopDirectionTest, PointAheadIsNotBehind)
+{
+    EXPECT_FALSE(Behind(10.0f, 0.0f));
+    EXPECT_FALSE(Behind(4.0f, 9.0f));    // ahead and well off to the side
+}
+
+TEST(DcHopDirectionTest, PointBehindIsBehind)
+{
+    EXPECT_TRUE(Behind(-10.0f, 0.0f));
+    EXPECT_TRUE(Behind(-4.0f, 9.0f));    // behind despite being off to the side
+}
+
+// The case the distance rule misses: a bot 8yd PAST its cursor on a straight
+// corridor. Perpendicular deviation is ~0 and the hop is only 8yd away (under
+// the 12yd re-anchor limit), so direction is the only signal that catches it.
+TEST(DcHopDirectionTest, CarriedPastCursorOnAStraightCorridorReadsBehind)
+{
+    EXPECT_TRUE(Behind(-8.0f, 0.5f));
+}
+
+// Exactly abeam is not behind — a hop level with the bot is still reachable
+// without travelling against the route, and treating it as behind would
+// re-anchor on every ordinary pass of a route point.
+TEST(DcHopDirectionTest, AbeamIsNotBehind)
+{
+    EXPECT_FALSE(Behind(0.0f, 10.0f));
+    EXPECT_FALSE(Behind(0.0f, -10.0f));
+}
+
+// A degenerate heading is "no opinion", never "behind": callers must fall back
+// to the distance rule rather than re-anchor on a route with no direction.
+TEST(DcHopDirectionTest, DegenerateHeadingIsNeverBehind)
+{
+    EXPECT_FALSE(Behind(-10.0f, 0.0f, 0.0f, 0.0f));
+}
+
+// Direction follows the route, not the world axes.
+TEST(DcHopDirectionTest, HeadingRotatesWithTheRoute)
+{
+    EXPECT_TRUE(Behind(0.0f, -10.0f, 0.0f, 1.0f));   // route heads +Y
+    EXPECT_FALSE(Behind(0.0f, 10.0f, 0.0f, 1.0f));
+    EXPECT_TRUE(Behind(7.0f, 7.0f, -1.0f, -1.0f));   // route heads -X-Y
+}

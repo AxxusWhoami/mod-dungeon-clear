@@ -195,6 +195,47 @@ std::optional<G3D::Vector3> DungeonPathFollower::CurrentPoint(ChunkedPathfinder:
     return PointAt(path, state.segmentIdx, state.pointIdx);
 }
 
+bool DungeonPathFollower::PointIsBehind(float botX, float botY, float pX, float pY,
+                                        float dirX, float dirY)
+{
+    // Degenerate heading: no opinion. Callers keep their existing behaviour.
+    if (dirX * dirX + dirY * dirY <= 0.0001f)
+        return false;
+    // Negative projection onto the route heading = reaching it means travelling
+    // against the route.
+    return (pX - botX) * dirX + (pY - botY) * dirY < 0.0f;
+}
+
+bool DungeonPathFollower::HopIsBehind(Player* bot, ChunkedPathfinder::Result const& path,
+                                      DungeonFollowerState const& state, Hop const& hop)
+{
+    if (!bot || hop.isDone)
+        return false;
+
+    std::optional<G3D::Vector3> const cur =
+        PointAt(path, state.segmentIdx, state.pointIdx);
+    if (!cur.has_value())
+        return false;
+
+    // Route tangent at the cursor: forward to the next point when there is one,
+    // else the incoming leg at a path tail.
+    std::optional<G3D::Vector3> ref = NextPoint(path, state.segmentIdx, state.pointIdx);
+    G3D::Vector3 from = *cur;
+    if (!ref.has_value())
+    {
+        ref = cur;
+        std::optional<G3D::Vector3> const prev =
+            PrevPoint(path, state.segmentIdx, state.pointIdx);
+        if (!prev.has_value())
+            return false;
+        from = *prev;
+    }
+
+    return PointIsBehind(bot->GetPositionX(), bot->GetPositionY(),
+                         hop.point.x, hop.point.y,
+                         ref->x - from.x, ref->y - from.y);
+}
+
 bool DungeonPathFollower::IsOffPath(Player* bot, ChunkedPathfinder::Result const& path, DungeonFollowerState& state)
 {
     if (!bot || path.segments.empty() || state.segmentIdx >= path.segments.size() ||

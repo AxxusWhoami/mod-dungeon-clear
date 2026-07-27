@@ -1096,14 +1096,31 @@ DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::TryReanchorStaleCurso
     DungeonFollowerState& follower = *st.follower;
     DungeonPathFollower::Hop& hop = st.hop;
 
-    if (!hop.isDone && !hop.isJump &&
-        bot->GetDistance(hop.point.x, hop.point.y, hop.point.z) > DC_REANCHOR_DISTANCE)
+    if (hop.isDone || hop.isJump)
+        return Step::Continue;
+
+    float const staleDist = bot->GetDistance(hop.point.x, hop.point.y, hop.point.z);
+
+    // DIRECTION, not just distance. The distance rule alone leaves a hole the
+    // width of itself: the off-line rejoin below fires at OFF_PATH_THRESHOLD
+    // (6yd of PERPENDICULAR deviation) and walks the bot to hop.point, but a bot
+    // carried straight PAST its cursor along the same corridor reads a small
+    // perpendicular deviation while its hop sits behind it. Between 6 and 12yd of
+    // along-track staleness nothing caught that, so the rejoin issued a MoveTo
+    // BACKWARD — glide forward, cursor lags, walk back to it, re-anchor, glide
+    // forward again. That is the short back-and-forth the tank does on approach,
+    // and it is the exact failure DC_REANCHOR_DISTANCE's own comment describes;
+    // it was simply gated too high to catch it.
+    //
+    // A hop behind the bot is never worth walking to at ANY distance — the route
+    // is one-way — so direction re-anchors on its own, no threshold.
+    bool const behind = DungeonPathFollower::HopIsBehind(bot, path, follower, hop);
+    if (staleDist > DC_REANCHOR_DISTANCE || behind)
     {
-        float const staleDist = bot->GetDistance(hop.point.x, hop.point.y, hop.point.z);
         bool const reanchored = DungeonPathFollower::Resnap(bot, path, follower);
         LOG_DEBUG("playerbots.dungeonclear",
-                  "[DC:{}] re-anchor: next hop {:.1f}yd (>{}yd, stale cursor) -> {}",
-                  bot->GetName(), staleDist, DC_REANCHOR_DISTANCE,
+                  "[DC:{}] re-anchor: next hop {:.1f}yd (limit {}yd, behind={}) -> {}",
+                  bot->GetName(), staleDist, DC_REANCHOR_DISTANCE, behind,
                   reanchored ? "Resnapped + refetched hop" : "Resnap failed, falling through");
         if (reanchored)
             hop = DungeonPathFollower::NextHop(bot, path, follower);

@@ -112,6 +112,35 @@ public:
     static std::optional<G3D::Vector3> CurrentPoint(ChunkedPathfinder::Result const& path,
                                                     DungeonFollowerState const& state);
 
+    // True when the cursor's next hop lies BEHIND the bot along the route — the
+    // bot has been carried PAST its own cursor and walking to the hop is walking
+    // backward over ground it already covered.
+    //
+    // RouteDeviation cannot see this: it is a PERPENDICULAR distance, so a bot
+    // 10yd further along the same corridor reads as barely off the line, and the
+    // off-line rejoin then issues a MoveTo to the point behind it. That is the
+    // short backward step the tank does on approach — glide forward, cursor
+    // lags, walk back to it, re-anchor, glide forward again. DC_REANCHOR_DISTANCE
+    // was written for exactly this ("would otherwise make NextHop target a point
+    // behind the tank and walk it backward") but only fires past 12yd of
+    // staleness, while the off-line rejoin fires at 6yd of deviation — so the
+    // 6-12yd band was left to walk backward.
+    //
+    // Direction is the route tangent at the cursor (cursor -> next point, or
+    // previous -> cursor at a segment tail), 2D: a hop directly below/above is a
+    // floor problem, not a facing one. False when the route has no resolvable
+    // heading — callers must degrade to their existing behaviour, never to a
+    // freeze.
+    static bool HopIsBehind(Player* bot, ChunkedPathfinder::Result const& path,
+                            DungeonFollowerState const& state, Hop const& hop);
+
+    // Pure core of HopIsBehind: true when (pX,pY) sits on the far side of the bot
+    // from the route heading (dirX,dirY) — i.e. reaching it means travelling
+    // against the route. A degenerate heading returns false (unknowable, so leave
+    // the caller's behaviour alone).
+    static bool PointIsBehind(float botX, float botY, float pX, float pY,
+                              float dirX, float dirY);
+
     // Walks a window of polyline points AT OR AHEAD of the current state
     // (never behind it — the escort is one-way, so the cursor must not
     // regress to already-cleared corridor), picks the one closest to the
