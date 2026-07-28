@@ -638,19 +638,52 @@ FROM v_pull_calibration
 WHERE wiped_here = 1
 ORDER BY error_bodies DESC;
 
--- Runs that passed while leaning hard on a recovery path. A success with 40
--- resnaps is a bug that hasn't bitten yet, and the verdict hides it.
+-- Which diag_* columns mean anything, per run outcome.
+--
+-- The snapshot is taken at teardown (DcTestRunJob::Teardown). On a run that
+-- COMPLETED, dungeon-clear has already disabled itself ("All bosses cleared!"),
+-- so diag_state is 'off', diag_enabled is 0, and the route/target/pull blocks
+-- describe a module that has shut down — not the run. Only failed runs carry a
+-- live snapshot. Check here before building anything on a diag_* column.
+DROP VIEW IF EXISTS v_diag_availability;
+CREATE VIEW v_diag_availability AS
+SELECT result, diag_state, COUNT(*) AS runs,
+       SUM(diag_enabled)             AS live_snapshots,
+       SUM(wd_resnap_attempts)       AS resnap_total,
+       SUM(wd_rebuild_attempts)      AS rebuild_total,
+       SUM(wd_stuck_count)           AS stuck_total
+FROM runs
+GROUP BY result, diag_state
+ORDER BY runs DESC;
+
+-- Runs that PASSED while spending real time in a recovery state. A success that
+-- sat 60s in 'stalled' is a bug that hasn't bitten yet, and the verdict hides it.
+--
+-- Built on status_timeline dwell, NOT on the diag watchdog counters: those are
+-- documented as *consecutive* counters reset on progress (DcApproachState.h), so
+-- a single teardown sample of them is ~always zero and carries no signal. Getting
+-- run-lifetime friction totals would need the harness to accumulate them.
 DROP VIEW IF EXISTS v_silent_struggles;
 CREATE VIEW v_silent_struggles AS
-SELECT run_id, dungeon, heroic, duration_s, started_at,
-       wd_resnap_attempts, wd_rebuild_attempts, wd_stuck_count,
-       route_off_path_ticks, wd_pursuit, wd_route_glide, wd_door_walk_in,
-       pull_fizzle_count, wd_party_not_ready,
-       (COALESCE(wd_resnap_attempts, 0) + COALESCE(wd_rebuild_attempts, 0)
-        + COALESCE(wd_stuck_count, 0) + COALESCE(wd_pursuit, 0)
-        + COALESCE(wd_route_glide, 0) + COALESCE(wd_door_walk_in, 0)) AS friction
-FROM v_runs
-WHERE result = 'success'
+SELECT r.run_id, r.dungeon, r.heroic, r.duration_s, r.started_at,
+       r.timeline_coverage_pct,
+       SUM(CASE WHEN s.state = 'stalled'    THEN s.dwell_s ELSE 0 END) AS stalled_s,
+       SUM(CASE WHEN s.state = 'recovering' THEN s.dwell_s ELSE 0 END) AS recovering_s,
+       SUM(CASE WHEN s.state = 'pathing'    THEN s.dwell_s ELSE 0 END) AS pathing_s,
+       SUM(CASE WHEN s.state = 'pursuing'   THEN s.dwell_s ELSE 0 END) AS pursuing_s,
+       SUM(CASE WHEN s.state = 'idle'       THEN s.dwell_s ELSE 0 END) AS idle_s,
+       -- weighted: an outright stall is worse than a long pursuit
+       SUM(CASE s.state WHEN 'stalled' THEN s.dwell_s * 4
+                        WHEN 'recovering' THEN s.dwell_s * 3
+                        WHEN 'pathing' THEN s.dwell_s * 2
+                        WHEN 'pursuing' THEN s.dwell_s
+                        WHEN 'idle' THEN s.dwell_s
+                        ELSE 0 END) AS friction
+FROM runs r
+JOIN status_timeline s ON s.run_id = r.run_id
+WHERE r.result = 'success' AND s.dwell_s IS NOT NULL
+GROUP BY r.run_id
+HAVING friction > 0
 ORDER BY friction DESC;
 
 -- How much of each run's wall clock the timeline actually accounts for. Read this
