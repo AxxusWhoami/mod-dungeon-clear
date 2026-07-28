@@ -245,15 +245,35 @@ private:
     // couple of steps, then turns" report. No amount of tuning inside the pull
     // FSM can fix a control loop sampled at 0.3-1 Hz.
     //
-    // Something clears the leader's master after Grouping and it is not yet known
-    // what (PlayerbotAI::UpdateAIGroupMaster can null a master, but its branches
-    // do not obviously fire here, and FindNewMaster can never restore one for an
-    // all-bot group — it only accepts a real player or a self-mastered leader, so
-    // once lost the state is ABSORBING). Rather than guess, re-assert it: the call
-    // is idempotent, costs a handful of pointer writes per second per run, and
-    // repairs the state within one monitor tick whatever clears it. The first
-    // repair per run is logged, so the next run tells us WHEN it happens without
-    // another investigation round.
+    // WHAT CLEARS IT (confirmed from the repair diagnostic, tr-20260727-192611-*:
+    // every run named its own _slots[0] prot tank, 3-5s into monitoring, master
+    // "cleared"): stock's ResetAiAction, which is wired to SMSG_GROUP_LIST and
+    // ends with
+    //
+    //     if (Player* master = botAI->GetMaster())
+    //         if (bot->GetGroup() && (!master->GetGroup() ||
+    //                                 master->GetGroup() != bot->GetGroup()))
+    //             botAI->SetMaster(nullptr);
+    //
+    // i.e. "a master who is not in my group is not my master". The whole S1062
+    // design is a GM master who is deliberately NOT a party member, so that rule
+    // is aimed squarely at us. It hits the LEADER ONLY because the action first
+    // bails unless the packet reports zero other members, and the only member ever
+    // alone in the group is the tank — Group::Create(tank) sends it a solo
+    // GROUP_LIST before the other four are added. The bot processes that queued
+    // packet a tick or two after Grouping has already installed the master, so the
+    // install is overwritten from behind.
+    //
+    // Once lost it is ABSORBING: FindNewMaster only accepts a real player or a
+    // self-mastered leader, and an all-bot party has neither, so nothing ever
+    // restores it and the leader runs the entire clear on the slow path.
+    //
+    // Re-asserting is the fix rather than a workaround: the trigger is stock
+    // behaviour we do not edit (module-side rule), it is level-triggered, and
+    // SetMaster is a plain setter — a handful of pointer writes per second per
+    // run. The first repair per run is still logged so a NEW clearing path would
+    // announce itself (a non-tank name, or a repair long after setup) instead of
+    // silently costing 10-30x think latency again.
     void ReassertMaster();
 
     Player* FindGm() const;
