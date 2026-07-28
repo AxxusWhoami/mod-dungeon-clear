@@ -16,6 +16,7 @@
 
 #include "ObjectGuid.h"
 #include "TestRun/DcTestDungeonRegistry.h"
+#include "TestRun/DcTestGearTiers.h"
 #include "TestRun/DcTestRunLiveJson.h"
 #include "TestRun/DcTestRunRecord.h"
 #include "TestRun/DcTestRunVerdict.h"
@@ -48,8 +49,15 @@ public:
     // async logins, logs TESTRUN START and enters SpawningBots. Returns nullptr
     // + err only when a whole role can't be filled from the pool. The seed is
     // stored in the record so the comp can be replayed.
+    //
+    // `gear` is the run's own gear ceiling (DcTestGearTiers::Spec); a default
+    // Spec means "whatever AiPlayerbot.AutoGearScoreLimit / AutoGearQualityLimit
+    // say", which is what every run did before the option existed. It is
+    // resolved against the conf ONCE here, so a mid-run `.reload config` cannot
+    // change what a run was geared to.
     static std::unique_ptr<DcTestRunJob> Create(Player* gm, DcTestDungeonRegistry::Row const& row,
                                                  uint32 levelOverride, uint32 seed, bool heroic,
+                                                 DcTestGearTiers::Spec const& gear,
                                                  std::unordered_set<ObjectGuid> const& reservedGuids,
                                                  std::string const& planId, std::string* err);
 
@@ -287,6 +295,11 @@ private:
     float _x = 0.f, _y = 0.f, _z = 0.f, _o = 0.f;
     uint32 _level = 0;
     bool _heroic = false;  // run at DUNGEON_DIFFICULTY_HEROIC
+    // Gear ceiling this run's bots are rolled to, already resolved against the
+    // playerbots conf (ilvl 0 = no cap, quality 0 = factory default). Frozen at
+    // Create so the run is reproducible from its own record. Unused on roster
+    // runs — real characters are never re-geared.
+    DcTestGearTiers::Resolved _gear;
     // Hand-picked real player characters (`party=`) rather than pool bots. Gates
     // every path that would mutate what a character IS, and switches the login
     // to the masterless holder. See CreateFromRoster.

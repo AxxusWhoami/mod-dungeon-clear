@@ -283,4 +283,13 @@ AC_ADD_CONFIG_FILE("${CMAKE_CURRENT_LIST_DIR}/conf/mod_dungeon_clear.conf.dist")
 #    refuses a hand-picked party on any other path), never roll the factory (no
 #    respec/regear/relevel: the characters fight as they are), and always unbind
 #    both difficulties first so every run gets a fresh instance.)
+# TestRun/DcTestGearTiers.{h,cpp}
+#   (per-run gear ceiling: `.dc test start <d> ilvl=N quality=epic`, the same two
+#    options on `.dc test plan start`, and the ladder of ceilings worth offering
+#    for a given dungeon — named raid tiers from the AutoGearScoreLimit conf
+#    table at the level cap, three steps around the dungeon's own gear below it.
+#    Pure kernel, edge-pinned by t/TestTestGearTiers; the engine half is
+#    DcTestRunJob::TickProvisioning building PlayerbotFactory with the resolved
+#    pair, and DcTestDungeonRegistry::WriteSidecar publishing the ladders for the
+#    Command Deck's start form.)
 # (this comment bumps mtime to force CMake re-glob on next build)
