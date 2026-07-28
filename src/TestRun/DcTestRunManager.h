@@ -97,9 +97,11 @@ public:
     // Resolve the selector to ONE run's leader tank, for `.dc test watch` — the
     // GM camera needs a single seat, so "all" and a bare selector with several
     // runs live are both refused with the run list in *msg (same selector
-    // grammar and messages as Stop, minus the fan-out).
+    // grammar and messages as Stop, minus the fan-out). *tokenOut carries the
+    // run's dungeon token so the watcher can land at that row's entrance rather
+    // than on top of the tank.
     bool WatchTarget(std::string const& selector, ObjectGuid* tankOut,
-                     std::string* msg) const;
+                     std::string* msg, std::string* tokenOut = nullptr) const;
 
     std::string StatusText() const;
     bool IsActive() const { return !_runs.empty(); }
