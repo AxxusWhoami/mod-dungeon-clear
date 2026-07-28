@@ -286,16 +286,23 @@ namespace
 
     // Tag-leg creep (see the body-tag branch of DcPullPhase::Advancing). How long
     // the tank stands at the aggro edge before it starts stepping inward, and how
-    // fast it then steps. The grace exists only so the arrival tick gets a chance
-    // to trip the pack's MoveInLineOfSight on its own; past that the tank is
-    // stationary and NOTHING will re-evaluate the aggro until it moves again, so
-    // every extra millisecond here is pure dead time in the middle of the pull.
-    // Two AI ticks is enough of a chance. The rate is roughly walking pace, which
-    // still reads as "closing carefully" rather than a charge but reaches body
-    // contact in well under a second from a typical ~20yd aggro edge — and both
-    // numbers stay far inside DC_PULL_LEG_TIMEOUT_MS.
-    constexpr uint32 DC_PULL_TAG_CREEP_GRACE_MS = 400;
-    constexpr float DC_PULL_TAG_CREEP_YARDS_PER_SEC = 6.0f;
+    // fast it then steps.
+    //
+    // DO NOT SHORTEN THESE TO MAKE THE PULL LOOK SNAPPIER. That was tried (400ms /
+    // 6yd/s) and it made the pull visibly WORSE — the tank lurched several yards
+    // into the middle of the pack before turning around. The ramp is WALL-CLOCK but
+    // it is only sampled when the bot ticks, and a bot's think interval is not
+    // small: PlayerbotAI::GetReactDelay returns reactDelay*10..30 (1-3 SECONDS) for
+    // a bot with no real-player master, out of combat, which is exactly the state
+    // the whole pre-combat pull runs in. So the first sample after arrival can
+    // easily be 2s into the phase, and the ramp is applied in ONE step: at 3yd/s
+    // that is a gentle 1.5yd nudge, at 6yd/s it is a 10yd charge.
+    //
+    // The dead time these numbers appear to cause was never really the grace — it
+    // was the think interval. Fix the tick rate (DcTestRunJob keeps a real-player
+    // master installed for exactly this reason) and leave the ramp alone.
+    constexpr uint32 DC_PULL_TAG_CREEP_GRACE_MS = 1500;
+    constexpr float DC_PULL_TAG_CREEP_YARDS_PER_SEC = 3.0f;
 
     // Consecutive fizzled pulls of the SAME pack (Engage cleanup found the pull
     // target alive and idle — the drag never delivered it) before the pack is

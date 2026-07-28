@@ -221,6 +221,41 @@ private:
     void ReviveAndSendHome();
     void LogoutBots(Player* gm);
 
+    // Re-install the GM as every member's playerbots master, every monitor tick.
+    //
+    // Grouping installs it once, which was believed to be enough. It is not: live
+    // logs (tr-20260727-185517-*) show the LEADER TANK running the whole clear on
+    // the no-real-player-master path while its own followers stayed on the fast
+    // one. The arithmetic is unambiguous, because PlayerbotAIBase::YieldThread
+    // stamps a deterministic per-bot offset (guid % 201) on top of
+    // GetReactDelay():
+    //
+    //   follower Cairion (guid 350, offset 149): ticks 250ms apart
+    //       -> GetReactDelay() == 100  == reactDelay          (real master)
+    //   tank Tiodo (guid 541, offset 139): ticks 640ms apart in combat,
+    //   1100-3100ms apart out of combat
+    //       -> GetReactDelay() == 500  == reactDelay * 5      (no real master, combat)
+    //       -> GetReactDelay() == 1000-3000 == reactDelay * urand(10,30)
+    //                                                          (no real master, idle)
+    //
+    // So the tank was THINKING ONCE EVERY ONE TO THREE SECONDS for the entire
+    // out-of-combat pull sequence — the commit walk, the Forming dwell, the tag,
+    // the creep. Every phase transition cost a second or more of standing still,
+    // which is the whole "pauses way too long outside aggro range, then takes a
+    // couple of steps, then turns" report. No amount of tuning inside the pull
+    // FSM can fix a control loop sampled at 0.3-1 Hz.
+    //
+    // Something clears the leader's master after Grouping and it is not yet known
+    // what (PlayerbotAI::UpdateAIGroupMaster can null a master, but its branches
+    // do not obviously fire here, and FindNewMaster can never restore one for an
+    // all-bot group — it only accepts a real player or a self-mastered leader, so
+    // once lost the state is ABSORBING). Rather than guess, re-assert it: the call
+    // is idempotent, costs a handful of pointer writes per second per run, and
+    // repairs the state within one monitor tick whatever clears it. The first
+    // repair per run is logged, so the next run tells us WHEN it happens without
+    // another investigation round.
+    void ReassertMaster();
+
     Player* FindGm() const;
     Player* FindTank() const;
 
@@ -251,6 +286,9 @@ private:
     bool _groupFormed = false;
     bool _teleportIssued = false;
     bool _dcOnIssued = false;
+    // One-shot so ReassertMaster's diagnostic names the first repair per run
+    // instead of once a second forever.
+    bool _masterRepairLogged = false;
 
     // --- monitoring state ----------------------------------------------------
     std::vector<BossRef> _roster;
