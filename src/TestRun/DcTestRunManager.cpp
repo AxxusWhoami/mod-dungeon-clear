@@ -228,7 +228,7 @@ bool DcTestRunManager::StartRoster(Player* gm, std::string const& dungeonToken,
 }
 
 bool DcTestRunManager::WatchTarget(std::string const& selector, ObjectGuid* tankOut,
-                                   std::string* msg) const
+                                   std::string* msg, std::string* tokenOut) const
 {
     std::vector<DcTestRunSelect::RunRef> refs;
     refs.reserve(_runs.size());
@@ -269,6 +269,8 @@ bool DcTestRunManager::WatchTarget(std::string const& selector, ObjectGuid* tank
     DcTestRunJob const* job = _runs[res.indices.front()].get();
     if (tankOut)
         *tankOut = job->TankGuid();
+    if (tokenOut)
+        *tokenOut = job->DungeonToken();
     if (msg)
         *msg = job->RunId() + " (" + job->DungeonToken() + ")";
     return true;

@@ -19,6 +19,7 @@
 #include "InstanceSaveMgr.h"
 #include "Map.h"
 #include "ObjectAccessor.h"
+#include "ObjectMgr.h"
 #include "Player.h"
 #include "StringFormat.h"
 
@@ -387,11 +388,12 @@ public:
     // button refuses outright because its transport is the party channel.
     //
     // Sequence: hide the GM (mobs must not aggro the watcher and corrupt the
-    // run), bind + teleport into the run's instance, and arm the follow camera
-    // to start on arrival — the teleport is asynchronous, and the teleport
-    // teardown hook deliberately stops any live camera on the way out, so the
-    // camera cannot be started here. `.dc test watch off` ends it and puts the
-    // GM's own visibility back.
+    // run), bind + teleport to the run instance's ENTRANCE (the body stays out
+    // of the party's way — farsight does the actual watching), and arm the
+    // follow camera to start on arrival — the teleport is asynchronous, and the
+    // teleport teardown hook deliberately stops any live camera on the way out,
+    // so the camera cannot be started here. `.dc test watch off` ends it and
+    // puts the GM's own visibility back.
     static bool HandleTestWatch(ChatHandler* handler, Tail selectorArg)
     {
         Player* gm = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
@@ -416,7 +418,8 @@ public:
 
         ObjectGuid tankGuid;
         std::string msg;
-        if (!DcTestRunManager::Instance().WatchTarget(selector, &tankGuid, &msg))
+        std::string dungeonToken;
+        if (!DcTestRunManager::Instance().WatchTarget(selector, &tankGuid, &msg, &dungeonToken))
         {
             handler->SendSysMessage(msg);
             return true;
@@ -471,12 +474,41 @@ public:
 
         gm->SaveRecallPosition();   // `.recall` gets the GM back out
 
+        // Land at the instance ENTRANCE, not on the tank. Farsight renders from
+        // the seer's position, so the camera looks the same either way — but
+        // dropping the GM's body into the middle of a live pull puts it in
+        // collision range of the party (and of anything the pull picks up), and
+        // leaves it standing there once the camera stops. The entrance is the
+        // quiet, already-cleared end of the instance.
+        //
+        // Preference order: the run's own registry row (per-WING for split maps
+        // like Dire Maul, where a bare map lookup can't tell the wings apart),
+        // then the map's entrance areatrigger, then the tank as a last resort.
+        float tx = tank->GetPositionX();
+        float ty = tank->GetPositionY();
+        float tz = tank->GetPositionZ();
+        float to = tank->GetOrientation();
+        if (DcTestDungeonRegistry::Row const* row = DcTestDungeonRegistry::Find(dungeonToken);
+            row && row->mapId == tank->GetMapId())
+        {
+            tx = row->x;
+            ty = row->y;
+            tz = row->z;
+            to = row->o;
+        }
+        else if (AreaTriggerTeleport const* at = sObjectMgr->GetMapEntranceTrigger(tank->GetMapId()))
+        {
+            tx = at->target_X;
+            ty = at->target_Y;
+            tz = at->target_Z;
+            to = at->target_Orientation;
+        }
+
         // Arm the camera AFTER the teleport call, never before: TeleportTo
         // fires PLAYERHOOK_ON_BEFORE_TELEPORT synchronously, and that hook
         // calls DcSpectator::Stop — which disarms pending requests. Arming
         // first would have the teleport immediately cancel its own camera.
-        if (!gm->TeleportTo(tank->GetMapId(), tank->GetPositionX(), tank->GetPositionY(),
-                            tank->GetPositionZ(), tank->GetOrientation()))
+        if (!gm->TeleportTo(tank->GetMapId(), tx, ty, tz, to))
         {
             if (gmModeApplied)
                 gm->SetGameMaster(false);
