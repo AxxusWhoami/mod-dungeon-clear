@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "ObjectGuid.h"
+#include "TestRun/DcTestGearTiers.h"
 
 class DcTestRunJob;
 class Player;
@@ -70,9 +71,12 @@ public:
     // heroicLevel as the default bot level (level override still wins).
     // planId ties the run to a `.dc test plan` campaign ("" = ad-hoc); errOut /
     // runIdOut are optional feedback for the plan scheduler.
+    // gear is the run's own item-level / quality ceiling; a default-constructed
+    // Spec inherits the AiPlayerbot.AutoGear* conf values.
     bool Start(Player* gm, std::string const& dungeonToken, uint32 levelOverride, uint32 seed,
-               bool heroic, std::string* msg, std::string const& planId = "",
-               StartErr* errOut = nullptr, std::string* runIdOut = nullptr);
+               bool heroic, DcTestGearTiers::Spec const& gear, std::string* msg,
+               std::string const& planId = "", StartErr* errOut = nullptr,
+               std::string* runIdOut = nullptr);
 
     // Validate + launch a HAND-PICKED party (`.dc test start <d> party=a,b,c,d,e`).
     // `partySpec` is the raw comma-separated name list; roles are positional

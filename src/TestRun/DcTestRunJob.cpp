@@ -249,6 +249,7 @@ void DcTestRunJob::InitIdentity(Player* gm, DcTestDungeonRegistry::Row const& ro
 
 std::unique_ptr<DcTestRunJob> DcTestRunJob::Create(Player* gm, DcTestDungeonRegistry::Row const& row,
                                                    uint32 levelOverride, uint32 seed, bool heroic,
+                                                   DcTestGearTiers::Spec const& gear,
                                                    std::unordered_set<ObjectGuid> const& reservedGuids,
                                                    std::string const& planId, std::string* err)
 {
@@ -265,6 +266,14 @@ std::unique_ptr<DcTestRunJob> DcTestRunJob::Create(Player* gm, DcTestDungeonRegi
     uint32 const level = levelOverride ? std::min<uint32>(levelOverride, 80u)
                                        : (heroic ? row.heroicLevel : row.recommendedLevel);
     job->InitIdentity(gm, row, level, heroic, seed, planId);
+
+    // Resolve the gear ceiling against the conf once, here: a run that took 40
+    // minutes must be reproducible from its record even if somebody reloaded
+    // the config while it was in the dungeon.
+    job->_gear = DcTestGearTiers::Resolve(gear, sPlayerbotAIConfig.autoGearScoreLimit,
+                                          sPlayerbotAIConfig.autoGearQualityLimit);
+    job->_record.gearIlvl = job->_gear.ilvl;
+    job->_record.gearQuality = job->_gear.quality;
 
     std::array<DcTestComp::Slot, DcTestComp::kPartySize> const comp = DcTestComp::BuildComp(seed);
     for (DcTestComp::Slot const& c : comp)
@@ -460,6 +469,12 @@ std::string DcTestRunJob::StatusLine() const
     Stage const stage = _stage.load();
     std::string out = _record.runId + " " + _record.dungeon + (_heroic ? " (heroic)" : "") +
                       " [" + StageName(stage) + "] elapsed " + std::to_string(_totalMs / 1000) + "s";
+    // The gear ceiling belongs in the start confirmation: it is the one run
+    // parameter with no visible effect until the party is already fighting.
+    if (!_realChars)
+        out += ", gear " +
+               (_gear.ilvl ? "ilvl<=" + std::to_string(_gear.ilvl) : std::string("unlimited")) +
+               " " + DcTestGearTiers::QualityName(_gear.quality);
     if (stage == Stage::Monitoring)
     {
         out += ", bosses " + std::to_string(_record.bossesKilled) + "/" +
@@ -716,28 +731,23 @@ void DcTestRunJob::TickProvisioning(bool& provisionBudget)
         return;
     provisionBudget = false;
 
-    // Gear ceiling: exactly what the `autogear` chat command applies, read fresh
-    // every provisioning so a config change is honoured by the next run.
+    // Gear ceiling: the run's own (_gear, resolved at Create from the `ilvl=` /
+    // `quality=` options or the AutoGear* conf values), applied exactly the way
+    // the `autogear` chat command applies the server-wide ones.
     //
     // This used to be a hardcoded ITEM_QUALITY_EPIC with no gear-score argument,
     // which silently opted every test bot out of BOTH gear limits: the factory
     // only falls back to the RandomGear* settings when itemQuality is left at 0,
     // so passing a quality also left gearScoreLimit at 0 — i.e. "no ilvl cap".
     // Runs were fought in uncapped epics no matter what AutoGearScoreLimit said.
-    // Same computation as AutoGearAction::Execute.
     uint32 const gearScoreLimit =
-        sPlayerbotAIConfig.autoGearScoreLimit == 0
-            ? 0
-            : PlayerbotFactory::CalcMixedGearScore(sPlayerbotAIConfig.autoGearScoreLimit,
-                                                   sPlayerbotAIConfig.autoGearQualityLimit);
-    std::string const gearCap = sPlayerbotAIConfig.autoGearScoreLimit == 0
-                                    ? std::string("unlimited")
-                                    : std::to_string(sPlayerbotAIConfig.autoGearScoreLimit);
+        _gear.ilvl == 0 ? 0 : PlayerbotFactory::CalcMixedGearScore(_gear.ilvl, _gear.quality);
+    std::string const gearCap = _gear.ilvl == 0 ? std::string("unlimited") : std::to_string(_gear.ilvl);
 
     // Full roll at the target level first (Randomize includes GiveLevel and
     // re-picks talents), then force the role spec and re-gear for it — the
     // same sequence the `talents spec` chat command uses.
-    PlayerbotFactory factory(bot, _level, sPlayerbotAIConfig.autoGearQualityLimit, gearScoreLimit);
+    PlayerbotFactory factory(bot, _level, _gear.quality, gearScoreLimit);
 
     // Strip the equipped set first. Randomize() only wipes items when
     // AiPlayerbot.EquipAndSpecPersistence is off (it defaults on), and
@@ -783,7 +793,7 @@ void DcTestRunJob::TickProvisioning(bool& provisionBudget)
     LOG_INFO("playerbots.dungeonclear",
              "TESTRUN {} provisioned {} ({} {}, level {}, gear <= ilvl {} quality {})",
              _record.runId, bot->GetName(), entry.spec, entry.role, entry.level, gearCap,
-             sPlayerbotAIConfig.autoGearQualityLimit);
+             DcTestGearTiers::QualityName(_gear.quality));
 
     slot.provisioned = true;
     ++_provisionIdx;

@@ -119,7 +119,8 @@ namespace DcTestRunRecord
         // 7: added the per-pull predicted-vs-observed log (pulls)
         // 8: added roster (hand-picked real characters) + per-member
         //    detectedRole/roleMismatch and origin position
-        std::uint32_t schema = 8;
+        // 9: added the per-run gear ceiling (gearIlvl/gearQuality)
+        std::uint32_t schema = 9;
         std::string runId;
         std::string planId;       // owning `.dc test plan`, "" for ad-hoc runs
         std::string dungeon;      // registry token
@@ -130,6 +131,13 @@ namespace DcTestRunRecord
         std::uint32_t level = 0;  // requested level
         bool heroic = false;      // run at DUNGEON_DIFFICULTY_HEROIC
         std::uint32_t compSeed = 0;  // seed BuildComp rolled this comp from (for replay)
+        // Gear ceiling the bots were rolled to, already resolved against the
+        // AutoGear* conf values (0 ilvl = uncapped; quality is 1..5). Both stay
+        // 0 on roster runs, which are never re-geared. The pair belongs in the
+        // record because a run's outcome is only comparable to another run's at
+        // the same ceiling.
+        std::uint32_t gearIlvl = 0;
+        std::uint32_t gearQuality = 0;
         // Hand-picked party of real player characters (`party=`) rather than a
         // seeded draw from the addclass pool. compSeed is 0 on these runs: the
         // roster IS the comp, so there is nothing to replay from a seed.

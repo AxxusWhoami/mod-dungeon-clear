@@ -46,8 +46,8 @@ DcTestRunManager& DcTestRunManager::Instance()
 
 bool DcTestRunManager::Start(Player* gm, std::string const& dungeonToken,
                              uint32 levelOverride, uint32 seed, bool heroic,
-                             std::string* msg, std::string const& planId,
-                             StartErr* errOut, std::string* runIdOut)
+                             DcTestGearTiers::Spec const& gear, std::string* msg,
+                             std::string const& planId, StartErr* errOut, std::string* runIdOut)
 {
     if (errOut)
         *errOut = StartErr::None;
@@ -99,7 +99,7 @@ bool DcTestRunManager::Start(Player* gm, std::string const& dungeonToken,
     // world thread — no TOCTOU with other runs).
     std::string err;
     std::unique_ptr<DcTestRunJob> job =
-        DcTestRunJob::Create(gm, *row, levelOverride, seed, heroic, _reservedGuids, planId, &err);
+        DcTestRunJob::Create(gm, *row, levelOverride, seed, heroic, gear, _reservedGuids, planId, &err);
     if (!job)
         return fail(StartErr::PoolExhausted, err);
 

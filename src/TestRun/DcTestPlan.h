@@ -10,6 +10,8 @@
 #include <string>
 #include <vector>
 
+#include "TestRun/DcTestGearTiers.h"
+
 // Pure kernel for `.dc test plan` campaigns: a plan keeps up to `concurrent`
 // test runs of one dungeon in flight until `total` have completed, then the
 // outcomes are aggregated into one summary (DcTestPlanSummary). Engine-free —
@@ -29,6 +31,10 @@ namespace DcTestPlan
         bool heroic = false;           // children run at DUNGEON_DIFFICULTY_HEROIC
         std::uint32_t seedBase = 0;    // 0 = random comp per run;
                                        // N = child i replays seed N+i
+        // Gear ceiling every child run is geared to. Plan-wide rather than
+        // per-child on purpose: a campaign exists to compare runs against each
+        // other, which only means anything at one ceiling.
+        DcTestGearTiers::Spec gear;
     };
 
     struct Counters
@@ -106,9 +112,9 @@ namespace DcTestPlan
     }
 
     // `.dc test plan start <token> [heroic] total=N [concurrent=N] [level=N]
-    // [seed=N]`. Fills token/heroic/total/concurrent/level/seedBase; planId is
-    // left empty. ok is false with a usage-shaped err on a missing token/total,
-    // a duplicate bare word, or a malformed key=value.
+    // [seed=N] [ilvl=N|none] [quality=N|epic|…]`. Fills the whole Spec except
+    // planId. ok is false with a usage-shaped err on a missing token/total, a
+    // duplicate bare word, or a malformed key=value.
     struct ParseResult
     {
         bool ok = false;

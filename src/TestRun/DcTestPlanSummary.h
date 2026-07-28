@@ -119,7 +119,8 @@ namespace DcTestPlanSummary
         // 3: bossFunnel entries gained `wiped`; added trashWipes +
         //    unattributedWipes
         // 4: added the pull population (predicted vs observed)
-        std::uint32_t schema = 4;
+        // 5: added the campaign's gear ceiling (gearIlvl/gearQuality)
+        std::uint32_t schema = 5;
         std::string planId;
         std::string dungeon;
         std::string dungeonName;
@@ -128,6 +129,11 @@ namespace DcTestPlanSummary
         std::uint32_t level = 0;
         bool heroic = false;
         std::uint32_t seedBase = 0;
+        // Gear ceiling asked for, as typed rather than resolved: 0 = "whatever
+        // the server is set to", -1 = no limit. Resolved per run (and recorded
+        // there); a campaign summary only needs to say what it requested.
+        std::int32_t gearIlvl = 0;
+        std::uint32_t gearQuality = 0;
         std::uint64_t startedAtMs = 0;
         std::uint64_t endedAtMs = 0;
         std::uint32_t durationS = 0;

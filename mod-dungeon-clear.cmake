@@ -36,6 +36,7 @@ if (BUILD_TESTING)
             "${MOD_PATH}/t/TestSettingsRegistry.cpp"
             "${MOD_PATH}/t/TestTestRunVerdict.cpp"
             "${MOD_PATH}/t/TestTestDungeonRegistry.cpp"
+            "${MOD_PATH}/t/TestTestGearTiers.cpp"
             "${MOD_PATH}/t/TestTestRunRecord.cpp"
             "${MOD_PATH}/t/TestTestRunSelect.cpp"
             "${MOD_PATH}/t/TestTestRoster.cpp"

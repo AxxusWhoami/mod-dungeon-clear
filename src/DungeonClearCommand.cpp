@@ -29,9 +29,12 @@
 #include <cstdlib>
 #include <sstream>
 
+#include "PlayerbotAIConfig.h"
+
 #include "DungeonClearDispatch.h"
 #include "TestRun/DcTestDriver.h"
 #include "TestRun/DcTestDungeonRegistry.h"
+#include "TestRun/DcTestGearTiers.h"
 #include "TestRun/DcTestPlan.h"
 #include "TestRun/DcTestPlanManager.h"
 #include "TestRun/DcTestRunManager.h"
@@ -235,6 +238,7 @@ public:
             { "status", HandleTestStatus, SEC_GAMEMASTER, Console::Yes },
             { "stop",   HandleTestStop,   SEC_GAMEMASTER, Console::Yes },
             { "list",   HandleTestList,   SEC_GAMEMASTER, Console::Yes },
+            { "gear",   HandleTestGear,   SEC_GAMEMASTER, Console::Yes },
             // Console::No — a camera needs a session to attach to.
             { "watch",  HandleTestWatch,  SEC_GAMEMASTER, Console::No },
             { "plan",   dcTestPlanTable },
@@ -285,14 +289,17 @@ public:
         return nullptr;
     }
 
-    // `.dc test start <dungeon> [heroic] [level=N] [seed=N]` — random comp drawn
-    // from the addclass pool; dungeon is a registry token (`.dc test list`) or a
-    // mapId.
+    // `.dc test start <dungeon> [heroic] [level=N] [seed=N] [ilvl=N|none]
+    // [quality=rare|epic|…]` — random comp drawn from the addclass pool;
+    // dungeon is a registry token (`.dc test list`) or a mapId. ilvl/quality cap
+    // the gear the bots are rolled with, defaulting to the AiPlayerbot.AutoGear*
+    // conf values; `.dc test gear <dungeon>` lists the ceilings worth using for
+    // a given dungeon.
     //
     // `.dc test start <dungeon> party=Tank,Heal,D1,D2,D3 [heroic]` — a hand-picked
-    // party of REAL player characters instead (roles positional). level= and seed=
-    // are meaningless there: the level comes from the characters and the roster is
-    // the comp.
+    // party of REAL player characters instead (roles positional). level=, seed=
+    // and the gear options are all meaningless there: the level comes from the
+    // characters, the roster is the comp, and real characters are never re-geared.
     static bool HandleTestStart(ChatHandler* handler, Tail args)
     {
         Player* issuer = ResolveTestIssuer(handler);
@@ -300,13 +307,15 @@ public:
             return true;
 
         static constexpr char const* kUsage =
-            "Usage: .dc test start <dungeon> [heroic] [level=N] [seed=N]\n"
+            "Usage: .dc test start <dungeon> [heroic] [level=N] [seed=N] [ilvl=N|none] "
+            "[quality=normal|uncommon|rare|epic|legendary]\n"
             "   or: .dc test start <dungeon> party=Tank,Heal,Dps1,Dps2,Dps3 [heroic]";
 
         std::string token;
         std::string party;
         uint32 level = 0;
         uint32 seed = 0;  // 0 = roll a random comp; seed=N replays a specific one
+        DcTestGearTiers::Spec gear;
         bool heroic = false;
         std::istringstream in{std::string(args)};
         std::string word;
@@ -316,6 +325,26 @@ public:
                 level = static_cast<uint32>(std::strtoul(word.c_str() + 6, nullptr, 10));
             else if (word.rfind("seed=", 0) == 0)
                 seed = static_cast<uint32>(std::strtoul(word.c_str() + 5, nullptr, 10));
+            else if (word.rfind("ilvl=", 0) == 0)
+            {
+                bool ok = false;
+                gear.ilvl = DcTestGearTiers::ParseIlvl(word.substr(5), &ok);
+                if (!ok)
+                {
+                    handler->SendSysMessage("ilvl must be 1-400, or 'none' for no limit.");
+                    return true;
+                }
+            }
+            else if (word.rfind("quality=", 0) == 0)
+            {
+                gear.quality = DcTestGearTiers::ParseQuality(word.substr(8));
+                if (gear.quality == 0)
+                {
+                    handler->SendSysMessage(
+                        "quality must be normal|uncommon|rare|epic|legendary (or 1-5).");
+                    return true;
+                }
+            }
             else if (word.rfind("party=", 0) == 0)
                 party = word.substr(6);
             else if (word == "heroic")
@@ -340,17 +369,18 @@ public:
             // Reject rather than silently ignore: somebody passing level= with a
             // roster believes it will be applied, and applying it would mean
             // relevelling their character.
-            if (level || seed)
+            if (level || seed || !gear.IsDefault())
             {
                 handler->SendSysMessage(
-                    "level= and seed= do not apply to party= runs: the level comes from the "
-                    "characters (they are never relevelled) and the roster is the comp.");
+                    "level=, seed= and ilvl=/quality= do not apply to party= runs: the level comes "
+                    "from the characters (they are never relevelled or re-geared) and the roster "
+                    "is the comp.");
                 return true;
             }
             DcTestRunManager::Instance().StartRoster(issuer, token, party, heroic, &msg);
         }
         else
-            DcTestRunManager::Instance().Start(issuer, token, level, seed, heroic, &msg);
+            DcTestRunManager::Instance().Start(issuer, token, level, seed, heroic, gear, &msg);
         handler->SendSysMessage(msg);
         return true;
     }
@@ -579,6 +609,49 @@ public:
                 row.recommendedLevel,
                 row.heroicLevel ? Acore::StringFormat(", heroic {}", row.heroicLevel)
                                 : std::string()));
+        return true;
+    }
+
+    // `.dc test gear <dungeon> [heroic]` — the item-level ceilings worth running
+    // that dungeon at, i.e. the same list the dashboard's start form offers.
+    // Named raid tiers at the level cap, three steps around the dungeon's own
+    // gear below it (see DcTestGearTiers).
+    static bool HandleTestGear(ChatHandler* handler, Tail args)
+    {
+        std::string token;
+        bool heroic = false;
+        std::istringstream in{std::string(args)};
+        std::string word;
+        while (in >> word)
+        {
+            if (word == "heroic")
+                heroic = true;
+            else if (token.empty())
+                token = word;
+        }
+
+        DcTestDungeonRegistry::Row const* row = DcTestDungeonRegistry::Find(token);
+        if (!row)
+        {
+            handler->SendSysMessage("Usage: .dc test gear <dungeon> [heroic] — see .dc test list");
+            return true;
+        }
+        if (heroic && row->heroicLevel == 0)
+        {
+            handler->SendSysMessage(Acore::StringFormat("'{}' has no heroic mode.", row->token));
+            return true;
+        }
+
+        uint32 const level = heroic ? row->heroicLevel : row->recommendedLevel;
+        handler->SendSysMessage(Acore::StringFormat(
+            "{}{} at level {} — ilvl= choices (server default is {}):", row->name,
+            heroic ? " heroic" : "", level,
+            sPlayerbotAIConfig.autoGearScoreLimit > 0
+                ? std::to_string(sPlayerbotAIConfig.autoGearScoreLimit)
+                : std::string("unlimited")));
+        for (DcTestGearTiers::Choice const& choice : DcTestGearTiers::Ladder(row->mapId, level))
+            handler->SendSysMessage(Acore::StringFormat("  ilvl={:<4} {}", choice.ilvl, choice.label));
+        handler->SendSysMessage("  ilvl=none  no limit");
         return true;
     }
 };

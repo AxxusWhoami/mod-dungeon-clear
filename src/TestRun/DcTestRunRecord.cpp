@@ -78,6 +78,8 @@ namespace DcTestRunRecord
           << ",\"level\":" << rec.level
           << ",\"heroic\":" << (rec.heroic ? "true" : "false")
           << ",\"compSeed\":" << rec.compSeed
+          << ",\"gearIlvl\":" << rec.gearIlvl
+          << ",\"gearQuality\":" << rec.gearQuality
           << ",\"roster\":" << (rec.roster ? "true" : "false")
           << ",\"comp\":[";
         for (std::size_t i = 0; i < rec.comp.size(); ++i)

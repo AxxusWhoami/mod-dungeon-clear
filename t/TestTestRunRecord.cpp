@@ -176,9 +176,26 @@ TEST(DcTestRunRecordTest, BossRosterSerializesInProgressionOrder)
               std::string::npos);
 }
 
-TEST(DcTestRunRecordTest, SchemaIsEight)
+TEST(DcTestRunRecordTest, SchemaIsNine)
 {
-    EXPECT_NE(ToJsonl(SampleRecord()).find("\"schema\":8"), std::string::npos);
+    EXPECT_NE(ToJsonl(SampleRecord()).find("\"schema\":9"), std::string::npos);
+}
+
+// The gear ceiling a run was rolled to. Two runs of the same dungeon are only
+// comparable at the same ceiling, so it rides out on every record — 0 ilvl
+// meaning uncapped, exactly as the playerbots conf encodes it.
+TEST(DcTestRunRecordTest, GearCeilingSerializes)
+{
+    Record r = SampleRecord();
+    r.gearIlvl = 141;
+    r.gearQuality = 4;
+
+    std::string const line = ToJsonl(r);
+    EXPECT_NE(line.find("\"gearIlvl\":141"), std::string::npos);
+    EXPECT_NE(line.find("\"gearQuality\":4"), std::string::npos);
+
+    r.gearIlvl = 0;
+    EXPECT_NE(ToJsonl(r).find("\"gearIlvl\":0"), std::string::npos);
 }
 
 // ---- roster runs (hand-picked real characters) ------------------------------
