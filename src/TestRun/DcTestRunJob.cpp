@@ -161,6 +161,46 @@ Player* DcTestRunJob::FindTank() const
     return ObjectAccessor::FindPlayer(_tankGuid);
 }
 
+void DcTestRunJob::ReassertMaster()
+{
+    Player* const gm = FindGm();
+    if (!gm)
+        return;
+
+    for (Slot const& slot : _slots)
+    {
+        Player* const bot = ObjectAccessor::FindPlayer(slot.guid);
+        if (!bot)
+            continue;
+        PlayerbotAI* const botAI = GET_PLAYERBOT_AI(bot);
+        if (!botAI || botAI->GetMaster() == gm)
+            continue;
+
+        // Name it once. WHICH member loses its master, and how far into the run,
+        // is the missing half of the diagnosis — the rate of the message is the
+        // answer to "is it lost once at setup, or repeatedly?".
+        if (!_masterRepairLogged)
+        {
+            _masterRepairLogged = true;
+            Player* const had = botAI->GetMaster();
+            LOG_INFO("playerbots.dungeonclear",
+                     "TESTRUN {} react-delay repair: {}'s playerbots master was {} "
+                     "({}s into monitoring) — reinstating {}. Until this fires the "
+                     "bot thinks on GetReactDelay()'s slow path (up to 3s per tick).",
+                     RunId(), bot->GetName(), had ? had->GetName() : "cleared",
+                     _monitorMs / 1000, gm->GetName());
+        }
+        botAI->SetMaster(gm);
+        // Whatever cleared the master very likely ran ResetStrategies() with it
+        // (that is the shape of every master-clearing path in stock), which puts
+        // stock follow-master back. Re-strip it on the repair path exactly as
+        // Grouping does, so a reinstated GM master can never start a bot jogging
+        // toward the invisible driver parked outside the instance.
+        botAI->ChangeStrategy("-follow", BOT_STATE_NON_COMBAT);
+        botAI->ChangeStrategy("-follow", BOT_STATE_COMBAT);
+    }
+}
+
 void DcTestRunJob::InitIdentity(Player* gm, DcTestDungeonRegistry::Row const& row, uint32 level,
                                 bool heroic, uint32 seed, std::string const& planId)
 {
@@ -1418,6 +1458,11 @@ void DcTestRunJob::TickMonitoring(uint32 dt)
 
     if (tank && tankAI && (!tank->IsInWorld() || tank->IsBeingTeleported()))
         return;  // mid-teleport — skip this sample, timers resume next tick
+
+    // Keep the react-delay fast path alive for the WHOLE run, not just from
+    // Grouping (see ReassertMaster — the leader was observed losing its master and
+    // dropping to a 1-3 second think interval for the entire clear).
+    ReassertMaster();
 
     // A roster member vanishing from the world mid-run means its owner logged in:
     // playerbots' secure-login hook force-logs-out an active altbot when a real
