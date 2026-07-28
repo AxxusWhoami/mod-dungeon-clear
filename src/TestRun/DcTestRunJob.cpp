@@ -122,6 +122,17 @@ namespace
             }
         return -1;
     }
+
+    // Destroy every equipped item so the factory re-gears from an empty sheet.
+    // PlayerbotFactory::ClearAllItems is private to the factory, and its public
+    // ClearEverything() drags in a level/talent/skill reset we do not want here,
+    // so do the one thing that matters — the equipped set — directly.
+    void StripEquipment(Player* bot)
+    {
+        for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+            if (bot->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+                bot->DestroyItem(INVENTORY_SLOT_BAG_0, slot, true);
+    }
 }
 
 char const* DcTestRunJob::StageName(Stage s)
@@ -705,10 +716,37 @@ void DcTestRunJob::TickProvisioning(bool& provisionBudget)
         return;
     provisionBudget = false;
 
+    // Gear ceiling: exactly what the `autogear` chat command applies, read fresh
+    // every provisioning so a config change is honoured by the next run.
+    //
+    // This used to be a hardcoded ITEM_QUALITY_EPIC with no gear-score argument,
+    // which silently opted every test bot out of BOTH gear limits: the factory
+    // only falls back to the RandomGear* settings when itemQuality is left at 0,
+    // so passing a quality also left gearScoreLimit at 0 — i.e. "no ilvl cap".
+    // Runs were fought in uncapped epics no matter what AutoGearScoreLimit said.
+    // Same computation as AutoGearAction::Execute.
+    uint32 const gearScoreLimit =
+        sPlayerbotAIConfig.autoGearScoreLimit == 0
+            ? 0
+            : PlayerbotFactory::CalcMixedGearScore(sPlayerbotAIConfig.autoGearScoreLimit,
+                                                   sPlayerbotAIConfig.autoGearQualityLimit);
+    std::string const gearCap = sPlayerbotAIConfig.autoGearScoreLimit == 0
+                                    ? std::string("unlimited")
+                                    : std::to_string(sPlayerbotAIConfig.autoGearScoreLimit);
+
     // Full roll at the target level first (Randomize includes GiveLevel and
     // re-picks talents), then force the role spec and re-gear for it — the
     // same sequence the `talents spec` chat command uses.
-    PlayerbotFactory factory(bot, _level, ITEM_QUALITY_EPIC);
+    PlayerbotFactory factory(bot, _level, sPlayerbotAIConfig.autoGearQualityLimit, gearScoreLimit);
+
+    // Strip the equipped set first. Randomize() only wipes items when
+    // AiPlayerbot.EquipAndSpecPersistence is off (it defaults on), and
+    // InitEquipment leaves a slot alone when no candidate passes the filters — so
+    // a pool bot geared by an earlier run under a looser ceiling would keep those
+    // pieces and the new limit would look ignored. Every test bot starts bare and
+    // is geared from scratch, which is the `autogear`-on-a-stripped-bot behaviour
+    // a run needs to be reproducible.
+    StripEquipment(bot);
     factory.Randomize(false);
     if (specNo >= 0)
     {
@@ -742,8 +780,10 @@ void DcTestRunJob::TickProvisioning(bool& provisionBudget)
     entry.level = bot->GetLevel();
     _record.comp.push_back(entry);
 
-    LOG_INFO("playerbots.dungeonclear", "TESTRUN {} provisioned {} ({} {}, level {})",
-             _record.runId, bot->GetName(), entry.spec, entry.role, entry.level);
+    LOG_INFO("playerbots.dungeonclear",
+             "TESTRUN {} provisioned {} ({} {}, level {}, gear <= ilvl {} quality {})",
+             _record.runId, bot->GetName(), entry.spec, entry.role, entry.level, gearCap,
+             sPlayerbotAIConfig.autoGearQualityLimit);
 
     slot.provisioned = true;
     ++_provisionIdx;
