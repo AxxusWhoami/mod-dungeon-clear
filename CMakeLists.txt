@@ -187,7 +187,9 @@ AC_ADD_CONFIG_FILE("${CMAKE_CURRENT_LIST_DIR}/conf/mod_dungeon_clear.conf.dist")
 # TestRun/DcTestRunSelect.{h,cpp}, TestRun/DcTestRunLiveJson.{h,cpp}
 #   (concurrent-run refactor pure helpers: DcTestRunSelect resolves the
 #    `.dc test stop <selector>` precedence (bare/all/runId/dungeon-token) to a
-#    set of run indices; DcTestRunLiveJson builds the multi-run live-heartbeat
+#    set of run indices, and NextWatchIndex holds the `.dc test watch next`
+#    cycle rule (wrap, cold start, stay put when there is nowhere to hop);
+#    DcTestRunLiveJson builds the multi-run live-heartbeat
 #    JSON ({"active","ts","runs":[…]}) the dashboard polls. Both engine-free and
 #    edge-pinned by t/TestTestRunSelect + t/TestTestRunLiveJson. Paired with the
 #    DcTestRunJob per-run FSM extraction + DcTestRunManager registry rewrite.)

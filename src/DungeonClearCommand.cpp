@@ -479,6 +479,11 @@ public:
     // whether the teleport must be forced far, because the bind made for the
     // previous run would otherwise decide where this teleport lands. See
     // Util/DcWatchHop.h for why each of those is load-bearing.
+    //
+    // `.dc test watch next` hops to the run after the one being watched and
+    // wraps, so a plan's worth of concurrent runs can be toured on one command
+    // without reading runIds off `.dc test status`. It refuses (and stays put)
+    // when there is nowhere to go — see DcTestRunManager::NextWatchTarget.
     static bool HandleTestWatch(ChatHandler* handler, Tail selectorArg)
     {
         Player* gm = handler->GetSession() ? handler->GetSession()->GetPlayer() : nullptr;
@@ -529,7 +534,14 @@ public:
         ObjectGuid tankGuid;
         std::string msg;
         std::string dungeonToken;
-        if (!DcTestRunManager::Instance().WatchTarget(selector, &tankGuid, &msg, &dungeonToken))
+        // "next" tours the live runs instead of naming one: the run after the
+        // instance the watcher is standing in, wrapping. It resolves to a
+        // target like any other selector, so the hop below is unchanged.
+        bool const resolved =
+            selector == "next"
+                ? DcTestRunManager::Instance().NextWatchTarget(gm, &tankGuid, &msg, &dungeonToken)
+                : DcTestRunManager::Instance().WatchTarget(selector, &tankGuid, &msg, &dungeonToken);
+        if (!resolved)
         {
             handler->SendSysMessage(msg);
             return true;
