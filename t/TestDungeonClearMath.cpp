@@ -1729,3 +1729,65 @@ TEST(DungeonClearChaseLeashTest, ABackwardClockStepCannotFakeAnExpiry)
               ChaseVerdict::Hold);
     EXPECT_EQ(hold, 5000u);
 }
+
+// ---------------------------------------------------------------------------
+// PathProgressCursor — where along a route the bot has walked up to.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+    // Shadowfang Keep's tower, taken from the navmesh: the staircase from the
+    // Fenrus room (Z 129) up to Wolf Master Nandos (Z 156) climbs almost
+    // directly overhead, so a route vertex on the landing 10yd UP sits CLOSER in
+    // 2D than the vertex on the floor the tank is actually standing on.
+    std::vector<G3D::Vector3> SfkStaircaseRoute()
+    {
+        return {
+            G3D::Vector3(-130.67f, 2169.07f, 129.16f),  // the tank's own floor
+            G3D::Vector3(-129.33f, 2168.00f, 138.76f),  // landing, one storey up
+            G3D::Vector3(-128.00f, 2174.93f, 155.83f),  // top of the stairs
+            G3D::Vector3(-120.70f, 2162.00f, 155.80f),  // Nandos, at the gate
+        };
+    }
+}
+
+TEST(DungeonClearPathCursorTest, PicksTheVertexOnTheBotsOwnFloor)
+{
+    // The tank is at the foot of the stairs. Vertex 1 is 1.81yd away in 2D and
+    // vertex 0 is 1.98yd away, so a 2D pick lands a storey up; in 3D vertex 1 is
+    // 9.9yd away and vertex 0 wins.
+    EXPECT_EQ(DungeonClearMath::PathProgressCursor(SfkStaircaseRoute(),
+                                                   -130.9f, 2167.1f, 129.0f),
+              0u);
+}
+
+TEST(DungeonClearPathCursorTest, FollowsTheBotUpTheStairs)
+{
+    // Standing on the landing, the cursor moves with it — the floor vertex below
+    // is now the far one.
+    EXPECT_EQ(DungeonClearMath::PathProgressCursor(SfkStaircaseRoute(),
+                                                   -129.5f, 2168.2f, 138.8f),
+              1u);
+    // And at the top, the tank's progress is the last leg, not the stairwell it
+    // is standing directly above.
+    EXPECT_EQ(DungeonClearMath::PathProgressCursor(SfkStaircaseRoute(),
+                                                   -121.0f, 2162.5f, 155.8f),
+              3u);
+}
+
+TEST(DungeonClearPathCursorTest, EmptyRouteReturnsZero)
+{
+    EXPECT_EQ(DungeonClearMath::PathProgressCursor({}, 0.0f, 0.0f, 0.0f), 0u);
+}
+
+TEST(DungeonClearPathCursorTest, FlatRouteIsUnaffectedByTheZTerm)
+{
+    // The ordinary single-storey case must behave exactly as the old 2D pick did.
+    std::vector<G3D::Vector3> const flat{
+        G3D::Vector3(0.0f, 0.0f, 100.0f),
+        G3D::Vector3(10.0f, 0.0f, 100.0f),
+        G3D::Vector3(20.0f, 0.0f, 100.0f),
+    };
+    EXPECT_EQ(DungeonClearMath::PathProgressCursor(flat, 11.0f, 2.0f, 100.0f), 1u);
+    EXPECT_EQ(DungeonClearMath::PathProgressCursor(flat, 19.0f, -3.0f, 100.5f), 2u);
+}

@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <vector>
 
+#include "G3D/Vector3.h"
 #include "Position.h"
 
 namespace DungeonClearMath
@@ -595,6 +596,31 @@ namespace DungeonClearMath
     bool SegmentIntersectsAABB2D(float ax, float ay, float bx, float by,
                                  float minX, float minY,
                                  float maxX, float maxY);
+
+    // Index of the route-polyline vertex the bot has walked up to — its PROGRESS
+    // CURSOR along that route. Measured in 3D on purpose.
+    //
+    // A 2D-nearest pick reads the wrong FLOOR wherever a dungeon stacks rooms
+    // over one another. Shadowfang Keep's tower is the worst case: the navmesh
+    // column above the Fenrus room carries surfaces at Z = 88, 94, 96, 102, 105,
+    // 114, 129 (the floor the tank is standing on), 139, 156 and 168, because the
+    // staircase up to Wolf Master Nandos climbs almost directly overhead. The
+    // route vertex on the landing 10yd UP sat 1.81yd from the tank in 2D while
+    // the tank's own floor vertex sat 1.98yd away — so a 2D cursor snapped a
+    // storey up, and both door consumers then read the corridor as if the tank
+    // were already at the top of the stairs: the blocking-door scan started from
+    // up there (synthesising a bot -> overhead bee-line straight through the
+    // ceiling) and flagged Arugal's Lair 27yd ABOVE the tank, while
+    // DistAlongPathToClosedDoor called that door "8.0yd along path" when the real
+    // walk was the whole staircase. The tank parked at the foot of the stairs on
+    // a door it was nowhere near and — Arugal's Lair being script-only since the
+    // voidwalker fix — auto-paused the run instead of walking up to kill Nandos,
+    // whose death is the only thing that ever opens it (runs
+    // tr-20260802-101606-12 / -16 / -17).
+    //
+    // Returns 0 for an empty route; callers guard emptiness themselves.
+    std::size_t PathProgressCursor(std::vector<G3D::Vector3> const& route,
+                                   float botX, float botY, float botZ);
 
     // Index of the LATEST crumb within `rejoinRadius` (3D) of `cur`, or
     // TrailRejoinNone if none qualifies. Used by the breadcrumb recorder: on a
