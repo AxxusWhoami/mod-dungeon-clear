@@ -701,14 +701,14 @@ bool DungeonClearDoorReopenedTrigger::IsActive()
 bool DungeonClearFollowTankTrigger::IsActive()
 {
     // MayDrive, not the raw flag — the follower half of the same hole S1356 closed
-    // on the leader's eight driver triggers. A 45yd damage aura (Arcatraz's Eredar
-    // Deathbringer, entry 20880) flags the whole party in with nothing aggroed;
+    // on the leader's eight driver triggers. A 45yd aura (the Arcatraz Eredar
+    // room, entries 20879 / 20880) flags the whole party in with nothing aggroed;
     // this rung stood down on the flag, so every follower stopped dead where it
     // stood, in the aura. The tank's between-pulls gate then waited on them as
-    // "out of range" and the run froze until the watchdog killed it, with the
-    // party being ground down at ~375dps the whole time (run
-    // tr-20260801-194932-20: four deaths, all to 20880, followers parked for 15
-    // minutes 30yd behind). A REAL fight still stands this rung down — that is
+    // "out of range" and the run froze until the watchdog killed it — and where a
+    // Deathbringer rolled, at 375dps the whole time (run tr-20260801-194932-20:
+    // four deaths, followers parked for 15 minutes 30yd behind). A REAL fight
+    // still stands this rung down — that is
     // AnyPartyEngagement, and it is what lets a follower peel off and help tank.
     if (!bot || bot->isDead() || !MayDrive(bot, context))
         return false;
