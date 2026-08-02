@@ -62,6 +62,10 @@ AC_ADD_CONFIG_FILE("${CMAKE_CURRENT_LIST_DIR}/conf/mod_dungeon_clear.conf.dist")
 # src/Util/DcSpectator.{h,cpp}
 #   (module-root src/Util/ — session plumbing, not bot AI: spectator
 #    free-camera via WORLD_TRIGGER possession, `.dc spectate` / addon button)
+# src/Util/DcWatchHop.{h,cpp}
+#   (pure instance-bind planner for `.dc test watch`: which binds to release,
+#    whether to re-bind, and whether the teleport must be forced far so a
+#    second watch lands in the LIVE copy instead of the finished one)
 # Data/RoomAggroRegistry.{h,cpp}
 #   (room-wide-aggro boss table: bosses that force the whole room into combat on
 #    engage; the tank clears the room before the pull — ClearRoomBeforeBoss)

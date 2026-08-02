@@ -155,6 +155,7 @@ party.
 | `.dc test status` | Progress of each live run. |
 | `.dc test stop [runId\|dungeon\|all]` | Abort runs. |
 | `.dc test list` | Supported dungeons and their default levels. |
+| `.dc test watch [runId\|dungeon]` | Ride a live run's camera. Hides you, sends you to that run's instance and follows its tank. Run it again for another run to hop straight there — the previous instance is left and unbound for you. `off` ends it and sends you back where you started. |
 | `.dc test plan start <dungeon> total=N [concurrent=N]` | Run the same dungeon N times, up to `concurrent` at once, then write a summary. |
 | `.dc test plan status` | Progress of each live plan. |
 | `.dc test plan stop [planId\|all]` | Stop a plan and its runs. |
