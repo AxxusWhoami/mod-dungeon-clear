@@ -26,6 +26,7 @@
 #include "Ai/Dungeon/DungeonClear/Data/RoomAggroRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
 #include "Ai/Dungeon/DungeonClear/Util/ChunkedPathfinder.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcCombatFlag.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcEngageGeometry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcHazard.h"
 #include "Ai/Dungeon/DungeonClear/Data/DcHazardRegistry.h"
@@ -77,6 +78,14 @@ namespace
         return DcLeaderSignal::IsDungeonClearLeader(bot);
     }
 
+    // May the driving ladder run this tick? Replaces the raw `bot->IsInCombat()`
+    // stand-down that every driver trigger used to carry. The body moved to
+    // DcCombatFlag so the follower rung (follow-tank), the rest gates and the
+    // stranded failsafe ask the flag-vs-fight question the same way — they were
+    // each still standing down on the raw flag, and each froze on it in turn.
+    // See DcCombatFlag.h for the mechanism.
+    using DcCombatFlag::MayDrive;
+
     // Trigger-side between-pulls gate. Thin wrapper over the shared
     // DcPartyState::IsBetweenPullsReady (one body for the trigger ladder and the
     // advance action, which had drifted as two copies). The trigger side also
@@ -95,7 +104,7 @@ bool DungeonClearIdleTrigger::IsActive()
 {
     if (!IsEnabled(context, bot))
         return false;
-    if (!bot || bot->IsInCombat() || bot->isDead())
+    if (!bot || bot->isDead() || !MayDrive(bot, context))
         return false;
     Map* map = bot->GetMap();
     if (!map || !map->IsDungeon())
@@ -117,7 +126,7 @@ bool DungeonClearAtBossTrigger::IsActive()
 {
     if (!IsEnabled(context, bot))
         return false;
-    if (!bot || bot->IsInCombat() || bot->isDead())
+    if (!bot || bot->isDead() || !MayDrive(bot, context))
         return false;
     Map* map = bot->GetMap();
     if (!map || !map->IsDungeon())
@@ -266,7 +275,7 @@ bool DungeonClearEventDueTrigger::IsActive()
 {
     if (!IsEnabled(context, bot))
         return false;
-    if (!bot || bot->IsInCombat() || bot->isDead())
+    if (!bot || bot->isDead() || !MayDrive(bot, context))
         return false;
     // Leader drives events; followers stay on follow-tank.
     if (!DcLeaderSignal::IsDungeonClearLeader(bot))
@@ -308,7 +317,7 @@ bool DungeonClearBlockingTrashTrigger::IsActive()
 {
     if (!IsEnabled(context, bot))
         return false;
-    if (!bot || bot->IsInCombat() || bot->isDead())
+    if (!bot || bot->isDead() || !MayDrive(bot, context))
         return false;
 
     std::optional<DungeonBossInfo> next = AI_VALUE(std::optional<DungeonBossInfo>, DcKey::NextDungeonBoss);
@@ -442,7 +451,7 @@ bool DungeonClearRoomTrashTrigger::IsActive()
 {
     if (!IsEnabled(context, bot))
         return false;
-    if (!bot || bot->IsInCombat() || bot->isDead())
+    if (!bot || bot->isDead() || !MayDrive(bot, context))
         return false;
     Map* map = bot->GetMap();
     if (!map || !map->IsDungeon())
@@ -484,7 +493,7 @@ bool DungeonClearRoomPreClearHoldTrigger::IsActive()
     // own themselves via follow-tank + their own skirt, so this is leader-only.
     if (!IsEnabled(context, bot))
         return false;
-    if (!bot || bot->IsInCombat() || bot->isDead())
+    if (!bot || bot->isDead() || !MayDrive(bot, context))
         return false;
     Map* map = bot->GetMap();
     if (!map || !map->IsDungeon())
@@ -619,7 +628,7 @@ bool DungeonClearStalledTrigger::IsActive()
 {
     if (!IsEnabled(context, bot))
         return false;
-    if (!bot || bot->IsInCombat() || bot->isDead())
+    if (!bot || bot->isDead() || !MayDrive(bot, context))
         return false;
     Map* map = bot->GetMap();
     if (!map || !map->IsDungeon())
@@ -640,7 +649,7 @@ bool DungeonClearDoorBlockedTrigger::IsActive()
 {
     if (!IsEnabled(context, bot))
         return false;
-    if (!bot || bot->IsInCombat() || bot->isDead())
+    if (!bot || bot->isDead() || !MayDrive(bot, context))
         return false;
     Map* map = bot->GetMap();
     if (!map || !map->IsDungeon())
@@ -691,7 +700,17 @@ bool DungeonClearDoorReopenedTrigger::IsActive()
 
 bool DungeonClearFollowTankTrigger::IsActive()
 {
-    if (!bot || bot->isDead() || bot->IsInCombat())
+    // MayDrive, not the raw flag — the follower half of the same hole S1356 closed
+    // on the leader's eight driver triggers. A 45yd damage aura (Arcatraz's Eredar
+    // Deathbringer, entry 20880) flags the whole party in with nothing aggroed;
+    // this rung stood down on the flag, so every follower stopped dead where it
+    // stood, in the aura. The tank's between-pulls gate then waited on them as
+    // "out of range" and the run froze until the watchdog killed it, with the
+    // party being ground down at ~375dps the whole time (run
+    // tr-20260801-194932-20: four deaths, all to 20880, followers parked for 15
+    // minutes 30yd behind). A REAL fight still stands this rung down — that is
+    // AnyPartyEngagement, and it is what lets a follower peel off and help tank.
+    if (!bot || bot->isDead() || !MayDrive(bot, context))
         return false;
 
     // In advanced-pull mode the party HOLDS and leapfrogs camp-to-camp instead of

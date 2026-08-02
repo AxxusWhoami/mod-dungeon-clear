@@ -8,6 +8,7 @@
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 #include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcCombatFlag.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcLeaderSignal.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcStatusPublisher.h"
@@ -37,13 +38,23 @@ namespace
     // harness livelock net so the two agree on what "closing distance" means.
     constexpr float DC_STRANDED_PROGRESS_EPSILON_YD = 1.0f;
 
-    // Walk the leader's same-map group into kernel rows and report whether anyone
-    // (leader included) is in combat. Recover re-walks the live group itself, so a
-    // plain value snapshot is all the kernel needs here.
+    // Walk the leader's same-map group into kernel rows and report whether the
+    // party is FIGHTING. Recover re-walks the live group itself, so a plain value
+    // snapshot is all the kernel needs here.
+    //
+    // Engagement, NOT the combat flag. This failsafe exists for exactly one
+    // situation — a member stuck out of range forever while the tank waits on it —
+    // and the raw flag disabled it in the one case that produced that situation
+    // most reliably: a hostile area aura flags the whole party in with nothing
+    // aggroed, so `partyEngaged` read true every tick, which both re-armed the
+    // progress clock and made Decide() early-out. The failsafe could never fire
+    // (Arcatraz heroic, tr-20260801-194932-20: followers parked 30yd back for 15
+    // minutes, run killed by the no-progress watchdog). A real fight still blocks
+    // the teleport and still counts as progress — that is what engagement means.
     void BuildSnapshot(Player* leader, std::vector<DcStrandedDecision::Member>& out,
-                       bool& partyInCombat)
+                       bool& partyEngaged)
     {
-        partyInCombat = leader->IsInCombat();
+        partyEngaged = DcCombatFlag::AnyPartyEngagement(leader);
 
         Group* group = leader->GetGroup();
         if (!group)
@@ -54,8 +65,6 @@ namespace
             Player* member = ref->GetSource();
             if (!member || !member->IsInWorld())
                 continue;
-            if (member->IsAlive() && member->IsInCombat())
-                partyInCombat = true;
 
             DcStrandedDecision::Member m;
             m.isBot = GET_PLAYERBOT_AI(member) != nullptr;
@@ -153,13 +162,15 @@ namespace DcStrandedRecovery
         }
 
         std::vector<DcStrandedDecision::Member> members;
-        bool partyInCombat = false;
-        BuildSnapshot(bot, members, partyInCombat);
+        bool partyEngaged = false;
+        BuildSnapshot(bot, members, partyEngaged);
 
-        // Combat re-arms the clock wholesale — a fight is progress, so neither a
-        // long boss fight nor a between-pulls skirmish ever burns the budget. Out
-        // of combat, fall to the closing-distance / encounter detector.
-        bool const progressed = partyInCombat || DetectProgress(bot, leaderAI, run);
+        // A FIGHT re-arms the clock wholesale — a fight is progress, so neither a
+        // long boss fight nor a between-pulls skirmish ever burns the budget. A
+        // bare combat FLAG with nothing fighting is not progress and must not
+        // re-arm it; see BuildSnapshot. Otherwise fall to the closing-distance /
+        // encounter detector.
+        bool const progressed = partyEngaged || DetectProgress(bot, leaderAI, run);
         if (progressed || run.progressMs == 0)
             run.progressMs = now ? now : 1;
 
@@ -168,7 +179,7 @@ namespace DcStrandedRecovery
         in.nowMs = now;
         in.lastProgressMs = run.progressMs;
         in.noProgressTimeoutMs = DcSettings::GetUInt(bot, "StrandedRecoveryNoProgressSecs") * 1000;
-        in.partyInCombat = partyInCombat;
+        in.partyEngaged = partyEngaged;
         in.maxSpread = DcSettings::GetFloat(bot, "PartyMaxSpread");
 
         return DcStrandedDecision::Decide(in, members).recover;

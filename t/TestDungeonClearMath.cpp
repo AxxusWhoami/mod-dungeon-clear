@@ -1291,6 +1291,116 @@ TEST(DungeonClearStuckCombatTest, ArmingAtTimeZeroAvoidsTheSentinel)
     EXPECT_EQ(since, 1u);
 }
 
+// ===== Flagged-in-combat driving gate (MayDriveWhileFlagged) =====
+//
+// The DC driving ladder used to stand down on the raw core combat FLAG. A hostile
+// area aura sets that flag with no fight behind it (Arcatraz Entropic Aura, 45yd vs
+// a ~20yd aggro radius), and because playerbots never enters the combat engine on
+// the flag alone, BOTH ladders went inert and the run froze permanently. S1356.
+
+TEST(DcFlaggedCombatGateTest, NotFlaggedAlwaysDrives)
+{
+    std::uint32_t since = 12345;
+    EXPECT_TRUE(DungeonClearMath::MayDriveWhileFlagged(false, false, 1000, 5000, since));
+    EXPECT_EQ(since, 0u);   // streak cleared so a later flag starts clean
+}
+
+TEST(DcFlaggedCombatGateTest, RealFightAlwaysStandsDown)
+{
+    std::uint32_t since = 0;
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, true, 1000, 5000, since));
+    EXPECT_EQ(since, 0u);
+    // ...and no amount of elapsed time changes that while the fight is live.
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, true, 999000, 5000, since));
+}
+
+TEST(DcFlaggedCombatGateTest, FlaggedWithNoFightResumesOnlyAfterTheGrace)
+{
+    std::uint32_t since = 0;
+    constexpr std::uint32_t grace = 5000;
+
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 1000, grace, since));
+    EXPECT_EQ(since, 1000u);
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 1000 + grace - 1, grace, since));
+    EXPECT_TRUE(DungeonClearMath::MayDriveWhileFlagged(true, false, 1000 + grace, grace, since));
+}
+
+TEST(DcFlaggedCombatGateTest, ARetargetHoleInARealFightNeverResumesDriving)
+{
+    // THE REGRESSION THAT MATTERS. A target dies, nothing has re-acquired for a
+    // tick or two, then the fight continues. Without the streak reset those holes
+    // would accumulate and the tank would walk out of a live fight.
+    std::uint32_t since = 0;
+    constexpr std::uint32_t grace = 5000;
+
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 1000, grace, since));
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 3000, grace, since));
+    // something re-acquires -> streak broken
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, true, 3200, grace, since));
+    EXPECT_EQ(since, 0u);
+    // wedged again: the clock restarts, the old 2000ms is NOT credited
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 3400, grace, since));
+    EXPECT_EQ(since, 3400u);
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 3400 + grace - 1, grace, since));
+    EXPECT_TRUE(DungeonClearMath::MayDriveWhileFlagged(true, false, 3400 + grace, grace, since));
+}
+
+TEST(DcFlaggedCombatGateTest, ZeroGraceResumesImmediately)
+{
+    std::uint32_t since = 0;
+    EXPECT_TRUE(DungeonClearMath::MayDriveWhileFlagged(true, false, 1000, 0, since));
+}
+
+TEST(DcFlaggedCombatGateTest, ArmingAtTimeZeroAvoidsTheSentinel)
+{
+    std::uint32_t since = 0;
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 0, 5000, since));
+    EXPECT_EQ(since, 1u);
+}
+
+// The rest gates ask the same kernel a DIFFERENT question — "is the PARTY
+// flagged with nothing fighting?" (DcCombatFlag::IsPhantomFlag) — so they feed it
+// a different `flagged` input and must therefore keep their own streak. These two
+// pin the reason the latches are separate (DcApproachState::flaggedNoEngageSinceMs
+// vs partyFlaggedNoEngageSinceMs).
+
+TEST(DcFlaggedCombatGateTest, TwoQuestionsKeepTwoStreaks)
+{
+    // The tank drops combat while a follower is still flagged: the driving latch
+    // clears (its input went false) while the party latch keeps streaking.
+    std::uint32_t driving = 0;
+    std::uint32_t party = 0;
+    constexpr std::uint32_t grace = 5000;
+
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 1000, grace, driving));
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 1000, grace, party));
+
+    // Tank unflags at t=2000; the party (a follower still in the aura) does not.
+    EXPECT_TRUE(DungeonClearMath::MayDriveWhileFlagged(false, false, 2000, grace, driving));
+    EXPECT_EQ(driving, 0u);   // driving streak reset...
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 2000, grace, party));
+    EXPECT_EQ(party, 1000u);  // ...party streak untouched, still counting from 1000
+
+    // The party waiver lands on ITS OWN schedule, not the tank's.
+    EXPECT_TRUE(DungeonClearMath::MayDriveWhileFlagged(true, false, 1000 + grace, grace, party));
+}
+
+TEST(DcFlaggedCombatGateTest, TheRestWaiverDoesNotFireInThePostFightWindow)
+{
+    // THE REGRESSION THAT MATTERS for the rest gate: every fight ends with a few
+    // seconds of "still flagged, nothing engaged yet". Waiving the HP/mana floors
+    // there would send the tank off to the next pull instead of drinking. The
+    // grace is what makes the waiver mean "this flag is never going to clear".
+    std::uint32_t party = 0;
+    constexpr std::uint32_t grace = 5000;
+
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 1000, grace, party));
+    EXPECT_FALSE(DungeonClearMath::MayDriveWhileFlagged(true, false, 1000 + grace - 1, grace, party));
+    // Combat drops for real -> streak cleared, ordinary floors apply again.
+    EXPECT_TRUE(DungeonClearMath::MayDriveWhileFlagged(false, false, 1000 + grace, grace, party));
+    EXPECT_EQ(party, 0u);
+}
+
 // ===== Bystander-detour borrow watchdog (ShouldKeepAvoidDetour) =====
 //
 // The pull borrows the approach tick from Advance to walk around another pack's

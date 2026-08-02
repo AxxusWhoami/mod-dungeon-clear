@@ -292,4 +292,12 @@ AC_ADD_CONFIG_FILE("${CMAKE_CURRENT_LIST_DIR}/conf/mod_dungeon_clear.conf.dist")
 #    DcTestRunJob::TickProvisioning building PlayerbotFactory with the resolved
 #    pair, and DcTestDungeonRegistry::WriteSidecar publishing the ladders for the
 #    Command Deck's start form.)
+# Util/DcCombatFlag.{h,cpp}
+#   (flag-vs-fight: the one shared answer for every rung that used to stand down
+#    on a bare bot->IsInCombat(). A 45yd hostile area aura flags the whole party
+#    in with nothing aggroed, and each rung that keyed on the raw flag froze on
+#    it in turn — the leader's driving ladder (fixed S1356), then the follower's
+#    follow-tank rung, the between-pulls rest floors, the stranded failsafe and
+#    the post-combat rez clock. MayDrive / IsPhantomFlag / AnyPartyEngagement,
+#    all over DungeonClearMath::MayDriveWhileFlagged's grace.)
 # (this comment bumps mtime to force CMake re-glob on next build)

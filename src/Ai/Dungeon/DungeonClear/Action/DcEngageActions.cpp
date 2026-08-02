@@ -924,10 +924,14 @@ bool DungeonClearRoomPreClearHoldAction::Execute(Event /*event*/)
         lowRes = DcSmartRest::IsLatched(bot);
     else
     {
+        // The floors the between-pulls gate is actually holding for. Under a
+        // phantom flag they are 0/0 — deferring to a drink that cannot be taken
+        // (eating and drinking need out-of-combat) would park the tank at the
+        // standoff forever. See DcPartyState::GetRestGate.
+        DcPartyState::RestGate const rest = DcPartyState::GetRestGate(bot, context);
         uint32 const maxMana = bot->GetMaxPower(POWER_MANA);
-        bool const lowMana = maxMana > 0 &&
-            bot->GetPowerPct(POWER_MANA) < DcPartyState::RestMinMpPct(bot);
-        bool const lowHealth = bot->GetHealthPct() < DcPartyState::RestMinHpPct(bot);
+        bool const lowMana = maxMana > 0 && bot->GetPowerPct(POWER_MANA) < rest.minMp;
+        bool const lowHealth = bot->GetHealthPct() < rest.minHp;
         lowRes = lowMana || lowHealth;
     }
     if (lowRes)
@@ -1444,10 +1448,14 @@ DungeonClearEngageActionBase::EventRest DungeonClearEngageActionBase::EventRestD
 
     // Legacy per-target rest: the run set RestHealthPct / RestManaPct. Spread is
     // the cohesion gate's job, so measure rest ONLY (effectively-infinite spread).
-    float const minHp = DcPartyState::RestMinHpPct(bot);
-    float const minMp = DcPartyState::RestMinMpPct(bot);
+    DcPartyState::RestGate const rest = DcPartyState::GetRestGate(bot, context);
+    float const minHp = rest.minHp;
+    float const minMp = rest.minMp;
+    // No rest target configured -> never pause. Also the phantom-flag answer: the
+    // floors are 0/0 there because no one can eat or drink, so a set-piece must
+    // not stop for a rest that can never happen.
     if (minHp <= 0.0f && minMp <= 0.0f)
-        return EventRest::None;  // no rest target configured -> never pause
+        return EventRest::None;
     if (BotBelowRest(bot, minHp, minMp))
         return EventRest::Yield;
     if (!DcPartyState::IsPartyReady(bot, minHp, minMp, /*maxSpread*/ 100000.0f))

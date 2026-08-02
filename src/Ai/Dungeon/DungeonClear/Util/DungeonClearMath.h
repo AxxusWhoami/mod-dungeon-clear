@@ -369,6 +369,59 @@ namespace DungeonClearMath
         return now >= sinceMs && (now - sinceMs) >= timeoutMs;
     }
 
+    // Flagged-in-combat driving gate (pure, streak clock by reference).
+    //
+    // THE DISTINCTION: `flagged` is the core combat FLAG (Unit::IsInCombat);
+    // `engaged` is whether anyone in the party is ACTUALLY FIGHTING — a victim, or
+    // something meleeing/casting at us. The DC driving ladder used to stand down on
+    // `flagged` alone, which is right for a real fight and catastrophic for a flag
+    // with no fight behind it.
+    //
+    // Why that state exists at all (Arcatraz heroic, 2026-07-29): the Eredar
+    // Soul-Eaters' Entropic Aura (36784) is a hostile area aura with a **45yd**
+    // radius against a ~20yd creature aggro radius. That leaves a 25-yard ANNULUS
+    // where the party is flagged in combat but nothing has aggroed it — no
+    // attacker, no victim, no threat. Playerbots does not flip to the combat engine
+    // on the flag (only AttackAction / PullMyTargetAction call ChangeEngine, and
+    // both need a chosen target; UpdateAIInternal explicitly tolerates
+    // non-combat-engine-while-flagged). So the combat ladder never runs either, and
+    // with the driving ladder standing down on the flag the run freezes SILENTLY —
+    // and self-locks, because the freeze happens before the party ever reaches
+    // aggro range, so the fight it is waiting for can never start. Measured: five
+    // frozen tanks at 20.8-34.8yd from the pack; the one that got inside 20yd
+    // fought and died instead.
+    //
+    // The grace is the safety margin in the other direction: a real fight can have
+    // a one-tick hole (the target dies and nothing has re-acquired yet), and
+    // resuming the drive there would walk the tank out of a live fight. The
+    // no-engagement state must therefore persist continuously for `graceMs` before
+    // driving resumes. `sinceMs` is the caller-owned latch (0 = not streaking),
+    // cleared the instant a real engagement reappears. `graceMs == 0` disables the
+    // grace (drive as soon as the flag has nothing behind it).
+    //
+    // Returns TRUE when the driving ladder may run.
+    inline bool MayDriveWhileFlagged(bool flagged, bool engaged, std::uint32_t now,
+                                     std::uint32_t graceMs, std::uint32_t& sinceMs)
+    {
+        if (!flagged)
+        {
+            sinceMs = 0;
+            return true;            // not in combat at all — the ordinary case
+        }
+        if (engaged)
+        {
+            sinceMs = 0;
+            return false;           // a real fight owns the bot; stay out of it
+        }
+        if (graceMs == 0)
+            return true;
+        if (sinceMs == 0)
+            sinceMs = now ? now : 1;   // arm; avoid the 0 "unarmed" sentinel on ms 0
+        // `now >= sinceMs` guards the unsigned subtraction against a backward clock
+        // step / getMSTime wrap, where "no time has elapsed yet" is the right answer.
+        return now >= sinceMs && (now - sinceMs) >= graceMs;
+    }
+
     // Bystander-detour borrow watchdog (pure, by-reference latch).
     //
     // Above commit range the tank's approach belongs to Advance (the long-path

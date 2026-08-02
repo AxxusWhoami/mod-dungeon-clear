@@ -660,8 +660,9 @@ DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::TryBetweenPullsRest(A
     // this line says whether it was spread, HP/mana, or the rest latch instead of
     // leaving all three indistinguishable behind "party not ready / resting".
     DcPartyState::SpreadGate const gate = DcPartyState::GetSpreadGate(bot, context);
+    DcPartyState::RestGate const rest = DcPartyState::GetRestGate(bot, context);
     std::string const why = DcPartyState::DescribePartyNotReady(
-        bot, DcPartyState::RestMinHpPct(bot), DcPartyState::RestMinMpPct(bot),
+        bot, rest.minHp, rest.minMp,
         gate.maxSpread, gate.anchor, gate.maxTankGap);
     LOG_DEBUG("playerbots.dungeonclear",
               "[DC:{}] advance yielding after {} ticks: party not ready / resting{}",

@@ -154,6 +154,25 @@ constexpr uint32 DC_PULL_AVOID_STALL_MS = 8000;
 // orbit that is merely drifting can't hold the borrow open forever.
 constexpr float DC_PULL_AVOID_PROGRESS_YD = 1.0f;
 
+// How long the leader must be FLAGGED in combat with no actual engagement —
+// nobody in the party has a victim and nothing is attacking anyone — before the
+// driving ladder resumes anyway (DungeonClearMath::MayDriveWhileFlagged).
+//
+// This exists because a hostile area aura can set the combat flag with no fight
+// behind it (the Arcatraz Eredar Soul-Eaters' Entropic Aura, 45yd against a ~20yd
+// aggro radius), and the old flag-only gate then froze the run permanently.
+//
+// The value is the guard against the opposite error, and is the whole safety
+// margin of the change: a genuine fight has one-tick holes when a target dies
+// before anything re-acquires, and resuming the drive in one of those would walk
+// the tank out of a live fight. 5s is several react delays — far longer than any
+// retarget hole — while costing a real freeze only five seconds. Compare
+// DungeonClearBreakStuckCombatTrigger's 15s, sized for the same hazard (a scripted
+// in-combat lull) but guarding a much stronger action: that one force-clears
+// combat, this one only resumes walking, so it can afford to be quicker. If a
+// fight is ever abandoned mid-pack, this is the number to raise.
+constexpr uint32 DC_FLAGGED_NO_ENGAGE_GRACE_MS = 5000;
+
 // The max party-spread default lives in DcSettingsRegistry ("PartyMaxSpread");
 // the trigger, the advance gate, and the status publisher all read it through
 // DcSettings so per-run addon overrides apply. The HP/mana recovery thresholds
