@@ -456,6 +456,61 @@ TEST(DungeonClearPullStandDownTest, PullModeStandDownHoldsForABystanderMidManeuv
 }
 
 // ---------------------------------------------------------------------------
+// ShouldReleaseStandingPull — the orphaned-pull release gate.
+// ---------------------------------------------------------------------------
+using DungeonClearMath::ShouldReleaseStandingPull;
+
+// The live freeze: the effective mode is off (a persistent anchored event drives
+// the tank), the tank is out of combat, and a pull is still standing at Engage
+// with a marked camp. Nothing else can clean that up — release it.
+TEST(DungeonClearPullReleaseTest, ReleasesAPullLeftStandingWhenTheModeIsForcedOff)
+{
+    EXPECT_TRUE(ShouldReleaseStandingPull(/*effectiveOn*/ false, /*standing*/ true,
+                                          /*inCombat*/ false, /*holdingPhase*/ false,
+                                          /*bossPullback*/ false));
+}
+
+// Pull mode on: the pull's own FSM owns its lifecycle, and a camp mid-run is
+// exactly what the party is meant to be holding at.
+TEST(DungeonClearPullReleaseTest, NeverReleasesWhileThePullModeIsOn)
+{
+    EXPECT_FALSE(ShouldReleaseStandingPull(/*effectiveOn*/ true, /*standing*/ true,
+                                           /*inCombat*/ false, /*holdingPhase*/ false,
+                                           /*bossPullback*/ false));
+}
+
+// Nothing standing (phase Idle, no camp) — the common case every tick with pull
+// mode off. Must not churn.
+TEST(DungeonClearPullReleaseTest, NoOpWhenNothingIsStanding)
+{
+    EXPECT_FALSE(ShouldReleaseStandingPull(/*effectiveOn*/ false, /*standing*/ false,
+                                           /*inCombat*/ false, /*holdingPhase*/ false,
+                                           /*bossPullback*/ false));
+}
+
+// A maneuver in flight — in combat, or a holding phase (Forming/Advancing/
+// Returning) — must finish: clearing its camp mid-drag would dump the party out
+// of the hold and into the inbound pack.
+TEST(DungeonClearPullReleaseTest, NeverReleasesAManeuverInFlight)
+{
+    EXPECT_FALSE(ShouldReleaseStandingPull(/*effectiveOn*/ false, /*standing*/ true,
+                                           /*inCombat*/ true, /*holdingPhase*/ false,
+                                           /*bossPullback*/ false));
+    EXPECT_FALSE(ShouldReleaseStandingPull(/*effectiveOn*/ false, /*standing*/ true,
+                                           /*inCombat*/ false, /*holdingPhase*/ true,
+                                           /*bossPullback*/ false));
+}
+
+// A pull-back drag (Ghaz'an out of the Underbog lake) runs with pull mode off BY
+// DESIGN — its camp is the hand-authored anchor and must survive.
+TEST(DungeonClearPullReleaseTest, NeverReleasesABossPullback)
+{
+    EXPECT_FALSE(ShouldReleaseStandingPull(/*effectiveOn*/ false, /*standing*/ true,
+                                           /*inCombat*/ false, /*holdingPhase*/ false,
+                                           /*bossPullback*/ true));
+}
+
+// ---------------------------------------------------------------------------
 // ShouldDropPullVerdict — the no-target verdict-drop grace gate.
 // ---------------------------------------------------------------------------
 using DungeonClearMath::ShouldDropPullVerdict;

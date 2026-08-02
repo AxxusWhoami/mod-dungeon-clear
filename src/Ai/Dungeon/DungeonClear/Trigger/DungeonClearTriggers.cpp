@@ -966,8 +966,21 @@ bool DungeonClearPullManeuverTrigger::IsActive()
     // any unplanned aggro also drags back to the held party at camp first.
     // (Engage is deliberately still excluded so the camp fight itself runs
     // normally — by then the phase is Engage, never Idle.)
-    return phase == static_cast<uint32>(DcPullPhase::Idle) ||
-           phase == static_cast<uint32>(DcPullPhase::Forming) ||
+    //
+    // OPENING a drag off unplanned aggro (phase Idle) additionally needs the
+    // EFFECTIVE pull mode, not just the latched bool: while a PERSISTENT anchored
+    // event drives the tank the pull system is forced off wholesale
+    // (DungeonClearPullModeCurrentValue), and a stray add must then be fought
+    // where it stands. Dragging it to a camp instead parked the party ~100yd off
+    // the Old Hillsbrad barrels and left the phase at Engage, which the forced-off
+    // non-combat pull driver could no longer clean up. A maneuver already IN
+    // FLIGHT keeps running off the latched bool — dropping it mid-drag would
+    // strand the tank in combat with the phase stuck out of Idle, the same wedge
+    // one step later.
+    if (phase == static_cast<uint32>(DcPullPhase::Idle))
+        return AI_VALUE(bool, DcKey::PullModeCurrent) ||
+               AI_VALUE(DcPullContext&, DcKey::PullContext).bossPullback;
+    return phase == static_cast<uint32>(DcPullPhase::Forming) ||
            phase == static_cast<uint32>(DcPullPhase::Advancing) ||
            phase == static_cast<uint32>(DcPullPhase::Returning);
 }

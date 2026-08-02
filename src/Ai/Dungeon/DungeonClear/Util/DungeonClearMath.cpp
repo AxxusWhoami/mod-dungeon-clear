@@ -191,6 +191,16 @@ bool DungeonClearMath::ShouldStandDownForPull(bool packIsPullsOwn, bool pullPhas
     return !pullPhaseIdle;    // in flight: never thrash the maneuver
 }
 
+bool DungeonClearMath::ShouldReleaseStandingPull(bool effectiveOn, bool standing, bool inCombat,
+                                                 bool holdingPhase, bool bossPullback)
+{
+    if (effectiveOn || !standing)
+        return false;             // the pull owns itself / nothing left standing
+    if (bossPullback)
+        return false;             // pull-back drags run with pull mode off by design
+    return !inCombat && !holdingPhase;  // never dismantle a maneuver in flight
+}
+
 bool DungeonClearMath::ShouldDropPullVerdict(bool targetPresent, std::uint32_t lostSince,
                                              std::uint32_t now, std::uint32_t graceMs,
                                              std::uint32_t& lostSinceOut)

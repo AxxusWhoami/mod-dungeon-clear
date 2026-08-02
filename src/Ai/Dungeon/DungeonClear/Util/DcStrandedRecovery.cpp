@@ -6,10 +6,12 @@
 #include "DcStrandedRecovery.h"
 
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
+#include "Ai/Dungeon/DungeonClear/DcPullContext.h"
 #include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcCombatFlag.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcLeaderSignal.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcPullPlanner.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcStatusPublisher.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcStrandedDecision.h"
@@ -238,6 +240,42 @@ namespace DcStrandedRecovery
 
         if (moved == 0)
             return;
+
+        // Make the rescue STICK. In pull mode the followers are pinned by
+        // hold-at-camp, so the moment they land next to the tank they walk right
+        // back to the camp — and if that camp is what stranded them (stale behind a
+        // driver that isn't advance, or on ground they can't path back onto) the
+        // teleport is undone within seconds and the same freeze repeats every
+        // timeout, forever. Observed live in heroic Old Hillsbrad: five rescues, all
+        // reversed. Re-anchor the camp onto walked ground behind the tank, unless a
+        // pull maneuver is in flight (there the camp is the drag destination and
+        // must not move under the tank's feet).
+        //
+        // "In flight" means a HOLDING phase (Forming/Advancing/Returning) — the legs
+        // where the party is pinned passive and the tank is hauling a pack home. It
+        // does NOT mean Engage: by then the drag is over and the party has been
+        // released, so the camp is free to move. The first cut of this guard tested
+        // `phase == Idle`, which skipped the re-anchor for the whole Engage phase —
+        // and a phase orphaned at Engage is exactly the state that strands a party
+        // (heroic Old Hillsbrad tr-20260801-174432-3: nine rescues, every one of
+        // them reversed because this block never ran). A failsafe must not stand
+        // down in the state it exists for.
+        AiObjectContext* ctx = leaderAI->GetAiObjectContext();
+        DcPullContext& pull = ctx->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
+        if (!DcLeaderSignal::IsPullPhaseHolding(static_cast<uint32>(pull.phase)) &&
+            pull.HasCamp())
+        {
+            float const setback = DcSettings::GetFloat(leader, "PullSetback");
+            float const maxDrag = DcSettings::GetFloat(leader, "PullMaxDrag");
+            std::optional<Position> const trail =
+                DcPullPlanner::ComputeTrailCamp(leaderAI, setback, maxDrag);
+            pull.camp = trail ? *trail : leader->GetPosition();
+            LOG_INFO("playerbots.dungeonclear",
+                     "[DC:{}] stranded-recovery: camp re-anchored to ({:.1f},{:.1f},{:.1f}) so "
+                     "the rescued members aren't sent back to the old one",
+                     leader->GetName(), pull.camp.GetPositionX(), pull.camp.GetPositionY(),
+                     pull.camp.GetPositionZ());
+        }
 
         // Re-arm the clock: the strays are back at the tank but nothing else has
         // changed, so without this the very next tick would read as stale again and

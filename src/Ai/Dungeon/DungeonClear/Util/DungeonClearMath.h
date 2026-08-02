@@ -205,6 +205,27 @@ namespace DungeonClearMath
     // the trigger; this carries only the decision so it is unit-testable.
     bool ShouldStandDownForPull(bool packIsPullsOwn, bool pullPhaseIdle);
 
+    // Orphaned-pull release gate (pure). The effective pull mode can be forced
+    // OFF while a pull is still standing — a PERSISTENT anchored event takes the
+    // tank (DungeonClearPullModeCurrentValue), or a Dynamic verdict drops. The
+    // pull FSM is then unreachable: its non-combat driver (DungeonClearPullTrigger)
+    // gates on the EFFECTIVE mode, so nothing ever runs the Engage->Idle cleanup,
+    // while the followers' camp hold and the party-spread gate read the LATCHED
+    // mode and keep obeying a camp nobody can move. Live in heroic Old Hillsbrad
+    // (runs tr-20260801-174432-3/-7): an unplanned camp pull during the barrel
+    // event left phase=Engage, the party pinned ~100yd back at the frozen camp,
+    // the barrel drive holding for a party that had been told to stand there, and
+    // stranded-recovery teleporting everyone forward once a minute only for
+    // hold-at-camp to walk them straight back. Returns true to dismantle the
+    // standing pull (phase -> Idle, camp cleared) so the party reverts to plain
+    // follow. `effectiveOn` is the current effective pull mode; `standing` is
+    // "there is something to release" (non-Idle phase or a marked camp). Never
+    // releases mid-maneuver: `inCombat`, a holding phase (Forming/Advancing/
+    // Returning — the drag must finish) and `bossPullback` (a pull-back drag runs
+    // with pull mode off BY DESIGN) all hold it off.
+    bool ShouldReleaseStandingPull(bool effectiveOn, bool standing, bool inCombat,
+                                   bool holdingPhase, bool bossPullback);
+
     // Dynamic-verdict drop grace gate (pure). A standing Leeroy/Advanced verdict
     // must survive a TRANSIENT no-target read (door veto flicker, long-path cache
     // mid-rebuild, far-targets poll boundary): dropping it instantly flips the
