@@ -219,6 +219,11 @@ namespace
                 continue;
             if (!bot->IsHostileTo(u))
                 continue;
+            // A body on the floor is not a blocker: it never notices us and never
+            // fights, so walking over to melee it is pure detour. See
+            // DcEngageGeometry::IsDisplayedDead.
+            if (DcEngageGeometry::IsDisplayedDead(u))
+                continue;
 
             float const ux = u->GetPositionX();
             float const uy = u->GetPositionY();
@@ -306,6 +311,10 @@ Unit* DcTargeting::FindBlockingTrash(Player* bot,
         if (!u || !u->IsAlive())
             continue;
         if (!bot->IsHostileTo(u))
+            continue;
+        // …but DO skip a unit displayed as a corpse: it cannot be the thing
+        // clawing at the healer. See DcEngageGeometry::IsDisplayedDead.
+        if (DcEngageGeometry::IsDisplayedDead(u))
             continue;
         // Deliberately do NOT skip in-combat units. A hostile in our forward
         // corridor that's already engaged on another party member is *more*

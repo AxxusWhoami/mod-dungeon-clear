@@ -329,7 +329,7 @@ std::vector<DcEngageGeometry::AvoidSphere> DcEngageGeometry::BystanderSpheres(
     {
         if (!c || !c->IsAlive() || c == exclude)
             continue;
-        if (!bot->IsHostileTo(c) || c->IsCritter() || c->IsTotem())
+        if (!bot->IsHostileTo(c) || c->IsCritter() || c->IsTotem() || IsDisplayedDead(c))
             continue;
         // Already fighting us: its aggro is spent, and treating it as an obstacle
         // would make the tank orbit the pack it is currently tanking.
@@ -585,7 +585,7 @@ bool DcEngageGeometry::TargetInsideBystanderPack(Player* bot, Unit* target)
     {
         if (!c || !c->IsAlive() || c == target)
             continue;
-        if (!bot->IsHostileTo(c) || c->IsCritter() || c->IsTotem())
+        if (!bot->IsHostileTo(c) || c->IsCritter() || c->IsTotem() || IsDisplayedDead(c))
             continue;
         // Already fighting us: its aggro is spent — it is not a pack we can wake.
         if (c->IsInCombat())
@@ -1046,6 +1046,11 @@ bool DcEngageGeometry::TankReachedRoomByPath(Player* bot, AiObjectContext* ctx,
     if (gen.GetPathType() != PATHFIND_NORMAL)
         return false;
     return gen.getPathLength() <= window;
+}
+
+bool DcEngageGeometry::IsDisplayedDead(Unit const* u)
+{
+    return u && u->HasDynamicFlag(UNIT_DYNFLAG_DEAD);
 }
 
 bool DcEngageGeometry::IsRangedAttacker(Player* bot, Unit* u)

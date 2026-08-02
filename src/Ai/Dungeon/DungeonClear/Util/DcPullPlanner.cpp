@@ -277,7 +277,12 @@ bool DcPullPlanner::ClassifyPullAdvanced(PlayerbotAI* botAI, Unit* target,
             continue;
         // Critters / non-combat pets / passive ambient never form a pull pack or a
         // chaining add — exclude them so they can't pad the pack-size count.
-        if (c->IsCritter() || c->IsTotem())
+        // A unit displayed as a corpse is the same story: it never joins the
+        // fight, so counting it would inflate the aggro estimate and could flip
+        // the Leeroy/Advanced verdict on a pack that is really smaller. Live
+        // evidence: tr-20260801-204608-7 logged pull verdicts for the Arcatraz
+        // corpse props themselves. See DcEngageGeometry::IsDisplayedDead.
+        if (c->IsCritter() || c->IsTotem() || DcEngageGeometry::IsDisplayedDead(c))
             continue;
         hostiles.push_back(c);
     }
