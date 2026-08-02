@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstddef>
+#include <limits>
 
 std::uint32_t DungeonClearMath::EstimateAggroCount(std::vector<DynPullMob> const& mobs,
                                                    std::size_t targetIdx,
@@ -380,6 +381,29 @@ float DungeonClearMath::DistSqToSegment2D(float px, float py,
     float const dx = px - cx;
     float const dy = py - cy;
     return dx * dx + dy * dy;
+}
+
+std::size_t DungeonClearMath::PathProgressCursor(std::vector<G3D::Vector3> const& route,
+                                                 float botX, float botY, float botZ)
+{
+    std::size_t cursor = 0;
+    float best = std::numeric_limits<float>::max();
+    for (std::size_t i = 0; i < route.size(); ++i)
+    {
+        float const dx = route[i].x - botX;
+        float const dy = route[i].y - botY;
+        float const dz = route[i].z - botZ;
+        // 3D, squared. The Z term is the whole point: it is what stops a route
+        // vertex a storey overhead from out-bidding the vertex on the floor the
+        // bot is actually standing on. See the header for the Shadowfang case.
+        float const d2 = dx * dx + dy * dy + dz * dz;
+        if (d2 < best)
+        {
+            best = d2;
+            cursor = i;
+        }
+    }
+    return cursor;
 }
 
 std::size_t DungeonClearMath::FindTrailRejoin(std::vector<Position> const& crumbs,
