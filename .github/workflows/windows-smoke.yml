@@ -1,0 +1,221 @@
+# MSVC / Visual Studio compile smoke.
+#
+# The Linux jobs (tests.yml on a hosted runner, upstream-smoke.yml on the
+# self-hosted box) both build with clang against glibc, so an entire class of
+# breakage is invisible to them: code that only fails under MSVC. The forcing
+# case was M_PI — glibc's <math.h> defines it unconditionally, MSVC's only
+# defines it when _USE_MATH_DEFINES was set BEFORE math.h was first included, so
+# a module TU that reached <cmath> first failed with
+#   error C2065: 'M_PI': undeclared identifier
+# plus its cascade inside the core's Position.h
+#   error C2661: 'fmod': no overloaded function takes 1 arguments
+# Neither Linux job could ever have caught it. This one does.
+#
+# WHAT IT BUILDS, AND WHY IT IS CHEAP
+# Only the `modules` target — NOT worldserver. In this tree `modules` links
+# `game-interface` (INTERFACE) and `mysql` (IMPORTED), so neither carries a
+# single .cpp: building it compiles the module sources and nothing else. The
+# core's TUs and all of src/server/scripts are configured but never compiled
+# (SCRIPTS=none). That is the point of a *smoke* build — we want "does every TU
+# of ours survive MSVC's preprocessor and front end", not a linkable server. It
+# does mean link-time breakage (a missing definition, a duplicate symbol) is NOT
+# covered here; upstream-smoke.yml links a full worldserver on Linux and covers
+# that.
+#
+# WHICH VISUAL STUDIO
+# GitHub's hosted images decide this — `windows-latest` currently means VS 2022
+# (MSVC 19.4x). The bugs this job exists to catch are MSVC-generic, not tied to
+# one toolset, so VS 2022 catches what a VS 2026 user hits. If/when a newer
+# hosted image appears, change `os:` in the matrix below — that is the only edit
+# needed.
+name: windows-smoke
+
+on:
+  # A full MSVC compile is expensive, so on PRs it only runs when something that
+  # can actually break the build changed. Docs/tools/dashboard edits skip it.
+  pull_request:
+    paths:
+      - 'src/**'
+      - 't/**'
+      - '**.cmake'
+      - 'CMakeLists.txt'
+      - '.github/workflows/windows-smoke.yml'
+  push:
+    branches: [ master ]
+    paths:
+      - 'src/**'
+      - 't/**'
+      - '**.cmake'
+      - 'CMakeLists.txt'
+      - '.github/workflows/windows-smoke.yml'
+  # Nightly backstop, offset from upstream-smoke (08:00 UTC) so the two never
+  # contend. Catches MSVC breakage that arrives from upstream rather than from us.
+  schedule:
+    - cron: '0 10 * * *'   # 10:00 UTC (~5am CDT)
+  workflow_dispatch:       # run-now button in the Actions tab
+
+concurrency:
+  group: dc-windows-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Matches tests.yml: the STABLE core + module, not test-staging. Upstream drift
+  # is upstream-smoke.yml's job; this one isolates "is OUR code MSVC-clean".
+  CORE_REPO: mod-playerbots/azerothcore-wotlk
+  CORE_REF: Playerbot
+  PLAYERBOTS_REPO: mod-playerbots/mod-playerbots
+  PLAYERBOTS_REF: master
+
+jobs:
+  windows-smoke:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest]
+    runs-on: ${{ matrix.os }}
+    name: msvc compile (${{ matrix.os }})
+    # A cold run compiles the module TUs with /MP. The cap is a runaway-billing
+    # backstop, not a target.
+    timeout-minutes: 120
+    env:
+      BOOST_ROOT: C:\local\boost_1_87_0
+
+    steps:
+      # 1. Assemble the tree: core at the workspace root, modules underneath —
+      #    the same layout tests.yml and upstream-smoke.yml build.
+      - name: Checkout core (${{ env.CORE_REPO }}@${{ env.CORE_REF }})
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.CORE_REPO }}
+          ref: ${{ env.CORE_REF }}
+          path: .
+
+      - name: Checkout mod-playerbots
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ env.PLAYERBOTS_REPO }}
+          ref: ${{ env.PLAYERBOTS_REF }}
+          path: modules/mod-playerbots
+
+      - name: Checkout this module (PR ref)
+        uses: actions/checkout@v5
+        with:
+          path: modules/mod-dungeon-clear
+
+      # 2. Windows build dependencies. Boost + the MySQL client are ~350 MB of
+      #    download and an installer run, so cache them; the Test-Path guards in
+      #    the next step short-circuit all the work when the cache is warm.
+      #
+      #    This recipe is lifted from the core fork's own .github/workflows/
+      #    windows_build.yml so the two stay on identical dependency versions —
+      #    if that workflow changes its Boost/MySQL pin, mirror it here.
+      - name: Cache Boost & MySQL
+        uses: actions/cache@v5
+        with:
+          path: |
+            C:\local\boost_1_87_0
+            C:\tools\mysql\current
+          key: dc-winsmoke-deps:boost-1.87.0:mysql-8.4.9
+
+      - name: Configure OS
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # The hosted image already ships CMake, Visual Studio (native desktop
+          # workload + MSVC) and OpenSSL, so only Boost and the MySQL client
+          # need providing. Fetched directly rather than via chocolatey, whose
+          # pinned packages keep breaking on CI.
+
+          # --- Boost 1.87.0 (msvc-14.3, 64-bit) prebuilt -> BOOST_ROOT ---
+          # Direct-download host; the plain /download URL serves an interstitial.
+          if (-not (Test-Path 'C:\local\boost_1_87_0\boost'))
+          {
+              $boostExe = Join-Path $env:RUNNER_TEMP 'boost.exe'
+              Invoke-WebRequest -Uri 'https://master.dl.sourceforge.net/project/boost/boost-binaries/1.87.0/boost_1_87_0-msvc-14.3-64.exe?viasf=1' -OutFile $boostExe
+              $boostMB = (Get-Item $boostExe).Length / 1MB
+              Write-Host ("Downloaded Boost installer: {0:N1} MB" -f $boostMB)
+              if ($boostMB -lt 50) { throw "Boost installer download looks wrong ($([int]$boostMB) MB) - likely an HTML page." }
+              $boostProc = Start-Process -FilePath $boostExe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/DIR=C:\local\boost_1_87_0' -Wait -PassThru
+              if ($boostProc.ExitCode -ne 0) { throw "Boost installer failed with exit code $($boostProc.ExitCode)." }
+              # Fail fast if the installer "succeeded" without laying down the
+              # expected tree, instead of a cryptic error later in CMake.
+              if (-not (Test-Path 'C:\local\boost_1_87_0\boost\version.hpp')) { throw 'Boost install missing headers at C:\local\boost_1_87_0\boost.' }
+              if (-not (Test-Path 'C:\local\boost_1_87_0\lib64-msvc-14.3')) { throw 'Boost install missing prebuilt libs at C:\local\boost_1_87_0\lib64-msvc-14.3.' }
+          }
+
+          # --- MySQL 8.4 client headers + libs -> C:\tools\mysql\current ---
+          if (-not (Test-Path 'C:\tools\mysql\current\lib\libmysql.lib'))
+          {
+              # The archives CDN keeps every version, unlike dev.mysql.com/get
+              # which only serves current GA. A browser UA is required or Oracle
+              # returns an HTML error page.
+              $mysqlZip = Join-Path $env:RUNNER_TEMP 'mysql.zip'
+              Invoke-WebRequest -Uri 'https://cdn.mysql.com/archives/mysql-8.4/mysql-8.4.9-winx64.zip' -OutFile $mysqlZip -UserAgent 'Mozilla/5.0'
+              $mysqlMB = (Get-Item $mysqlZip).Length / 1MB
+              Write-Host ("Downloaded MySQL zip: {0:N1} MB" -f $mysqlMB)
+              if ($mysqlMB -lt 50) { throw "MySQL zip download looks wrong ($([int]$mysqlMB) MB)." }
+              New-Item -ItemType Directory -Force -Path 'C:\tools\mysql' | Out-Null
+              Expand-Archive -Path $mysqlZip -DestinationPath 'C:\tools\mysql' -Force
+              if (Test-Path 'C:\tools\mysql\current') { Remove-Item -Recurse -Force 'C:\tools\mysql\current' }
+              Rename-Item 'C:\tools\mysql\mysql-8.4.9-winx64' 'C:\tools\mysql\current'
+              # FindMySQL.cmake looks for `libmysql` on Windows (not mysqlclient),
+              # so that is what we assert on.
+              if (-not (Test-Path 'C:\tools\mysql\current\lib\libmysql.lib')) { throw 'MySQL import library missing at C:\tools\mysql\current\lib\libmysql.lib.' }
+              if (-not (Test-Path 'C:\tools\mysql\current\include\mysql.h')) { throw 'MySQL headers missing at C:\tools\mysql\current\include.' }
+          }
+
+          # --- OpenSSL: use the copy already on the runner image ---
+          $opensslRoot = @($env:OPENSSL_ROOT_DIR, 'C:\Program Files\OpenSSL', 'C:\Program Files\OpenSSL-Win64') |
+              Where-Object { $_ -and (Test-Path (Join-Path $_ 'include\openssl\opensslv.h')) } |
+              Select-Object -First 1
+          if (-not $opensslRoot)
+          {
+              throw 'No OpenSSL development install found on the runner image.'
+          }
+          "OPENSSL_ROOT_DIR=$opensslRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "Using OpenSSL at $opensslRoot"
+
+      # 3. Configure with the Visual Studio generator — deliberately the same
+      #    toolchain path a contributor gets from "open the folder in VS", since
+      #    that is where the breakage gets reported from.
+      #
+      #    SCRIPTS=none      — src/server/scripts is never compiled (we do not
+      #                        build worldserver, and it is the single biggest
+      #                        chunk of the tree).
+      #    MODULES=static    — puts mod-dungeon-clear's sources into the
+      #                        `modules` target, which is what we build.
+      #    NOPCH=1           — a PCH compiled with different macro state from the
+      #                        TUs that use it is an MSVC-only failure mode
+      #                        (C2855, "command-line option inconsistent with
+      #                        precompiled header"). Our _USE_MATH_DEFINES define
+      #                        is exactly the kind of flag that trips it, so keep
+      #                        the smoke PCH-free and unambiguous.
+      #    WITHOUT_GIT=1     — skips the genrev git probing; the revision string
+      #                        is irrelevant to a compile smoke.
+      #    MYSQL_* explicit  — FindMySQL.cmake otherwise discovers the client via
+      #                        PATH ordering, which is not something a CI job
+      #                        should depend on.
+      - name: Configure
+        shell: bash
+        run: |
+          cmake -B build -G "Visual Studio 17 2022" -A x64 \
+            -DSCRIPTS=none \
+            -DMODULES=static \
+            -DTOOLS_BUILD=none \
+            -DBUILD_TESTING=OFF \
+            -DNOPCH=1 \
+            -DWITHOUT_GIT=1 \
+            -DBOOST_ROOT="C:/local/boost_1_87_0" \
+            -DMYSQL_INCLUDE_DIR="C:/tools/mysql/current/include" \
+            -DMYSQL_LIBRARY="C:/tools/mysql/current/lib/libmysql.lib"
+
+      # 4. Compile every module TU. `--config RelWithDebInfo` matches what the
+      #    Linux jobs build; the VS generator is multi-config so the config must
+      #    be named at BUILD time, not configure time.
+      #
+      #    /MP is already set by the core's MSVC settings.cmake, so MSBuild
+      #    parallelises the TUs inside this one project across all runner cores.
+      - name: Build modules (mod-playerbots + mod-dungeon-clear)
+        shell: bash
+        run: cmake --build build --config RelWithDebInfo --target modules
