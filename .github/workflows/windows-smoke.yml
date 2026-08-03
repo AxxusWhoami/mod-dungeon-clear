@@ -11,37 +11,31 @@
 #   error C2661: 'fmod': no overloaded function takes 1 arguments
 # Neither Linux job could ever have caught it. This one does.
 #
-# TWO MODES — fast on every push, thorough once a night
+# WHAT IT COMPILES — mod-dungeon-clear, and nothing else
 # `modules` is one static library holding EVERY enabled module's sources; there
-# is no per-module target. So "build the modules target" means compiling
-# mod-playerbots' ~635 TUs alongside our ~123 — about 84% of the work is code we
-# are not testing, and it dominates the wall clock.
+# is no per-module target, so `--target modules` would drag in mod-playerbots'
+# ~635 TUs beside our ~121. That is ~84% of the work spent on code this repo
+# does not own, and it dominated the wall clock (an hour-plus per run).
 #
-#   fast (PR / push, and the workflow_dispatch default)
-#     Ninja generator + ccache, building ONLY mod-dungeon-clear's object files.
-#     Every .obj is an addressable target under Ninja, so playerbots stays
-#     configured — its headers are on the include path, which our sources need —
-#     but never compiled. Same cl.exe and same flags, so error coverage for OUR
-#     code is identical; it just skips work we are not asking about. ccache (which
-#     the Visual Studio generator cannot use at all, since it ignores compiler
-#     launchers) makes warm runs cheaper again.
+# So this uses the Ninja generator, where every .obj is an addressable target,
+# and builds ONLY mod-dungeon-clear's object files. mod-playerbots stays
+# CONFIGURED — its headers are on the include path, which our sources need,
+# since this module subclasses its engine classes — but never compiles. Same
+# cl.exe, same flags, so error coverage for our code is identical; it just skips
+# work we are not asking about. ccache (which the Visual Studio generator cannot
+# use at all — it ignores compiler launchers) makes warm runs cheaper again.
 #
-#   full (nightly schedule, or workflow_dispatch with mode=full)
-#     Visual Studio generator, whole `modules` target. This is the one that also
-#     answers "does mod-playerbots still compile under MSVC" and exercises the
-#     same generator a contributor gets from opening the folder in VS.
-#
-# Neither mode links anything. `modules` pulls in `common` and `shared` via
-# game-interface's INTERFACE link, so those static libs compile in full mode, but
-# `game` and all of src/server/scripts (SCRIPTS=none) never do. Link-time
-# breakage is therefore NOT covered here — upstream-smoke.yml links a real
-# worldserver on Linux and covers that.
+# Nothing is linked. Link-time breakage (a missing definition, a duplicate
+# symbol) is NOT covered here; upstream-smoke.yml links a real worldserver on
+# Linux and covers that. Whether mod-playerbots or the core still build under
+# MSVC is deliberately NOT this job's problem — the core fork's own
+# .github/workflows/windows_build.yml already does that.
 #
 name: windows-smoke
 
 on:
-  # A full MSVC compile is expensive, so on PRs it only runs when something that
-  # can actually break the build changed. Docs/tools/dashboard edits skip it.
+  # An MSVC compile still costs minutes, so on PRs it only runs when something
+  # that can actually break the build changed. Docs/dashboard edits skip it.
   pull_request:
     paths:
       - 'src/**'
@@ -58,16 +52,12 @@ on:
       - 'CMakeLists.txt'
       - '.github/workflows/windows-smoke.yml'
   # Nightly backstop, offset from upstream-smoke (08:00 UTC) so the two never
-  # contend. Catches MSVC breakage that arrives from upstream rather than from us.
+  # contend. Our sources are pinned but the core and playerbots we compile
+  # AGAINST are not, so this catches an upstream header change that breaks our
+  # code on MSVC without anyone touching this repo.
   schedule:
     - cron: '0 10 * * *'   # 10:00 UTC (~5am CDT)
   workflow_dispatch:       # run-now button in the Actions tab
-    inputs:
-      mode:
-        description: 'fast = mod-dungeon-clear objects only; full = whole modules target'
-        type: choice
-        options: [fast, full]
-        default: fast
 
 concurrency:
   group: dc-windows-smoke-${{ github.ref }}
@@ -81,11 +71,6 @@ env:
   PLAYERBOTS_REPO: mod-playerbots/mod-playerbots
   PLAYERBOTS_REF: master
 
-  # The nightly is the thorough one; everything else defaults to fast. A manual
-  # dispatch can force either. `inputs.mode` is empty on non-dispatch events, so
-  # the || chain lands on 'fast'.
-  DC_MODE: ${{ (github.event_name == 'schedule' && 'full') || inputs.mode || 'fast' }}
-
 jobs:
   windows-smoke:
     strategy:
@@ -94,9 +79,9 @@ jobs:
         os: [windows-latest]
     runs-on: ${{ matrix.os }}
     name: msvc compile (${{ matrix.os }})
-    # A cold run compiles the module TUs with /MP. The cap is a runaway-billing
-    # backstop, not a target.
-    timeout-minutes: 120
+    # A fully cold run (both caches empty) measured ~26 min; a warm one is a
+    # fraction of that. The cap is a runaway-billing backstop, not a target.
+    timeout-minutes: 60
     env:
       BOOST_ROOT: C:\local\boost_1_87_0
 
@@ -196,18 +181,15 @@ jobs:
           "OPENSSL_ROOT_DIR=$opensslRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "Using OpenSSL at $opensslRoot"
 
-      # ---------------------------------------------------------------- fast
-      # 3a. Ninja + ccache + only our object files.
+      # 3. Ninja + ccache + only our object files.
       #
       # ilammy/msvc-dev-cmd puts cl.exe and the MSVC INCLUDE/LIB environment on
       # PATH, which Ninja needs and the Visual Studio generator would otherwise
       # handle itself.
-      - name: MSVC developer environment (fast)
-        if: env.DC_MODE == 'fast'
+      - name: MSVC developer environment
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Ensure Ninja (fast)
-        if: env.DC_MODE == 'fast'
+      - name: Ensure Ninja
         shell: bash
         run: command -v ninja || choco install ninja -y --no-progress
 
@@ -216,16 +198,14 @@ jobs:
       # build type below rather than RelWithDebInfo — ccache cannot cache an MSVC
       # build that writes a shared PDB (/Zi), and a compile smoke has no use for
       # debug info anyway, so the simplest fix is to not generate any.
-      - name: ccache (fast)
-        if: env.DC_MODE == 'fast'
+      - name: ccache
         uses: hendrikmuhs/ccache-action@v1.2
         with:
           key: dc-winsmoke-${{ github.ref_name }}
           variant: ccache
           max-size: 2G
 
-      - name: Configure (fast, Ninja)
-        if: env.DC_MODE == 'fast'
+      - name: Configure (Ninja)
         shell: bash
         run: |
           cmake -B build -G Ninja \
@@ -245,8 +225,7 @@ jobs:
       # the ones belonging to this module and leave mod-playerbots uncompiled.
       # Discovered rather than hardcoded: the source list is GLOBbed, so any file
       # added to src/ is picked up with no edit here.
-      - name: Build mod-dungeon-clear objects only (fast)
-        if: env.DC_MODE == 'fast'
+      - name: Build mod-dungeon-clear objects only
         shell: bash
         run: |
           mapfile -t OBJS < <(ninja -C build -t targets all \
@@ -258,59 +237,3 @@ jobs:
             exit 1
           fi
           ninja -C build "${OBJS[@]}"
-
-      # ---------------------------------------------------------------- full
-      # 3b. Configure with the image's Visual Studio — deliberately the same
-      #     toolchain path a contributor gets from "open the folder in VS", since
-      #     that is where the breakage gets reported from.
-      #
-      #     SCRIPTS=none      — src/server/scripts is never compiled (we do not
-      #                         build worldserver, and it is the single biggest
-      #                         chunk of the tree).
-      #     MODULES=static    — puts mod-dungeon-clear's sources into the
-      #                         `modules` target, which is what we build.
-      #     (no NOPCH)        — the core MUST build with its precompiled headers
-      #                         on MSVC. commonPCH.h is what supplies <string>,
-      #                         Errors.h (ASSERT) and Define.h (which is what sets
-      #                         _USE_MATH_DEFINES) to core TUs that never include
-      #                         them directly, so -DNOPCH=1 collapses src/common
-      #                         with C3861 'ASSERT', C2039 'string' and — fittingly
-      #                         — C2065 'M_PI' in Utilities/Geometry.h.
-      #     WITHOUT_GIT=1     — skips the genrev git probing; the revision string
-      #                         is irrelevant to a compile smoke.
-      #     MYSQL_* explicit  — FindMySQL.cmake otherwise discovers the client via
-      #                         PATH ordering, which is not something a CI job
-      #                         should depend on.
-      - name: Configure (full, Visual Studio)
-        if: env.DC_MODE == 'full'
-        shell: bash
-        run: |
-          # No -G: CMake defaults to the newest Visual Studio installed, so this
-          # follows the image instead of breaking when it bumps (see the header).
-          # The starred line in `cmake --help` is that default — log it so the
-          # build record always names the toolchain that actually compiled.
-          echo "::group::CMake default generator + installed Visual Studio"
-          cmake --version
-          cmake --help | sed -n '/^Generators/,$p' | grep -E '^\*' || true
-          "/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" \
-            -latest -products '*' -property catalog_productDisplayVersion || true
-          echo "::endgroup::"
-
-          cmake -B build -A x64 \
-            -DSCRIPTS=none \
-            -DMODULES=static \
-            -DTOOLS_BUILD=none \
-            -DBUILD_TESTING=OFF \
-            -DWITHOUT_GIT=1 \
-            -DBOOST_ROOT="C:/local/boost_1_87_0" \
-            -DMYSQL_INCLUDE_DIR="C:/tools/mysql/current/include" \
-            -DMYSQL_LIBRARY="C:/tools/mysql/current/lib/libmysql.lib"
-
-      # 4b. Compile every module TU. `--config RelWithDebInfo` matches what the
-      #     Linux jobs build; the VS generator is multi-config so the config must
-      #     be named at BUILD time, not configure time. /MP is already set by the
-      #     core's MSVC settings.cmake, so MSBuild parallelises TUs across cores.
-      - name: Build modules - playerbots + dungeon-clear (full)
-        if: env.DC_MODE == 'full'
-        shell: bash
-        run: cmake --build build --config RelWithDebInfo --target modules
