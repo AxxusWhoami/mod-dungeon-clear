@@ -12,15 +12,17 @@
 # Neither Linux job could ever have caught it. This one does.
 #
 # WHAT IT BUILDS, AND WHY IT IS CHEAP
-# Only the `modules` target — NOT worldserver. In this tree `modules` links
-# `game-interface` (INTERFACE) and `mysql` (IMPORTED), so neither carries a
-# single .cpp: building it compiles the module sources and nothing else. The
-# core's TUs and all of src/server/scripts are configured but never compiled
-# (SCRIPTS=none). That is the point of a *smoke* build — we want "does every TU
-# of ours survive MSVC's preprocessor and front end", not a linkable server. It
-# does mean link-time breakage (a missing definition, a duplicate symbol) is NOT
-# covered here; upstream-smoke.yml links a full worldserver on Linux and covers
-# that.
+# The `modules` target — NOT worldserver. That pulls in `common` and `shared`
+# via game-interface's INTERFACE link, so those two static libs compile as well;
+# what it does NOT compile is `game` (game-interface is a separate INTERFACE
+# target from the `game` library) or any of src/server/scripts (SCRIPTS=none) —
+# between them the large majority of the tree. So: the module TUs we care about,
+# plus a modest core floor, and no link of an executable.
+#
+# That is the point of a *smoke* build — "does every TU of ours survive MSVC's
+# preprocessor and front end", not a runnable server. It does mean link-time
+# breakage (a missing definition, a duplicate symbol) is NOT covered here;
+# upstream-smoke.yml links a full worldserver on Linux and covers that.
 #
 # WHICH VISUAL STUDIO
 # Whatever the hosted image ships — deliberately NOT pinned. `windows-latest`
@@ -188,12 +190,18 @@ jobs:
       #                        chunk of the tree).
       #    MODULES=static    — puts mod-dungeon-clear's sources into the
       #                        `modules` target, which is what we build.
-      #    NOPCH=1           — a PCH compiled with different macro state from the
-      #                        TUs that use it is an MSVC-only failure mode
-      #                        (C2855, "command-line option inconsistent with
-      #                        precompiled header"). Our _USE_MATH_DEFINES define
-      #                        is exactly the kind of flag that trips it, so keep
-      #                        the smoke PCH-free and unambiguous.
+      #    (no NOPCH)        — the core MUST build with its precompiled headers on
+      #                        MSVC. commonPCH.h is what supplies <string>,
+      #                        Errors.h (ASSERT) and Define.h (which is what sets
+      #                        _USE_MATH_DEFINES) to core TUs that never include
+      #                        them directly, so -DNOPCH=1 collapses src/common
+      #                        with C3861 'ASSERT', C2039 'string' and — fittingly
+      #                        — C2065 'M_PI' in Utilities/Geometry.h. Leaving the
+      #                        PCH on is also safe for us: `modules` has no PCH of
+      #                        its own in this tree (the add_cxx_pch call in
+      #                        modules/CMakeLists.txt is commented out), so our
+      #                        _USE_MATH_DEFINES define cannot cause the PCH/flag
+      #                        mismatch (C2855) that NOPCH was guarding against.
       #    WITHOUT_GIT=1     — skips the genrev git probing; the revision string
       #                        is irrelevant to a compile smoke.
       #    MYSQL_* explicit  — FindMySQL.cmake otherwise discovers the client via
@@ -218,7 +226,6 @@ jobs:
             -DMODULES=static \
             -DTOOLS_BUILD=none \
             -DBUILD_TESTING=OFF \
-            -DNOPCH=1 \
             -DWITHOUT_GIT=1 \
             -DBOOST_ROOT="C:/local/boost_1_87_0" \
             -DMYSQL_INCLUDE_DIR="C:/tools/mysql/current/include" \
