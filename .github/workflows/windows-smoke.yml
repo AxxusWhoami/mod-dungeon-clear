@@ -23,11 +23,14 @@
 # that.
 #
 # WHICH VISUAL STUDIO
-# GitHub's hosted images decide this — `windows-latest` currently means VS 2022
-# (MSVC 19.4x). The bugs this job exists to catch are MSVC-generic, not tied to
-# one toolset, so VS 2022 catches what a VS 2026 user hits. If/when a newer
-# hosted image appears, change `os:` in the matrix below — that is the only edit
-# needed.
+# Whatever the hosted image ships — deliberately NOT pinned. `windows-latest`
+# was VS 2022; as of image windows-2025-vs2026 it is VS 2026 and VS 2022 is gone
+# entirely, which broke the first version of this file:
+#   Generator "Visual Studio 17 2022" could not find any instance of Visual Studio
+# So the Configure step names no generator at all and lets CMake pick the newest
+# Visual Studio it finds. That self-heals across image bumps, and it means this
+# job tracks whatever a contributor on current VS is actually using. The step
+# logs the generator it chose, so the build log always says which one ran.
 name: windows-smoke
 
 on:
@@ -176,7 +179,7 @@ jobs:
           "OPENSSL_ROOT_DIR=$opensslRoot" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           Write-Host "Using OpenSSL at $opensslRoot"
 
-      # 3. Configure with the Visual Studio generator — deliberately the same
+      # 3. Configure with the image's Visual Studio — deliberately the same
       #    toolchain path a contributor gets from "open the folder in VS", since
       #    that is where the breakage gets reported from.
       #
@@ -199,7 +202,18 @@ jobs:
       - name: Configure
         shell: bash
         run: |
-          cmake -B build -G "Visual Studio 17 2022" -A x64 \
+          # No -G: CMake defaults to the newest Visual Studio installed, so this
+          # follows the image instead of breaking when it bumps (see the header).
+          # The starred line in `cmake --help` is that default — log it so the
+          # build record always names the toolchain that actually compiled.
+          echo "::group::CMake default generator + installed Visual Studio"
+          cmake --version
+          cmake --help | sed -n '/^Generators/,$p' | grep -E '^\*' || true
+          "/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe" \
+            -latest -products '*' -property catalog_productDisplayVersion || true
+          echo "::endgroup::"
+
+          cmake -B build -A x64 \
             -DSCRIPTS=none \
             -DMODULES=static \
             -DTOOLS_BUILD=none \
