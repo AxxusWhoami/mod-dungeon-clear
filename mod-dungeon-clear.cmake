@@ -20,10 +20,21 @@
 # these sources compile, nothing downstream. Our own sources additionally avoid
 # M_PI entirely (DC_PI in Util/DungeonClearTuning.h), so this is only needed for
 # the core headers we include.
+# Spelled as a raw /D option rather than target_compile_definitions, and with a
+# trailing '=', for one reason: src/common/Define.h line 38 ALSO does
+#   #define _USE_MATH_DEFINES
+# with an empty replacement list. A bare -D gives the macro the value 1, which is
+# a NON-identical redefinition, and MSVC then emits
+#   warning C4005: '_USE_MATH_DEFINES': macro redefinition
+# once per translation unit — hundreds of lines of noise that bury real
+# diagnostics. '/D_USE_MATH_DEFINES=' defines it EMPTY, identical to Define.h's,
+# so the redefinition is legal and silent. target_compile_definitions cannot
+# express this: CMake escapes "NAME=" into -DNAME="" (verified), which is a value
+# of "" and warns just the same.
 if (MSVC)
     foreach (DC_MATH_TARGET modules mod_mod-dungeon-clear)
         if (TARGET ${DC_MATH_TARGET})
-            target_compile_definitions(${DC_MATH_TARGET} PRIVATE _USE_MATH_DEFINES)
+            target_compile_options(${DC_MATH_TARGET} PRIVATE /D_USE_MATH_DEFINES=)
         endif()
     endforeach()
 endif()
@@ -96,9 +107,10 @@ if (BUILD_TESTING)
         )
 
         # Same MSVC math-macro ordering trap as the module sources above — the
-        # test TUs include the core's Position.h too.
+        # test TUs include the core's Position.h too. Same empty-value spelling,
+        # same reason (see the C4005 note above).
         if (MSVC)
-            target_compile_definitions(dungeon_clear_tests PRIVATE _USE_MATH_DEFINES)
+            target_compile_options(dungeon_clear_tests PRIVATE /D_USE_MATH_DEFINES=)
         endif()
 
         # Link the necessary targets
