@@ -329,8 +329,8 @@ Unit* DcTargeting::FindBlockingTrash(Player* bot,
 
         float const ang = std::atan2(dy, dx);
         float delta = std::fabs(ang - bossAngle);
-        if (delta > static_cast<float>(M_PI))
-            delta = 2.0f * static_cast<float>(M_PI) - delta;
+        if (delta > DC_PI)
+            delta = 2.0f * DC_PI - delta;
         if (delta > halfAngle)
             continue;
 
@@ -522,7 +522,7 @@ Unit* DcTargeting::FindPullTarget(PlayerbotAI* botAI, DungeonBossInfo const& nex
     constexpr float kLookAhead = kPullLookAhead;
     constexpr float kWidth = 18.0f;
     constexpr float kConeRange = 35.0f;
-    float const kConeHalfAngle = static_cast<float>(M_PI) / 3.0f;  // 60°
+    float const kConeHalfAngle = DC_PI / 3.0f;  // 60°
 
     // Room-wide-aggro pre-clear: while the tank is at a flagged boss with room
     // trash still up, the pull pipeline targets that ROOM trash (nearest-first),

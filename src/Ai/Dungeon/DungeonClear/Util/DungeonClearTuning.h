@@ -30,6 +30,17 @@ using uint32 = std::uint32_t;  // matches the core's Define.h typedef; this
 // effectively file-global via the old anonymous-namespace defs) so call sites
 // stay unqualified and unchanged.
 
+// Portable pi. NOT M_PI: MSVC's <math.h> only defines the M_* macros when
+// _USE_MATH_DEFINES is set BEFORE the first inclusion of math.h, and any TU that
+// reaches <cmath> before the core's Define.h (which sets it on Windows) never
+// gets them — that is the "M_PI: undeclared identifier" build break on MSVC, and
+// its cascade inside Position.h ("fmod: no overloaded function takes 1
+// arguments", from the argument that failed to compile). The module's CMake also
+// forces _USE_MATH_DEFINES on the compiler command line so the CORE headers stay
+// buildable; this constant makes OUR sources not care either way. Keeps this
+// header constant-expression and core-include-free.
+constexpr float DC_PI = 3.14159265358979323846f;
+
 // Asymmetric ranges so a trash pack sitting just outside the boss room gets
 // engaged before the at-boss trigger fires. 22yd is just outside most level-80
 // elite aggro radii (~18-20yd), giving room to position before melee. The
@@ -59,11 +70,7 @@ static_assert(DC_ROOM_AGGRO_STANDOFF_BUFFER > 0.0f,
 // TUs feed it to DcTargeting::FindBlockingTrash, so it is one constant
 // despite the old per-context names (DC_ENGAGE_CONE_* / DC_TRASH_CONE_*).
 constexpr float DC_TRASH_CONE_RANGE = 35.0f;
-// pi/3 spelled as a literal rather than M_PI: MSVC only defines M_PI when
-// _USE_MATH_DEFINES is set before <cmath>, so the macro is absent on Windows
-// (broke the build with "M_PI: undeclared identifier"). The literal is
-// portable and keeps this header constant-expression and core-include-free.
-constexpr float DC_TRASH_CONE_HALF_ANGLE = 1.0471975512f;  // pi/3 == 60°
+constexpr float DC_TRASH_CONE_HALF_ANGLE = DC_PI / 3.0f;  // 60°
 
 // When true, evaluate "blocking trash" via the bot's actual mmap path polyline
 // instead of the geometric cone. Catches packs around corners and avoids "pack

@@ -5,6 +5,8 @@
 
 #include "DungeonClearMath.h"
 
+#include "DungeonClearTuning.h"  // DC_PI
+
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -521,7 +523,7 @@ std::vector<Position> DungeonClearMath::StandoffCandidates(Position const& targe
     // First candidate dead on the bot's side, then fan out alternately +/- so
     // nearer-to-bot angles are tried before the far side of the target.
     emit(baseAngle);
-    float const step = (2.0f * float(M_PI)) / float(ringPoints + 1);
+    float const step = (2.0f * DC_PI) / float(ringPoints + 1);
     for (std::uint32_t k = 1; k <= ringPoints; ++k)
     {
         float const off = step * float((k + 1) / 2);
