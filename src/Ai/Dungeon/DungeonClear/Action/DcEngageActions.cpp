@@ -778,6 +778,15 @@ bool DungeonClearEngageBossAction::Execute(Event event)
     if (DcRun::Of(context).paused)
         return false;
 
+    // Pull-ownership guard — the same race, and STRICTLY worse here: this rung
+    // outranks advance (30 vs 15), so wherever both baskets are stale this is the
+    // one that wins the post-tag tick, and its destination is the boss itself. A
+    // trash pull taken inside engage range would become the boss pull.
+    // DungeonClearAtBossTrigger already stands down for the maneuver; this is the
+    // action-side half it cannot enforce. See DcActionShared::PullOwnsTheTank.
+    if (PullOwnsTheTank(bot, context, "engage boss"))
+        return false;
+
     std::optional<DungeonBossInfo> next = AI_VALUE(std::optional<DungeonBossInfo>, DcKey::NextDungeonBoss);
     if (!next.has_value())
         return false;

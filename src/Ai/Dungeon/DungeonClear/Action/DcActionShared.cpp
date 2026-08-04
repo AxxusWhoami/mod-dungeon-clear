@@ -645,6 +645,41 @@ namespace DcActionShared
         ServerFacade::instance().SetFacingTo(bot, unit);
     }
 
+    // See the header for why a rung whose destination is the ROUTE has to re-ask
+    // this after its own trigger already answered it.
+    bool PullOwnsTheTank(Player* bot, AiObjectContext* ctx, char const* rung)
+    {
+        if (!bot || !ctx)
+            return false;
+
+        DcPullContext const& pull = ctx->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
+
+        // A latched scripted row owns the tank outright, with no timing window:
+        // the plan decides where it stands, walks and drags, and its destination
+        // is never the boss. Unbounded is safe because the maneuver retires the
+        // row as soon as its pack is off the party, whatever the combat flag says.
+        bool const scriptedLatched = pull.scriptedStage >= 0;
+        // Any other maneuver owns it for the bounded valve — long enough to cover
+        // the legs, short enough that a wedged phase can never silence the run's
+        // only driver forever.
+        bool const midManeuver =
+            pull.phase != DcPullPhase::Idle &&
+            getMSTimeDiff(pull.phaseSince, getMSTime()) < DC_PULL_ADVANCE_STANDDOWN_MAX_MS;
+
+        if (!scriptedLatched && !midManeuver)
+            return false;
+
+        // Logged because REACHING this line is itself the diagnosis: the trigger
+        // stood this rung down and the engine ran it anyway off a stale basket.
+        // If this line never appears again the race is closed; if it does, it names
+        // the rung that would have driven the tank.
+        DC_PULL_DEBUG("[DC:{}] {} stood down: a pull owns the tank (phase {}, "
+                      "scripted stage {}) — already-queued basket",
+                      bot->GetName(), rung ? rung : "route rung",
+                      static_cast<uint32>(pull.phase), pull.scriptedStage);
+        return true;
+    }
+
 }  // namespace DcActionShared
 
 // Arbiter-funneled point move. The single seam through which DC actions issue a
