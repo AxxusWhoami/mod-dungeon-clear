@@ -307,3 +307,12 @@ AC_ADD_CONFIG_FILE("${CMAKE_CURRENT_LIST_DIR}/conf/mod_dungeon_clear.conf.dist")
 #    the post-combat rez clock. MayDrive / IsPhantomFlag / AnyPartyEngagement,
 #    all over DungeonClearMath::MayDriveWhileFlagged's grace.)
 # (this comment bumps mtime to force CMake re-glob on next build)
+# Util/DcTankForm.{h,cpp}
+#   (pre-pull shapeshift gate — the mirror of DcFormGate. A feral druid is only
+#    ever shifted by BearDruidStrategy's "bear form" trigger, which is
+#    combat-engine only, while every DC pull is opened on the NON-combat engine;
+#    so the druid tank tagged in caster form, ate the pack's opener at caster
+#    armour, and shifted a beat late. EnsureBearForm is called fire-and-forget
+#    from DungeonClearPullAction (whenever a pull is live) and from EngageDirect
+#    (inside DC_PULL_START_RANGE), so nothing can wait on a form that won't go
+#    up.)

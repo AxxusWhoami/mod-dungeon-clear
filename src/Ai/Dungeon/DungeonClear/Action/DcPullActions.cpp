@@ -49,6 +49,7 @@
 #include "Ai/Dungeon/DungeonClear/Util/DcMovement.h"
 #include "Ai/Dungeon/DungeonClear/Util/NavmeshSnap.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcPathWorker.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcTankForm.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTargeting.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTickMemo.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearTuning.h"
@@ -407,6 +408,25 @@ bool DungeonClearPullAction::Execute(Event /*event*/)
 
     std::optional<DungeonBossInfo> next = AI_VALUE(std::optional<DungeonBossInfo>, DcKey::NextDungeonBoss);
 
+    // A druid tank pulls as a BEAR. Every rung of this maneuver — commit, the
+    // Forming dwell, the tag walk-in — runs on the NON-combat engine, and the
+    // only thing that shifts a feral druid is BearDruidStrategy's "bear form"
+    // trigger, which is combat-engine only. So without this the druid tags in
+    // caster form, eats the pack's opener at caster armour/health, and shifts a
+    // beat later once aggro has already flipped the engine — the live "pulls in
+    // human form, takes a few hits, then shifts to bear". Fire-and-forget: the
+    // shift is instant and doesn't interrupt (or wait on) the approach, and
+    // nothing here branches on whether it landed, so a form that can't go up
+    // can never hold the pull. See DcTankForm.
+    //
+    // Gated on a pull actually being live rather than called unconditionally:
+    // an Idle tick with no pull target is the tank merely walking the route,
+    // where it may still need caster form to drink (Smart Rest). Idle WITH a
+    // target does shift — see the Idle branch, which arms it once the target is
+    // resolved rather than resolving it twice.
+    if (phase != DcPullPhase::Idle)
+        DcTankForm::EnsureBearForm(botAI);
+
     switch (phase)
     {
         case DcPullPhase::Idle:
@@ -421,6 +441,11 @@ bool DungeonClearPullAction::Execute(Event /*event*/)
                               bot->GetName());
                 return false;
             }
+
+            // A pack is in hand — arm the druid tank's bear form now, so it is
+            // already up by the time this tick's commit lands (see the top of
+            // Execute, which covers every later phase).
+            DcTankForm::EnsureBearForm(botAI);
 
             // PULL-BACK boss (BossPullbackRegistry). Two things differ from a
             // trash pull and both are structural, not tuning:
