@@ -23,7 +23,9 @@
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonEventRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/FightInPlaceRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/ScriptedPullRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/RoomAggroRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/SealedEncounterRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
 #include "Ai/Dungeon/DungeonClear/Util/ChunkedPathfinder.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcCombatFlag.h"
@@ -114,6 +116,65 @@ bool DungeonClearIdleTrigger::IsActive()
     if (!next.has_value())
         return false;
 
+    // A PULL MANEUVER OWNS THE TANK. Never route it anywhere while the pull FSM
+    // is mid-maneuver (Forming/Advancing/Returning/Engage) — the pull decides
+    // where the tank stands, walks and drags, and advance's route is a different
+    // destination entirely.
+    //
+    // Relevance alone does NOT cover this, which is why it went unnoticed: pull
+    // (35) outranks advance (15), so during a healthy maneuver advance never gets
+    // the tick. The hole is the window where the pull's own TRIGGER goes silent —
+    // the non-combat pull trigger returns !IsInCombat() for any non-Idle phase, and
+    // the combat drag-back trigger lives on the COMBAT engine, which the bot has
+    // not been flipped onto yet (engine transitions here are action-driven, not
+    // derived from IsInCombat). A RANGED tag opens exactly that window: combat
+    // starts on the tag, both pull rungs go quiet for the second or two until the
+    // pack arrives, and advance is left the top live rung on the non-combat engine.
+    //
+    // Live (Magisters' Terrace, tr-20260802-215715-3): the tank tagged Selin's east
+    // guard pack from its stand spot and, on the very next tick, advance issued a
+    // 69.8yd escort spline from (210.7,8.7) to Selin at (242.1,0.3) with a 5s
+    // delay. The tank ran into the room, the drag-back then fought that spline for
+    // five seconds (distance to camp went 15.6 -> 6.7 -> 21.7), and the pull
+    // aborted mid-drag and fought in the middle of the room. MayDrive let it
+    // through legitimately — the tank was flagged with nothing yet engaged, which
+    // is the phantom-flag state DcCombatFlag exists to keep driving through.
+    //
+    // Bounded, so this can never become a freeze of its own. Every maneuver leg
+    // carries a watchdog that resolves it back to Idle, and the camp fight's Engage
+    // phase is cleaned up by the pull action the moment combat drops — but if a
+    // phase ever DID wedge, silencing the run's only driver forever would be worse
+    // than the spline this prevents. The valve is far longer than any healthy leg
+    // (the longest is a pull-back's distance-sized budget) and, during a long camp
+    // fight, MayDrive above is already false on real engagement — so it opens only
+    // in the wedge it exists for.
+    DcPullContext const& pullCtx = AI_VALUE(DcPullContext&, DcKey::PullContext);
+    if (pullCtx.phase != DcPullPhase::Idle &&
+        getMSTimeDiff(pullCtx.phaseSince, getMSTime()) < DC_PULL_ADVANCE_STANDDOWN_MAX_MS)
+        return false;
+
+    // A SCRIPTED STAGE OWNS THE TANK OUTRIGHT — no timing window involved.
+    //
+    // The bounded check above should already cover a stage's legs, and in
+    // tr-20260803-140306-1 it demonstrably did not: the plan committed at 14:04:04,
+    // the phase was Advancing throughout, and at 14:04:10 — six seconds into a
+    // thirty-second valve — this rung still issued
+    //   spline issued: 19 pts, 70.3yd ... from=(210.8,9.4,-2.8) to=(242.1,0.3,1.8)
+    // from two yards off the east stand spot, i.e. a 70yd escort glide at Selin,
+    // straight through the room the plan exists to stay out of. That is the reported
+    // "ran FORWARD into the room while pulling", and everything after it — the wrong
+    // pack woken, the fresh camp stamped 18yd from the doorway — is downstream.
+    //
+    // I could not account for that from the phase/phaseSince arithmetic, so this stops
+    // depending on it. While a row is latched, advance has nothing legitimate to
+    // contribute: the plan decides where the tank stands, walks and drags, and its
+    // destination is never the boss. Unbounded is safe here in a way it would not have
+    // been before, because a latched stage can no longer wedge forever — the maneuver
+    // retires it as soon as its pack is off the party, whatever the tank's combat flag
+    // says (see DungeonClearPullManeuverAction's Engage branch).
+    if (pullCtx.scriptedStage >= 0)
+        return false;
+
     // Fires whenever DC is on and combat is over. The advance action itself
     // decides between walking, holding (rest/loot/catch-up), or yielding to
     // the higher-priority at-boss trigger when in engage range and ready.
@@ -139,6 +200,20 @@ bool DungeonClearAtBossTrigger::IsActive()
     // Travel objectives are not combat targets — the at-objective trigger owns
     // arrival. Stand down so engage-boss never fires on a non-creature anchor.
     if (next->kind != DungeonAnchorKind::Boss)
+        return false;
+
+    // Mid-maneuver the pull owns the tank — same window, same bound, same reason as
+    // the idle rung above. A trash pull taken within engage range of the boss must
+    // not have the boss engage fire underneath it while its own trigger is quiet;
+    // that is how a pull one room short of a boss turns into the boss pull.
+    DcPullContext const& pullCtx = AI_VALUE(DcPullContext&, DcKey::PullContext);
+    if (pullCtx.phase != DcPullPhase::Idle &&
+        getMSTimeDiff(pullCtx.phaseSince, getMSTime()) < DC_PULL_ADVANCE_STANDDOWN_MAX_MS)
+        return false;
+    // And unconditionally while a scripted row is latched, for the reason spelled out
+    // on the idle rung: the plan owns the tank, and for THIS rung the destination it
+    // would drive to is the very boss the plan is peeling trash away from.
+    if (pullCtx.scriptedStage >= 0)
         return false;
 
     // Close enough AND on the boss's own floor (not just 3D-near while passing
@@ -195,6 +270,81 @@ bool DungeonClearAtBossTrigger::IsActive()
                 if (d > seg.arriveRadius)
                     return false;
             }
+        }
+    }
+
+    // SEALED ENCOUNTER MUSTER. This boss's room locks the instant the encounter
+    // starts — an InstanceScript DOOR_TYPE_ROOM door, held `open &= (state !=
+    // IN_PROGRESS)` for the whole fight (SealedEncounterRegistry). Engage with anyone
+    // still outside and they spend the entire fight at a closed door while the tank
+    // solos it. Reported live for Selin Fireheart, whose Assembly Chamber Door
+    // (188065) hangs at (215.1, 0.4).
+    //
+    // The test is the VOLUME, not a radius around the tank, and the difference
+    // matters: the tank crosses the threshold BEFORE it engages, so a follower a
+    // tolerable 10yd behind it is several yards on the wrong side of the door. Only
+    // "is this member inside the room" answers the actual question.
+    //
+    // The clump that makes this satisfiable in a second or two — rather than a long
+    // wait parked inside the boss's aggro radius — is the tank-anchored spread
+    // override in DcPartyState::GetSpreadGate, which arms over the same
+    // approachRadius. This is the guarantee; that is the thing that makes the
+    // guarantee cheap.
+    if (SealedEncounterRow const* const sealed =
+            SealedEncounterRegistry::Find(bot->GetMapId(), next->entry))
+    {
+        if (SealedEncounterRegistry::InApproachRange(
+                *sealed, bot->GetPositionX(), bot->GetPositionY(), bot->GetPositionZ(),
+                next->x, next->y, next->z))
+        {
+            DcRunState& run = DcRun::Of(context);
+            uint32 const now = getMSTime();
+            if (!run.sealedMusterSince)
+                run.sealedMusterSince = now;
+
+            Player* outside = nullptr;
+            if (Group* group = bot->GetGroup())
+            {
+                for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+                {
+                    Player* member = ref->GetSource();
+                    if (!member || member == bot || member->isDead())
+                        continue;
+                    if (member->GetMapId() != bot->GetMapId())
+                        continue;
+                    if (!GET_PLAYERBOT_AI(member))
+                        continue;   // a real player is never gated on
+                    if (!SealedEncounterRegistry::InSealedRoom(
+                            *sealed, member->GetPositionX(), member->GetPositionY()))
+                    {
+                        outside = member;
+                        break;
+                    }
+                }
+            }
+
+            // Bounded: a member that cannot path in (stuck, mid-rez, feared out)
+            // must not hold the run open. On expiry engage anyway and say so — that
+            // member is about to miss the fight and the log should not be silent
+            // about why.
+            if (outside && (now - run.sealedMusterSince) < DC_SEALED_MUSTER_TIMEOUT_MS)
+            {
+                DC_PULL_TRACE("[DC:{}] sealed encounter: holding the boss engage — {} "
+                              "is still outside the room ({} ms of {})",
+                              bot->GetName(), outside->GetName(),
+                              now - run.sealedMusterSince, DC_SEALED_MUSTER_TIMEOUT_MS);
+                return false;
+            }
+            if (outside)
+                LOG_INFO("playerbots.dungeonclear",
+                         "[DC:{}] sealed encounter: muster timed out after {} ms with "
+                         "{} still outside — engaging anyway; that member will be "
+                         "locked out of the fight",
+                         bot->GetName(), now - run.sealedMusterSince, outside->GetName());
+        }
+        else
+        {
+            DcRun::Of(context).sealedMusterSince = 0;   // left the approach; re-arm
         }
     }
 
@@ -896,8 +1046,19 @@ bool DungeonClearPullTrigger::IsActive()
     // so the boss aggros but can never attack — a permanent one-sided combat flag.
     // Never pull a mob that lives in such a room; defer to the walk-in engage, which
     // fights it in place and lands the party inside the boss's aggro gate.
+    //
+    // A SCRIPTED PULL STAGE is the authored exception. The veto above is a blanket
+    // "nobody knows a safe way to peel anything out of this room"; a stage IS that
+    // knowledge, measured in-game — a camp behind the wall and one sight-line per
+    // pack. So a target that belongs to the due stage skips the veto, and every
+    // other mob in the same room (the centre pair, the boss) still gets it and is
+    // still fought in place by the walk-in engage. Deliberately keyed on the stage's
+    // own pack volume rather than on "a stage is due", so a stray mob that wanders
+    // into the room mid-plan is not silently promoted to pullable.
+    ScriptedPullStage const* const dueStage = DcTickMemoAccess::ScriptedStage(bot, context);
     if (FightInPlaceRegistry::IsNoPullZone(bot->GetMapId(), trash->GetPositionX(),
-                                           trash->GetPositionY()))
+                                           trash->GetPositionY()) &&
+        !(dueStage && ScriptedPullRegistry::IsStageTarget(*dueStage, trash)))
     {
         DC_PULL_DEBUG("[DC:{}] pull trigger: target {} is in a fight-in-place room -> "
                       "defer to walk-in engage", bot->GetName(), trash->GetGUID().ToString());
@@ -943,9 +1104,13 @@ bool DungeonClearPullManeuverTrigger::IsActive()
     // whatever the player's pull setting is, and the drag-back leg is the whole
     // point of it. Without this the tag would land and then nothing would haul the
     // boss home — the tank would fight Ghaz'an where it tagged him, in the water.
+    // `scriptedStage >= 0` is the same substitution for a ScriptedPullRegistry
+    // plan, which likewise runs at any pull setting and whose drag-back out of the
+    // room IS the maneuver.
     if (!DcRun::Of(context).enabled ||
         (!AI_VALUE(bool, DcKey::PullMode) &&
-         !AI_VALUE(DcPullContext&, DcKey::PullContext).bossPullback))
+         !AI_VALUE(DcPullContext&, DcKey::PullContext).bossPullback &&
+         AI_VALUE(DcPullContext&, DcKey::PullContext).scriptedStage < 0))
         return false;
     if (!DcLeaderSignal::IsDungeonClearLeader(bot))
         return false;
@@ -980,6 +1145,18 @@ bool DungeonClearPullManeuverTrigger::IsActive()
     if (phase == static_cast<uint32>(DcPullPhase::Idle))
         return AI_VALUE(bool, DcKey::PullModeCurrent) ||
                AI_VALUE(DcPullContext&, DcKey::PullContext).bossPullback;
+    // (A scripted stage never reaches here in Idle: the effective pull mode is
+    // forced on for its whole duration, so the first clause already answers true.)
+    // ENGAGE is included for a SCRIPTED stage only. Everywhere else the camp fight
+    // is stock combat's uncontested business — the pack is glued to the tank by the
+    // time it arrives, so there is nothing to steer. A scripted pull tags at range,
+    // so the pack arrives late and strung out, and the tank has to be held on the
+    // authored camp for the duration or the chase walks it back into the room the
+    // plan just emptied. The action still YIELDS on every tick the tank is in
+    // position, so this costs the rotation nothing while nothing is wrong.
+    if (phase == static_cast<uint32>(DcPullPhase::Engage))
+        return AI_VALUE(DcPullContext&, DcKey::PullContext).scriptedStage >= 0;
+
     return phase == static_cast<uint32>(DcPullPhase::Forming) ||
            phase == static_cast<uint32>(DcPullPhase::Advancing) ||
            phase == static_cast<uint32>(DcPullPhase::Returning);
@@ -1019,7 +1196,16 @@ bool DungeonClearHoldAtCampCombatTrigger::IsActive()
     bool passive = false;
     if (!DcLeaderSignal::GetLeaderCampHold(bot, camp, passive))
         return false;
-    return passive;
+    // A SCRIPTED PULL's camp fight is the exception to "during Engage the party
+    // fights normally". Normally that release is right: the pack is on the tank by
+    // the time it arrives, so there is nothing to walk to. A scripted pull tags at
+    // range, so the pack arrives late AND the pack that has NOT been pulled is
+    // still standing in the room next door — and a released follower chasing an
+    // inbound mob walks straight into it. (Magisters' Terrace,
+    // tr-20260802-225255-5: the tank's own leash held, and the party ran in past
+    // it and woke Selin.) They stay anchored, but NOT passive: `passive` is still
+    // what the action keys on to stop attacking, so they fight what reaches them.
+    return passive || DcLeaderSignal::IsLeaderScriptedCampFight(bot);
 }
 
 namespace
@@ -1042,6 +1228,22 @@ namespace
         if (PlayerbotAI::IsHeal(bot))
             return false;
         if (!DcLeaderSignal::IsLeaderFightAssistWanted(bot))
+            return false;
+
+        // A SCRIPTED PULL's camp fight owns its followers outright — they hold the
+        // camp and fight what reaches them. Assist exists to solve the opposite
+        // problem (a follower idling because the fight is around a corner and stock
+        // combat can't see it), and its cure is exactly what a scripted stage
+        // forbids: walk toward the pack. Worse, it does so by seeding a target and
+        // flipping the bot to the combat engine, which installs a MOVEMENT_COMBAT
+        // mover that then starves the camp recall for the rest of its budget.
+        //
+        // Live (Magisters' Terrace, tr-20260802-233048-11): "assist camp: seeded
+        // <mob> -> flip to combat engine", after which the hunter's hold-at-camp
+        // logged moved=false from 13.6yd out to 21.1yd and it walked into the room
+        // and woke Selin. There is nothing for assist to fix here anyway — the camp
+        // is in the open with line of sight to everything that arrives.
+        if (DcLeaderSignal::IsLeaderScriptedCampFight(bot))
             return false;
 
         // Fire unless the bot has an attacker it can ACT ON from where it stands —
@@ -1105,6 +1307,11 @@ bool DungeonClearAssistCampTrigger::IsActive()
     // Healers are owned by the heal-reposition governor (aims at the hurt heal
     // target, not the pack); keep assist for DPS that must be driven into the fight.
     if (PlayerbotAI::IsHeal(bot))
+        return false;
+    // A scripted camp fight owns its followers — same stand-down as the combat
+    // side (ShouldAssistCampFight), for the same reason: the cure here is "walk at
+    // the pack", which is the one thing the plan forbids.
+    if (DcLeaderSignal::IsLeaderScriptedCampFight(bot))
         return false;
     return DcLeaderSignal::IsLeaderFightAssistWanted(bot);
 }
