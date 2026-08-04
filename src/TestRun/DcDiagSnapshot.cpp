@@ -118,7 +118,7 @@ namespace
             bool const canAttackMe =
                 !asCreature || !asCreature->AI() || asCreature->AI()->CanAIAttack(member);
             bool const legitimate = reachable && canAttackMe;
-            if (IsLegitimatePvECombatHolder(pvp, legitimate))
+            if (DcDiag::IsLegitimatePvECombatHolder(pvp, legitimate))
                 anyLegitimatePvEHolder = true;
 
             if (m.combatHolders.size() >= kMaxHoldersPerMember)
@@ -165,7 +165,7 @@ namespace
 
         // No refs at all is the hatch's "opaque/forced combat, leave it alone"
         // branch — legitimate by default, so it must NOT read as phantom here.
-        bool const hasLegitimateHolder = HasLegitimatePvECombatHolder(
+        bool const hasLegitimateHolder = DcDiag::HasLegitimatePvECombatHolder(
             !cm.GetPvECombatRefs().empty(), anyLegitimatePvEHolder);
         // The verdict itself goes through the SAME kernel the trigger uses, so
         // the snapshot cannot drift from the hatch on the one field a reader
