@@ -217,6 +217,14 @@ namespace DcDiag
     // tank (returns valid == false) and on a solo bot with no group.
     Snapshot Capture(Player* tank, char const* capturedAt);
 
+    // Match the recovery trigger's PvE-only holder verdict while retaining PvP
+    // refs for diagnostic display.
+    bool IsLegitimatePvECombatHolder(bool isPvp, bool holderIsLegitimate);
+
+    // An empty PvE ref map is the trigger's opaque-combat branch. A non-empty
+    // PvE ref map is legitimate only when at least one PvE holder is legitimate.
+    bool HasLegitimatePvECombatHolder(bool hasPvERefs, bool anyLegitimatePvEHolder);
+
     // Serialize as a JSON object (no trailing comma, no key) onto the stream,
     // matching DcTestRunRecord's hand-rolled JSONL style.
     void AppendJson(std::ostringstream& s, Snapshot const& snap);
