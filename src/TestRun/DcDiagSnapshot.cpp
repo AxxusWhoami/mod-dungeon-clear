@@ -92,7 +92,7 @@ namespace
         Map* const map = member->GetMap();
         m.attackerCount = static_cast<std::uint32_t>(member->getAttackers().size());
 
-        bool anyLegitimate = false;
+        bool anyLegitimatePvEHolder = false;
         auto describe = [&](Unit* other, bool suppressed, bool pvp)
         {
             if (!other)
@@ -118,8 +118,8 @@ namespace
             bool const canAttackMe =
                 !asCreature || !asCreature->AI() || asCreature->AI()->CanAIAttack(member);
             bool const legitimate = reachable && canAttackMe;
-            if (legitimate)
-                anyLegitimate = true;
+            if (IsLegitimatePvECombatHolder(pvp, legitimate))
+                anyLegitimatePvEHolder = true;
 
             if (m.combatHolders.size() >= kMaxHoldersPerMember)
                 return;
@@ -165,7 +165,8 @@ namespace
 
         // No refs at all is the hatch's "opaque/forced combat, leave it alone"
         // branch — legitimate by default, so it must NOT read as phantom here.
-        bool const hasLegitimateHolder = anyLegitimate || !m.holderRefCount;
+        bool const hasLegitimateHolder = HasLegitimatePvECombatHolder(
+            !cm.GetPvECombatRefs().empty(), anyLegitimatePvEHolder);
         // The verdict itself goes through the SAME kernel the trigger uses, so
         // the snapshot cannot drift from the hatch on the one field a reader
         // will trust it on. Only the per-holder legitimacy above is mirrored by
@@ -202,6 +203,16 @@ namespace
 
 namespace DcDiag
 {
+    bool IsLegitimatePvECombatHolder(bool isPvp, bool holderIsLegitimate)
+    {
+        return !isPvp && holderIsLegitimate;
+    }
+
+    bool HasLegitimatePvECombatHolder(bool hasPvERefs, bool anyLegitimatePvEHolder)
+    {
+        return !hasPvERefs || anyLegitimatePvEHolder;
+    }
+
     Snapshot Capture(Player* tank, char const* capturedAt)
     {
         Snapshot snap;

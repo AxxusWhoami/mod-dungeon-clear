@@ -381,3 +381,15 @@ TEST(DcDiagSnapshotTest, SummarizeFlagsPhantomAndOffEngineMembers)
     EXPECT_NE(line.find("PHANTOM-COMBAT=1"), std::string::npos);
     EXPECT_NE(line.find("FLAGGED-OFF-COMBAT-ENGINE=1"), std::string::npos);
 }
+
+TEST(DcDiagSnapshotTest, PhantomVerdictUsesPveRefsOnly)
+{
+    EXPECT_FALSE(DcDiag::IsLegitimatePvECombatHolder(true, true));
+    EXPECT_TRUE(DcDiag::IsLegitimatePvECombatHolder(false, true));
+
+    // A legitimate PvP ref must not rescue phantom PvE refs. With no PvE refs,
+    // the trigger preserves its opaque-combat exception.
+    EXPECT_FALSE(DcDiag::HasLegitimatePvECombatHolder(true, false));
+    EXPECT_TRUE(DcDiag::HasLegitimatePvECombatHolder(false, false));
+    EXPECT_TRUE(DcDiag::HasLegitimatePvECombatHolder(true, true));
+}
