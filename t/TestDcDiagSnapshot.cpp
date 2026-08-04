@@ -308,8 +308,14 @@ TEST(DcDiagSnapshotTest, SummarizeCombatNamesHoldersAndTheirVerdicts)
     held.inCombat = true;
     held.botState = "noncombat";
     held.holderRefCount = 1;
+    // tr-20260803-211838-7, verbatim: Selin holds three members from 60-75yd, alive
+    // and perfectly path-reachable, while his own CanAIAttack (`X > 216`) forbids him
+    // touching a party camped at X=165. Reachability calls that a real fight; the
+    // holder's own script calls it impossible. It is PHANTOM, and the run sat wedged
+    // for 334s because the verdict used to say otherwise.
     CombatHolderSnapshot boss = LegitimateHolder();
     boss.canAttackMe = false;
+    boss.legitimate = false;
     held.combatHolders.push_back(boss);
     snap.members.push_back(held);
 
@@ -318,8 +324,10 @@ TEST(DcDiagSnapshotTest, SummarizeCombatNamesHoldersAndTheirVerdicts)
     EXPECT_NE(line.find("Xomja"), std::string::npos);
     EXPECT_NE(line.find("engine=noncombat"), std::string::npos);
     EXPECT_NE(line.find("Selin Fireheart(24723)"), std::string::npos);
-    EXPECT_NE(line.find("LEGITIMATE"), std::string::npos);
+    EXPECT_NE(line.find("reachable"), std::string::npos);
     EXPECT_NE(line.find("CANNOT-ATTACK-ME"), std::string::npos);
+    EXPECT_NE(line.find("-> phantom"), std::string::npos);
+    EXPECT_EQ(line.find("-> LEGITIMATE"), std::string::npos);
 }
 
 // Zero refs is the hatch's "opaque/forced combat" branch, not a phantom — and

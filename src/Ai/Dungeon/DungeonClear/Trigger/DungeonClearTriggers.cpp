@@ -14,6 +14,7 @@
 
 #include "CombatManager.h"
 #include "Creature.h"
+#include "CreatureAI.h"
 #include "Group.h"
 #include "Map.h"
 #include "ObjectAccessor.h"
@@ -996,10 +997,40 @@ bool DungeonClearPullTrigger::IsActive()
     bool const pullback =
         AI_VALUE(DcPullContext&, DcKey::PullContext).bossPullback ||
         DcTargeting::IsPullbackBossDue(bot, context);
-    if (!pullModeCurrent && !patrolWaiting && !pullback)
-        return false;
-
+    // A LATCHED SCRIPTED STAGE keeps this rung live regardless of the mode, exactly
+    // as `bossPullback` does and for the same reason — except here the consequence
+    // of missing it is not a bad pull but an unrecoverable one.
+    //
+    // The mode is not a stable property of a stage in flight. DungeonClearPullMode
+    // CurrentValue forces the bool on only while `DcTickMemoAccess::ScriptedStage`
+    // still reports a DUE stage; once this stage's pack is dead the row stops being
+    // due, `scriptedForced` hands the bool back to the player's setting, and on
+    // Dynamic (2) the governor is free to answer false. The stage is still LATCHED at
+    // that point — and the Engage cleanup that unlatches it (EndCampFight) lives
+    // behind this very gate. So the mode dropping is precisely when the cleanup is
+    // needed and precisely when it became unreachable.
+    //
+    // That is the second half of the tr-20260803-154419-18 freeze: the combat-side
+    // maneuver could not retire the stage because the tank had been moved off the
+    // combat engine by stock `drop target` while still flagged, and this rung could
+    // not retire it either. Both halves had to fail; both did. The phantom-flag hatch
+    // now clears the flag (see DungeonClearStrategy), which is what lets the phase
+    // check below pass — and this clause is what makes sure there is still a live
+    // trigger to receive it. Keyed on the LATCH (`scriptedStage`), not on the row
+    // being due, because unlatching is the whole job.
+    //
+    // Scoped to a stage already IN FLIGHT (phase != Idle) — the CLEANUP path only,
+    // never the start path. `bossPullback` can widen the Idle branch because a
+    // pull-back row IS the decision to pull; a latched stage is not, and letting the
+    // mode-off Idle branch through on it would hand the trigger a licence to COMMIT
+    // a fresh pull at a pull setting that says not to. Narrower than the freeze
+    // strictly needs, and the freeze lives entirely on the non-Idle side anyway.
     uint32 const phase = static_cast<uint32>(AI_VALUE(DcPullContext&, DcKey::PullContext).phase);
+    bool const scriptedInFlight =
+        AI_VALUE(DcPullContext&, DcKey::PullContext).scriptedStage >= 0 &&
+        phase != static_cast<uint32>(DcPullPhase::Idle);
+    if (!pullModeCurrent && !patrolWaiting && !pullback && !scriptedInFlight)
+        return false;
 
     // Mid-pull pre-combat (Forming/Advancing) and the post-fight Engage cleanup
     // run on this non-combat engine, but only while out of combat — the instant
@@ -1379,13 +1410,40 @@ namespace
     //   * there are no unit references at all — an opaque, script-forced combat with
     //     no enemy to blame; we never touch that, the core/script owns it; OR
     //   * at least one holder is still RESOLVABLE: alive, on the bot's map, NOT
-    //     evading (an evading mob is leaving combat), and PATH-REACHABLE from the bot.
+    //     evading (an evading mob is leaving combat), PATH-REACHABLE from the bot, and
+    //     ALLOWED BY ITS OWN AI TO ATTACK US.
     //
     // Keying on reachability — not distance — is the safety property: a pursuer in a
     // flee or kite is always path-reachable (that is how it chases and how the party
     // fled from it), so it always counts as resolvable and the escape hatch stays
     // inert. Only a holder the bot genuinely cannot path to (spawned behind a closed
     // gate / across a navmesh gap) fails the test — exactly the ghost-flag case.
+    //
+    // CanAIAttack is the second, independent way a holder can be unable to resolve,
+    // and reachability cannot see it. A boss whose script gates its own aggro on
+    // GEOMETRY reads as alive, non-evading and perfectly path-reachable while being
+    // permanently incapable of touching us. Selin Fireheart is the case
+    // (`CanAIAttack(who) { return who->GetPositionX() > 216.0f; }`): pull his guard
+    // pack out to the scripted camp at X=170 and he gets linked into the fight, then
+    // holds the whole party in a combat reference he can never act on and never
+    // resolves. Live in tr-20260803-211838-7 — three members flagged by Selin from
+    // 62-74yd, everyone at 100% HP, `attackers=0 victim=-`, phase wedged at Engage
+    // for 334 seconds until the run was declared frozen:
+    //
+    //   Xomja held by Selin Fireheart(24723) 62.9yd 100% reachable CANNOT-ATTACK-ME
+    //
+    // The teardown snapshot has been PRINTING that CANNOT-ATTACK-ME field for a while
+    // (DcDiagSnapshot::CaptureCombatHolders) precisely because reachability could not
+    // explain these holders; it just was not wired into the verdict. Now it is.
+    //
+    // Narrow by construction, and deliberately not the "no progress while in combat ->
+    // force-clear" hatch that was tried and reverted at S1187: this asks the holder's
+    // OWN script whether the fight is possible, so an ordinary mob (UnitAI's default,
+    // and SmartAI's override, both return true unconditionally) can never trip it. The
+    // caller's other guards still apply on top — no attackers, no victim, not a raid,
+    // and the phantom state has to hold continuously for StuckCombatTimeout — so a
+    // boss that merely gates attacks during an intro or a phase transition rearms the
+    // clock instead of being cleared.
     bool HasLegitimateCombatHolder(Player* bot)
     {
         auto const& refs = bot->GetCombatManager().GetPvECombatRefs();
@@ -1406,6 +1464,9 @@ namespace
             if (!DcEngageGeometry::IsReachable(bot, other->GetPositionX(),
                                                other->GetPositionY(), other->GetPositionZ()))
                 continue;  // unreachable -> the phantom holder
+            if (Creature* const c = other->ToCreature())
+                if (c->AI() && !c->AI()->CanAIAttack(bot))
+                    continue;  // its own script forbids it touching us -> phantom too
             return true;   // a reachable, live, non-evading holder: a REAL fight
         }
         return false;

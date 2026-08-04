@@ -111,7 +111,13 @@ namespace
                 DcEngageGeometry::IsReachable(member, other->GetPositionX(),
                                               other->GetPositionY(),
                                               other->GetPositionZ());
-            bool const legitimate = reachable;
+            // A holder whose own AI forbids it attacking this member can never
+            // resolve the reference, however reachable it is — see the matching
+            // guard in HasLegitimateCombatHolder.
+            Creature* const asCreature = other->ToCreature();
+            bool const canAttackMe =
+                !asCreature || !asCreature->AI() || asCreature->AI()->CanAIAttack(member);
+            bool const legitimate = reachable && canAttackMe;
             if (legitimate)
                 anyLegitimate = true;
 
@@ -137,14 +143,14 @@ namespace
             h.z = other->GetPositionZ();
             if (Unit* hv = other->GetVictim())
                 h.victim = hv->GetName();
-            // Not one of the hatch's guards — it is the field that explains the
-            // holders the hatch's guards cannot explain. A boss whose CanAIAttack
-            // gates on geometry (Selin Fireheart's is `X > 216`) reads as alive,
-            // non-evading and path-reachable while being permanently unable to
-            // touch a party camped outside that plane: a real ref behind a fight
-            // that physically cannot happen.
-            if (Creature* c = other->ToCreature())
-                h.canAttackMe = !c->AI() || c->AI()->CanAIAttack(member);
+            // One of the hatch's guards since S1476, and the reason it became one:
+            // a boss whose CanAIAttack gates on geometry (Selin Fireheart's is
+            // `X > 216`) reads as alive, non-evading and path-reachable while being
+            // permanently unable to touch a party camped outside that plane — a real
+            // ref behind a fight that physically cannot happen. This field spent that
+            // whole time printing the answer next to a LEGITIMATE verdict
+            // (tr-20260803-211838-7, 334s wedged) before it was wired into one.
+            h.canAttackMe = canAttackMe;
             h.legitimate = legitimate;
             m.combatHolders.push_back(std::move(h));
         };
