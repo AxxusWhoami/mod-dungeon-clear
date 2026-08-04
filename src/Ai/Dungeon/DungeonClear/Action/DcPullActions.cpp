@@ -555,14 +555,29 @@ bool DungeonClearPullAction::Execute(Event /*event*/)
                 DcMovement::StopBot(bot, DcMovement::Stop::Hold);
                 DcFaceIfNeeded(bot, trash);
                 DcSetPullPhase(context, DcPullPhase::Forming);
+                // THE OPENER, ON THE PLAN LINE. The whole maneuver is "tag from the
+                // stand spot without moving off it", so whether the tank has anything
+                // to tag WITH is the single most load-bearing fact about the attempt —
+                // and it was the one fact the log never carried. A stage with no
+                // opener is silent in exactly the same way as a stage with one: the
+                // tank walks to the spot, holds, and the leg watchdog eventually hands
+                // the pack to the walk-in. Telling those two apart took a database
+                // query against the tank's ammo slot (tr-20260803-154419-13). Once
+                // per stage, next to the coordinates it belongs with.
+                std::optional<ResolvedPullSpell> const opener =
+                    ResolvePullSpell(botAI, bot);
                 DC_PULL_INFO("[DC:{}] scripted-pull plan [{}]: target {} at {:.1f}yd | "
                              "camp ({:.1f},{:.1f},{:.1f}) | stand "
-                             "({:.1f},{:.1f},{:.1f}) -> forming, waiting for the party "
-                             "to set at camp",
+                             "({:.1f},{:.1f},{:.1f}) | opener {} -> forming, waiting "
+                             "for the party to set at camp",
                              bot->GetName(), stage->name ? stage->name : "?",
                              trash->GetGUID().ToString(), bot->GetExactDist(trash),
                              stage->campX, stage->campY, stage->campZ,
-                             stage->standX, stage->standY, stage->standZ);
+                             stage->standX, stage->standY, stage->standZ,
+                             opener ? std::to_string(opener->spellId)
+                                    : std::string("NONE (no class opener and no usable "
+                                                  "ranged weapon — this stage cannot "
+                                                  "tag and will time out)"));
                 return true;
             }
 
@@ -1125,10 +1140,19 @@ bool DungeonClearPullAction::Execute(Event /*event*/)
 
             // Prefer a RANGED tag: pull from spell range so the tank tags and the
             // pack comes to it, instead of running into the middle of the pack.
+            //
+            // Resolved ONCE per tick and reused below, because the answer decides more
+            // than whether to cast: a scripted stage's whole tag geometry — the clamp
+            // onto the stand spot and the suppressed bystander detour — exists to
+            // serve a tag the tank can take FROM that spot, and is meaningless when
+            // there is nothing to take it with. See the fallback at the clamp.
+            std::optional<ResolvedPullSpell> const opener =
+                DC_TRY_PULL_SPELL ? ResolvePullSpell(botAI, bot) : std::nullopt;
+
             ObjectGuid const lastPull = pull.tagTarget;
             if (DC_TRY_PULL_SPELL)
             {
-                if (auto pick = ResolvePullSpell(botAI, bot))
+                if (auto const& pick = opener)
                 {
                     if (lastPull == trash->GetGUID())
                     {
@@ -1344,7 +1368,45 @@ bool DungeonClearPullAction::Execute(Event /*event*/)
             // put it. If even the clamped point can't trip the tag, the leg
             // watchdog above hands the pack to the normal walk-in engage rather
             // than letting this creep forever — bounded, and loud in the log.
-            if (pull.scriptedStage >= 0)
+            //
+            // UNLESS THERE IS NOTHING TO TAG WITH — then body-pull instead.
+            //
+            // The clamp's entire justification is that the tank has an opener it can
+            // fire from the spot; the spot is chosen so that opener reaches this pack
+            // and nothing else. A tank with no opener at all is not being held on a
+            // vantage point, it is being held on an arbitrary patch of floor waiting
+            // for something that can never happen — and it waits out the whole leg
+            // budget before the watchdog gives the pack to the walk-in engage, which
+            // then routes toward the BOSS and wakes the room on the way. Standing
+            // still for 47 seconds and then blundering in is the worst of both.
+            //
+            // Live (tr-20260803-154419-13, -17): prot warriors, no class opener at 70
+            // and a gun loaded with the wrong ammo, so no opener resolved. Reported as
+            // "just stood there, did not pull, seemed to give up and ran into the room
+            // aggroing everything" — which is precisely the sequence.
+            //
+            // So drop the clamp AND restore the generic bystander detour below: either
+            // the plan's tag is executable and the authored lane governs, or it is not
+            // and we fall back to the ordinary pull in full. A body pull is a worse
+            // pull than the authored one and a far better one than none: the tank
+            // still drags back to the row's camp, so the party fights at the prepared
+            // position 83yd out instead of in the doorway.
+            //
+            // It is NOT free, and the geometry says so plainly. On Selin's east stage
+            // the line from the stand spot to the nearest pack member passes 13.0yd
+            // from Bruiser 96830 and 15.1yd from Skulker 96825 — the centre pair no
+            // stage owns — against a ~19yd elite reach, at every stop distance. A body
+            // pull there takes the centre pair too. That is the price of having no
+            // opener, it is why the ranged fallback is worth keeping working, and it is
+            // still the better of the two available outcomes.
+            bool const canTag = opener.has_value();
+            if (pull.scriptedStage >= 0 && !canTag)
+            {
+                DC_PULL_TRACE("[DC:{}] scripted-pull: no opener resolves — body-pulling "
+                              "the pack instead of holding the stand spot ({:.1f}yd to "
+                              "target)", bot->GetName(), toTag);
+            }
+            if (pull.scriptedStage >= 0 && canTag)
             {
                 if (ScriptedPullStage const* stage =
                         ScriptedPullRegistry::Find(bot->GetMapId(), pull.scriptedStage))
@@ -1378,7 +1440,15 @@ bool DungeonClearPullAction::Execute(Event /*event*/)
             // is the one line in the room that wakes nothing else. A generic orbit
             // computed off aggro spheres does not know about the walls the spot was
             // chosen for, and can only bend the tank off the authored lane.
-            if (std::optional<Position> avoid = pull.scriptedStage >= 0
+            //
+            // But a body-pulling stage (no opener — see the clamp above) has no
+            // authored lane left to protect: it is walking the whole way in, straight
+            // past the bystanders the spot existed to avoid. The generic detour is
+            // exactly the machinery for that walk, and it validates its own
+            // destination and falls through to the direct line when it cannot find
+            // one, so restoring it here can only help. Same rule as the clamp: on
+            // plan, the row governs; off plan, the ordinary pull governs, in full.
+            if (std::optional<Position> avoid = (pull.scriptedStage >= 0 && canTag)
                     ? std::optional<Position>()
                     : DcEngageGeometry::EnRoutePackAvoidPoint(bot, context, trash))
             {

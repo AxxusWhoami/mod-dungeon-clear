@@ -775,10 +775,33 @@ void DcTestRunJob::TickProvisioning(bool& provisionBudget)
             factory.ApplyEnchantAndGemsNew();
     }
     if (bot->getClass() == CLASS_HUNTER)
-    {
         factory.InitPet();
-        factory.InitAmmo();
-    }
+
+    // AMMO LAST, FOR EVERY CLASS — for the same reason the enchant pass above runs
+    // last, and it was the same oversight one line further down.
+    //
+    // Randomize() ends with its own InitAmmo(), which loads ammo for the ranged
+    // weapon IT rolled. The spec re-gear then replaces that weapon, and a gun and a
+    // bow do not take the same projectile — so a bot whose random roll gave it a bow
+    // and whose prot re-gear gave it a gun ends up holding a rifle loaded with
+    // arrows. Re-running InitAmmo() only for hunters left every other class stranded
+    // on whatever the pre-re-gear weapon needed.
+    //
+    // Not a cosmetic mismatch. PLAYER_AMMO_ID is set, so every "do I have ammo" test
+    // passes, and the failure only surfaces where it counts: the server rejects the
+    // Shoot cast itself, silently, and the bot has no ranged opener at all. A warrior
+    // has no class opener either (Heroic Throw is level 71), so the tank has nothing
+    // — which for a scripted pull means standing on the stand spot for the whole leg
+    // budget and then walking into the room. Live: Erinerice and Moge, both prot
+    // warriors, both holding Rifle of the Stoic Guardian with Timeless Arrows loaded,
+    // failed the Selin stage that way in tr-20260803-154419-13 and -17 while every
+    // druid and paladin tank in the same plan pulled normally on a class opener.
+    //
+    // InitAmmo() self-gates to hunter/rogue/warrior and re-derives the projectile
+    // class from the CURRENTLY equipped weapon, so calling it unconditionally is both
+    // safe and the whole fix.
+    factory.InitAmmo();
+
     botAI->ResetStrategies();
 
     DcTestRunRecord::CompEntry entry;

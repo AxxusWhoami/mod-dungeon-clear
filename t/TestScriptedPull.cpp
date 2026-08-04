@@ -509,6 +509,71 @@ TEST(DcScriptedPullTest, LosingGroundIsARatchetNotATickDelta)
     EXPECT_LT(DC_SCRIPTED_PULL_LOSE_GROUND, DC_SCRIPTED_PULL_LEASH * 0.5f);
 }
 
+TEST(DcScriptedPullTest, ABodyPullFromTheStandSpotWakesTheCentrePair)
+{
+    // A tank with NO opener (a level-70 warrior whose ranged slot is empty or holds
+    // the wrong ammo — see ResolveRangedWeaponPull) body-pulls instead of holding the
+    // stand spot, because holding it means waiting out the whole leg budget for a tag
+    // that can never fire and then walking at the boss anyway.
+    //
+    // This pins what that costs, so the trade-off is a recorded decision rather than
+    // something rediscovered from a log. The walk-in runs from the stand spot to the
+    // pack's nearest member, and on BOTH stages that line passes well inside the
+    // ~19yd reach of the centre pair — the two mobs flanking Selin that no stage
+    // owns. A body pull takes them too. Nothing tunable fixes it; the geometry is the
+    // geometry, which is exactly why the ranged opener is worth keeping working.
+    float constexpr kEliteReach = 19.0f;
+    std::vector<std::pair<float, float>> const centrePair{{231.70f, 2.63f},
+                                                          {231.62f, -1.86f}};
+    // Nearest real spawn to each stand spot (creature rows on map 585).
+    std::vector<std::pair<float, float>> const nearestMember{{224.41f, -16.27f},
+                                                             {225.52f, 16.98f}};
+
+    auto distToSegment = [](std::pair<float, float> const& p,
+                            std::pair<float, float> const& a,
+                            std::pair<float, float> const& b)
+    {
+        float const dx = b.first - a.first;
+        float const dy = b.second - a.second;
+        float const len = dx * dx + dy * dy;
+        float t = len > 0.0f
+            ? ((p.first - a.first) * dx + (p.second - a.second) * dy) / len
+            : 0.0f;
+        t = std::max(0.0f, std::min(1.0f, t));
+        float const cx = a.first + t * dx;
+        float const cy = a.second + t * dy;
+        return std::sqrt((p.first - cx) * (p.first - cx) +
+                         (p.second - cy) * (p.second - cy));
+    };
+
+    std::vector<ScriptedPullStage const*> const rows = ScriptedPullRegistry::Rows(MGT);
+    ASSERT_EQ(rows.size(), nearestMember.size());
+    for (size_t i = 0; i < rows.size(); ++i)
+    {
+        std::pair<float, float> const stand{rows[i]->standX, rows[i]->standY};
+        for (auto const& c : centrePair)
+        {
+            EXPECT_LT(distToSegment(c, stand, nearestMember[i]), kEliteReach)
+                << "stage " << rows[i]->order << ": the body-pull line now clears the "
+                   "centre pair — if this is a real re-measure the fallback got safer, "
+                   "but check it before relaxing anything that depends on it";
+        }
+    }
+
+    // And the reason the trade is still worth taking: the drag-back delivers whatever
+    // was woken to the row's CAMP, which is far outside the room rather than in the
+    // doorway. A body pull is a worse pull than the authored one; it is a much better
+    // one than standing still and then walking in with no camp at all.
+    for (ScriptedPullStage const* s : rows)
+    {
+        float const dx = s->campX - s->standX;
+        float const dy = s->campY - s->standY;
+        EXPECT_GT(std::sqrt(dx * dx + dy * dy), 40.0f)
+            << "stage " << s->order << ": camp is close enough to the stand spot that "
+               "a body pull would fight next to the room it was dragged out of";
+    }
+}
+
 TEST(DcScriptedPullTest, TheCampFightIsBoundedByProgressNotByAWallClock)
 {
     // Engage was the one leg of a scripted pull with no watchdog at all, and it
