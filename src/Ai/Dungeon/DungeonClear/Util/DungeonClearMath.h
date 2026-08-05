@@ -369,6 +369,32 @@ namespace DungeonClearMath
         return inCombat && !hasAttacker && !hasVictim && !hasLegitimateHolder;
     }
 
+    // Is a holder that PASSED the legitimacy test actually prosecuting the fight?
+    //
+    // Reachability alone says the holder COULD come; it does not say it IS coming. In
+    // an instance a creature never leashes (the dungeon short-circuit in
+    // CanCreatureAttack), so a mob that tagged the party and then stopped keeps its
+    // combat reference alive forever from wherever it stands — alive, non-evading,
+    // path-reachable, allowed to attack, and completely inert. That reads as a REAL
+    // fight to the legitimacy test, so the phantom hatch stands down, while every DC
+    // gate that keys off "someone is in combat" spins. Live in tr-20260804-153254-2:
+    // Ushkuk and Olanne held by a Sunblade Mage Guard 68-69yd back, 100% HP,
+    // attackers=0 victim=-, for the eight minutes until the run was stopped by hand.
+    //
+    // A holder is prosecuting the fight if it is either already INSIDE engage range
+    // (that is a fight whatever the numbers say) or CLOSING on us. `closing` comes
+    // from the caller's DcProgressWatchdog::TickClosing over the nearest holder's
+    // distance, so this cannot be fooled by the party moving: a chaser or a kited mob
+    // improves the closest-ever distance and keeps the hatch inert, while a party that
+    // walks away from a stationary holder only makes the distance WORSE. The first
+    // sample arms the watchdog and counts as closing, so the streak clock in
+    // ShouldBreakStuckCombat only starts once the holder has demonstrably stopped.
+    inline bool IsHolderProsecutingFight(bool haveHolder, float holderDist,
+                                         float engageRange, bool closing)
+    {
+        return haveHolder && (holderDist <= engageRange || closing);
+    }
+
     // "Can this follower attack from where it stands?" for the camp-assist handoff,
     // expressed in the SAME metric the stock reach action enforces.
     //

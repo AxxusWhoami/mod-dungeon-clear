@@ -5,6 +5,7 @@
 
 #include "gtest/gtest.h"
 #include "DungeonClearMath.h"
+#include "DcProgressWatchdog.h"
 
 // Test point directly on the segment (midpoint)
 TEST(DungeonClearMathTest, PointOnSegmentMidpoint)
@@ -1281,6 +1282,67 @@ TEST(DungeonClearStuckCombatTest, AnyRealFightSignalIsNotPhantom)
     // A legitimate (alive, non-evading, path-REACHABLE) holder — this is the flee/
     // kite case: the pursuer is reachable, so combat is never treated as phantom.
     EXPECT_FALSE(DungeonClearMath::IsPhantomCombat(true, false, false, true));
+}
+
+// Reachability says a holder COULD come; IsHolderProsecutingFight says whether it IS.
+TEST(DungeonClearStuckCombatTest, HolderInEngageRangeAlwaysProsecutes)
+{
+    constexpr float engageRange = 22.0f;
+
+    // Inside engage range is a fight whatever the closing tracker says — a mob toe to
+    // toe with us that simply cannot get closer must never read as stale.
+    EXPECT_TRUE(DungeonClearMath::IsHolderProsecutingFight(true, 5.0f, engageRange, false));
+    EXPECT_TRUE(DungeonClearMath::IsHolderProsecutingFight(true, engageRange, engageRange, false));
+
+    // The opaque script-forced case reports distance 0 with a legitimate verdict, so it
+    // lands here too and is never cleared.
+    EXPECT_TRUE(DungeonClearMath::IsHolderProsecutingFight(true, 0.0f, engageRange, false));
+}
+
+TEST(DungeonClearStuckCombatTest, FarHolderProsecutesOnlyWhileClosing)
+{
+    constexpr float engageRange = 22.0f;
+
+    // A chaser / a mob we are kiting keeps improving its closest-ever distance.
+    EXPECT_TRUE(DungeonClearMath::IsHolderProsecutingFight(true, 70.0f, engageRange, true));
+
+    // Far and no longer closing: the instanced no-leash straggler that tagged us and
+    // stopped. This is the arm that lets the hatch fire (tr-20260804-153254-2).
+    EXPECT_FALSE(DungeonClearMath::IsHolderProsecutingFight(true, 70.0f, engageRange, false));
+
+    // No legitimate holder at all -> nothing prosecuting, whatever the other inputs.
+    EXPECT_FALSE(DungeonClearMath::IsHolderProsecutingFight(false, 1.0f, engageRange, true));
+}
+
+// The closing signal is produced by DcProgressWatchdog::TickClosing, so wire the two
+// together the way the trigger does and prove the stale-holder shape converges: a
+// holder that stops reads as prosecuting exactly once (the arming sample) and never
+// again, while a party that walks AWAY from it cannot re-arm it.
+TEST(DungeonClearStuckCombatTest, StoppedHolderStopsProsecutingAndStaysStopped)
+{
+    constexpr float engageRange = 22.0f;
+    DcProgressWatchdog watch;
+    std::uint32_t now = 1000;
+
+    auto prosecuting = [&](float dist)
+    {
+        now += 200;
+        bool const closing = watch.TickClosing(dist, 0.5f, now);
+        return DungeonClearMath::IsHolderProsecutingFight(true, dist, engageRange, closing);
+    };
+
+    // First sample arms the tracker and counts as progress.
+    EXPECT_TRUE(prosecuting(70.0f));
+    // Holder is stationary: no improvement, so it stops counting as a fight.
+    EXPECT_FALSE(prosecuting(70.0f));
+    EXPECT_FALSE(prosecuting(70.0f));
+    // The party shuttles away and back — distance gets WORSE then returns to the same
+    // value, which is not an improvement on the closest-ever. Still stale.
+    EXPECT_FALSE(prosecuting(99.0f));
+    EXPECT_FALSE(prosecuting(70.0f));
+    // It finally starts chasing -> prosecuting again, and the hatch goes back to sleep.
+    EXPECT_TRUE(prosecuting(60.0f));
+    EXPECT_TRUE(prosecuting(40.0f));
 }
 
 // The streak gate: a transient phantom tick must not fire; only a phantom state held
