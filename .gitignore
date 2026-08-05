@@ -7,6 +7,11 @@ build/
 *.dll
 *.dylib
 
+# Python (tools/)
+__pycache__/
+*.pyc
+*.pyo
+
 # Editor / OS
 .vscode/
 .idea/
