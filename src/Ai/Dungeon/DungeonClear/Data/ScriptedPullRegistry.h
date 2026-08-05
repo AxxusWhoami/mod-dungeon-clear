@@ -337,10 +337,60 @@ inline constexpr float DC_SCRIPTED_PULL_CREEP = 0.0f;
 //           is walked back. Generous on purpose: it exists to catch a chase
 //           excursion, not to fight the tank's own footwork. It used to have to stay
 //           inside the ~20yd from camp to the doorway; with the camp 45yd back that
-//           ceiling is slack and 12yd is simply "planted, with footwork". This — not
-//           an arrival hold — is what keeps the tank off the doorway, and it applies
-//           for the entire fight rather than just its first seconds.
-inline constexpr float  DC_SCRIPTED_PULL_LEASH   = 12.0f;
+//           ceiling is slack. This — not an arrival hold — is what keeps the tank off
+//           the doorway, and it applies for the entire fight rather than just its
+//           first seconds.
+//
+// IT IS SIZED BY THE STEP-OUT, NOT BY THE FOOTWORK. It was 12yd — "planted, with
+// footwork" — and that number is wrong the moment a ground effect lands ON the camp,
+// because then the two rungs driving the bot are asking for incompatible places and
+// neither ever wins:
+//   * the generic avoid-aoe hops min(radius + 1, AiPlayerbot.FleeDistance) = 5yd from
+//     wherever the bot is standing, and CheckLastFlee then forbids reversing that hop
+//     for 5s — so a bot hauled back does not settle, it re-hops SIDEWAYS;
+//   * MgT's Magic Dampening Field step-out is stricter still: it only accepts a spot
+//     that clears every field by DAMPENING_CLEAR (9yd), off rings of 7/10/13/16yd
+//     around the bot.
+// And the bot doing the stepping is not standing on the camp anchor when the field
+// lands — it is in melee on something that reached the camp, i.e. already ~5yd out.
+// That puts the generic hop at ~10yd from camp and a dampening escape at ~14yd, both
+// outside a 12yd leash. So EVERY legal step-out tripped the recall, the recall walked
+// the bot back into the effect, and the effect pushed it out again. That is the
+// ping-pong the player watched: not a chase, two correct rungs with contradictory
+// destinations, neither of which can yield.
+//
+// 14 is that worst case with a yard of slack, and it is deliberately NOT the 18 this
+// number was first set to. The leash is not just a ceiling on an excursion — with the
+// release band below it also sets where the tank FIGHTS, and every yard of it is spent
+// permanently, on every camp fight, whether or not anything was ever dropped on the
+// camp. At 18/10 the tank's steady state was 10-20yd forward of the authored camp:
+// live, one Selin camp fight logged seven leash trips (18.0, 18.1, 18.6, 19.0, 19.3,
+// 20.8, 22.7yd) in under a minute, and eighteen across five minutes of play. That is
+// the reported "tank runs forward" — not the walk-in, the camp fight.
+//
+// The ping-pong this constant was widened for is fixed by the two rungs that landed
+// with it and not by the width: the recall RELEASES at DC_SCRIPTED_PULL_RECALL_HOME
+// (outside any field centred on the camp) instead of marching the tank back onto the
+// anchor, and a recall is dropped outright while the bot stands in a ground effect. 12
+// already cleared both step-out bounds the tests pin; 14 keeps a 4yd band above the
+// release so the latch cannot arm and clear on the same tick.
+//
+// It stays far short of what the plans need it to be short of: Selin's
+// camp-to-doorway gap, and the 40yd of caster range every rotunda row keeps between
+// its camp and every still-live pack. Both are pinned in t/TestScriptedPull.cpp.
+inline constexpr float  DC_SCRIPTED_PULL_LEASH   = 14.0f;
+
+// Where a tripped recall LETS GO. It used to be the generic 5yd camp-arrive ball, and
+// that gap IS the ping-pong's amplitude: trip at the leash and release at 5 is a
+// 13yd forced march back onto the exact point the bot was just pushed off — which,
+// for an effect centred on the camp, means back into the middle of it.
+//
+// A recall exists to end an excursion, not to re-plant the tank on a coordinate, so
+// it lets go once the tank is comfortably home. Wide enough to clear a field sitting
+// on the camp (a dampening escape is only ever accepted at 9yd out), and still well
+// inside the trip distance, so the latch cannot arm and clear on the same tick — the
+// in-out shuffle the old 5yd ball was chosen to avoid.
+inline constexpr float  DC_SCRIPTED_PULL_RECALL_HOME = 10.0f;
 
 // --- clocks on a scripted stage's ground --------------------------------------
 // A scripted stage's distances are authored, not emergent, and a row is free to put
@@ -377,12 +427,24 @@ inline constexpr uint32 ScriptedPullTravelBudgetMs(float yards)
     return DC_SCRIPTED_PULL_TRAVEL_BASE_MS + static_cast<uint32>(travelMs);
 }
 
-// The FOLLOWERS' leash. Tighter than the tank's: the tank plants ON the camp and
-// the pack piles onto it there, so a melee follower needs its fuzzed slot offset
-// plus melee reach and no more. Every extra yard is drift the follower spends
-// "parked" — yielding the tick to whatever is carrying it — before anything
-// objects.
-inline constexpr float  DC_SCRIPTED_PULL_FOLLOWER_LEASH = 8.0f;
+// The FOLLOWERS' leash. Tighter than the tank's, for the reason it always was: the
+// tank plants ON the camp and the pack piles onto it there, so a follower has less
+// legitimate ground to cover than the tank does.
+//
+// But sized the same way as the tank's — by the STEP-OUT, not by melee reach. It was
+// 8yd on the argument that a melee follower needs its fuzzed slot offset plus melee
+// reach and no more, and that argument holds right up until something is dropped on
+// the camp. A dampening-field escape is only ever ACCEPTED at 9yd or more from the
+// field centre, so an 8yd leash and a field on the camp were unsatisfiable at the
+// same time by construction: the follower stepped out, the leash pulled it straight
+// back in, and it spent the fight walking instead of casting. That is what "the party
+// never settles to dps or heal" looks like from the outside.
+//
+// 12 is a melee follower already ~5yd out on its mob plus the generic hop, and clear
+// of the 9yd a dampening escape is accepted at. Same correction as the tank's above:
+// this was first set to 15, which bought nothing the bound below does not already buy
+// and spent it on a party that fights three yards further forward all fight.
+inline constexpr float  DC_SCRIPTED_PULL_FOLLOWER_LEASH = 12.0f;
 
 // --- the losing-ground ratchet -------------------------------------------------
 // How much ground a leg that should only ever CLOSE may lose against its own

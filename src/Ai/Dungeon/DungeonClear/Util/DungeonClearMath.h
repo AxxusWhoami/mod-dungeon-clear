@@ -297,6 +297,37 @@ namespace DungeonClearMath
                           float distToCamp, float legStartDist,
                           std::uint32_t& plantTicks);
 
+    // Tag walk-in stop distance (pure), in yards from the target.
+    //
+    // The core only re-checks a pack's aggro on MOVEMENT, and its notice test is the
+    // plain centre-to-centre distance vs Creature::GetAggroRange. So the tank must
+    // GLIDE to a point strictly inside `aggroRange` — arriving is what crosses the
+    // threshold — and it stops 2yd in.
+    //
+    // `closingMs` is HOW LONG THE TANK HAS BEEN CLOSING, and the creep it drives is a
+    // backstop: a tank parked exactly at the edge is never re-evaluated (no relocation
+    // -> no MoveInLineOfSight), so after `graceMs` the stop point steps inward at
+    // `creepYardsPerSec` until something notices. It rarely runs at all.
+    //
+    // `creepFloor` bounds it — the closest the creep may bring the stop point. 0 lets
+    // it run to body contact, which is right for an ordinary pull: the pack it ends up
+    // touching is the pack it came for. A SCRIPTED stage passes a real floor, because
+    // it is standing in a room full of formations the plan has deliberately left up
+    // and the yards between the aggro edge and the pack's feet are the ones that reach
+    // them.
+    //
+    // `forceTagOut` comes back true when even the edge is inside melee reach — a
+    // much-higher-level tank against the core's 5yd minimum aggro, where closing can
+    // never cross the threshold and the caller must swing to start the fight instead.
+    //
+    // The game-state read (GetAggroRange, both combat reaches, and WHICH event
+    // `closingMs` is measured from — phase start for an ordinary pull, stand-spot
+    // arrival for a scripted stage) stays in DungeonClearPullAction.
+    float PullTagStopDistance(float aggroRange, float meleeReach,
+                              std::uint32_t closingMs, std::uint32_t graceMs,
+                              float creepYardsPerSec, float creepFloor,
+                              bool& forceTagOut);
+
     // Threat-lead follower-release gate (pure). After the leader tank enters
     // combat a real group gives it a beat to gather and establish AoE threat
     // before DPS pile in; this holds a follower's fight assist for `leadMs` after

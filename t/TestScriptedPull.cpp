@@ -593,10 +593,46 @@ TEST(DcScriptedPullTest, CampLeashCannotReachTheRoom)
     float const campToDoor = std::sqrt(dx * dx + dy * dy);
 
     EXPECT_LT(DC_SCRIPTED_PULL_LEASH, campToDoor);
-    // And the leash must sit outside the arrive radius the recall releases at (the
-    // generic 5yd camp-arrive ball, file-local to DcPullActions), or the latch would
-    // trip and clear on the same tick and produce the in-out shuffle.
-    EXPECT_GT(DC_SCRIPTED_PULL_LEASH, 5.0f);
+    // And the leash must sit outside the distance the recall releases at, or the latch
+    // would trip and clear on the same tick and produce the in-out shuffle.
+    EXPECT_GT(DC_SCRIPTED_PULL_LEASH, DC_SCRIPTED_PULL_RECALL_HOME);
+}
+
+TEST(DcScriptedPullTest, BothLeashesFitAGroundEffectStepOut)
+{
+    // THE LEASHES ARE SIZED BY THE STEP-OUT, and this is the property that makes them
+    // usable: a leash tighter than a legal escape is not a loose bound on a fight, it
+    // is a CONTRADICTION. Two rungs then drive the bot to two places forever — the
+    // step-out out of the effect, the leash back onto the camp — and neither can
+    // yield, which is the ping-pong the player watched.
+    //
+    // The two step-outs a camp fight can meet, and how far from the camp they leave a
+    // bot that was in melee (~5yd out) when the effect landed:
+    //   * generic avoid-aoe: one hop of min(radius + 1, AiPlayerbot.FleeDistance),
+    //     and FleeDistance is 5 by default and on this server.  5 + 5 = 10yd.
+    //   * MgT's Magic Dampening Field escape: only accepts a spot clearing every field
+    //     by DAMPENING_CLEAR (9yd), off rings of 7/10/13/16 — so from 5yd out it lands
+    //     on the 10yd ring.  5 + 10 = 15yd, less what the ring shares with the camp.
+    float constexpr kFleeDistance   = 5.0f;   // AiPlayerbot.FleeDistance
+    float constexpr kMeleeStandoff  = 5.0f;   // melee reach + the slot fan
+    float constexpr kDampeningClear = 9.0f;   // MgTShared DAMPENING_CLEAR
+
+    // Neither leash may be inside the strict lower bound: a dampening escape is never
+    // ACCEPTED closer than DAMPENING_CLEAR to the field centre, so a leash under that
+    // can never coexist with a field on the camp, whatever else is true.
+    EXPECT_GT(DC_SCRIPTED_PULL_FOLLOWER_LEASH, kDampeningClear)
+        << "an escape this leash forbids is the only escape the bot is allowed to take";
+    EXPECT_GT(DC_SCRIPTED_PULL_LEASH, kDampeningClear);
+
+    // And both must clear the generic hop taken from melee range, which is the one
+    // that happens on every map rather than only in Magisters' Terrace.
+    EXPECT_GT(DC_SCRIPTED_PULL_FOLLOWER_LEASH, kMeleeStandoff + kFleeDistance);
+    EXPECT_GT(DC_SCRIPTED_PULL_LEASH, kMeleeStandoff + kFleeDistance);
+
+    // The recall's release band has the same job on the way back: letting go on the
+    // camp anchor puts the tank back inside an effect centred on it, so it has to let
+    // go outside the widest field a step-out is sized against.
+    EXPECT_GE(DC_SCRIPTED_PULL_RECALL_HOME, kDampeningClear);
 }
 
 TEST(DcScriptedPullTest, TheTagIsTakenFromTheSpotAndNotAYardCloser)
@@ -659,8 +695,9 @@ TEST(DcScriptedPullTest, TheFollowerLeashIsWiderThanTheGateThatWaitsOnIt)
     // The leash is a FIGHT radius and must not be the thing a passive follower parks
     // against. A radius is not a place: a bot stops the instant it crosses the
     // boundary, so parking against a leash settles it in a SHELL at leash distance on
-    // whichever side it arrived from — the full 8yd off the authored point, in
-    // different cover. Live (tr-20260803-121459-1): every passive tick logged
+    // whichever side it arrived from — a full leash off the authored point, in
+    // different cover, and the leash has only grown since. Live
+    // (tr-20260803-121459-1, when it was 8yd): every passive tick logged
     // "parked" at 6.0-7.9yd and the party stood at (139.79, -7.66) while the row said
     // (134.14, -14.36), which reads as "the camp is nowhere near the coordinates".
     //
@@ -678,10 +715,11 @@ TEST(DcScriptedPullTest, TheFollowerLeashIsWiderThanTheGateThatWaitsOnIt)
 
 TEST(DcScriptedPullTest, FollowerLeashIsTighterThanTheTanks)
 {
-    // The tank plants ON the camp and the pack piles onto it there, so a melee
-    // follower needs its fuzzed slot offset plus melee reach — and no more.
-    // Borrowing the tank's 12yd let a follower spend twelve yards of drift logging
-    // "parked", which is to say YIELDING the tick to whatever was carrying it.
+    // The tank plants ON the camp and the pack piles onto it there, so a follower has
+    // less legitimate ground to cover than the tank does — the tank's number carries a
+    // 5yd rejoin standoff and the knockbacks on top. The ORDERING is what is pinned
+    // here; the sizes themselves come from the step-out
+    // (BothLeashesFitAGroundEffectStepOut).
     EXPECT_LT(DC_SCRIPTED_PULL_FOLLOWER_LEASH, DC_SCRIPTED_PULL_LEASH);
 
     // But still wide enough to close on a mob standing on the tank, from the far
