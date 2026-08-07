@@ -39,11 +39,10 @@ namespace DcActionShared
 
     // Long-path cache TTL. Most bosses hold a fixed position, so a longer TTL
     // is safe; rebuild costs are bounded (~8 PathGenerator calls × sub-ms each).
-    // 30s halves the A* rebuild churn of the old 15s TTL on a full dungeon run
-    // without risking stale paths: boss drift is caught out-of-band by
-    // DC_LONG_PATH_RETARGET_DIST, and portal/teleport relocations by the
-    // start-drift discard at drain.
-    inline constexpr uint32 DC_LONG_PATH_TTL_MS = 30 * 1000;
+    // Keeping the TTL short keeps stale paths from outlasting edge cases like
+    // portal traversal or stuck-teleport recovery. A boss that relocates within
+    // the TTL is handled out-of-band by DC_LONG_PATH_RETARGET_DIST.
+    inline constexpr uint32 DC_LONG_PATH_TTL_MS = 15 * 1000;
 
     // How far the effective boss target may drift from the position the cached
     // long-path was built toward before EnsureLongPath forces an early rebuild,
@@ -89,10 +88,10 @@ namespace DcActionShared
     // at most this long. Past it the tank force-advances toward the next boss
     // and followers resume following, instead of the party parking forever on a
     // corpse it can't finish (group-loot rolls pending, bags full, un-pickable).
-    // 10s covers several members each walking in from lootDistance
+    // 15s comfortably covers several members each walking in from lootDistance
     // (15yd / ~7yd/s ≈ 2s) and grabbing multiple items, while still bounding a
     // wedge. This is the "reasonable timeout, then move on" window.
-    inline constexpr uint32 DC_LOOT_YIELD_TIMEOUT_MS = 10 * 1000;
+    inline constexpr uint32 DC_LOOT_YIELD_TIMEOUT_MS = 15 * 1000;
 
     // How long a loot the bot abandoned (its yield above timed out on it) stays
     // on the per-corpse give-up list. While listed, DungeonClearUtil::Strip-
