@@ -24,12 +24,11 @@
 namespace
 {
     // Per-run override store, keyed by the run's leader-tank GUID. Values are
-    // stored as doubles already clamped/normalised by SetOverride. Accessed only
-    // from the map thread (config reads during the AI tick, and the addon hook's
-    // OnPlayerBeforeSendChatMessage, both run there), so no lock is needed — and
-    // the worker-thread centering path never reaches here because its keys are
-    // server-only (see GetRaw).
+    // stored as doubles already clamped/normalised by SetOverride. Read from the
+    // map thread (AI tick, addon hook) and written from the world thread (test-run
+    // setup/teardown), so a mutex guards every access.
     std::unordered_map<ObjectGuid, std::unordered_map<std::string, double>> g_overrides;
+    std::mutex g_overridesMutex;
 
     std::string FullKey(char const* keySuffix)
     {
@@ -231,6 +230,7 @@ namespace
     {
         if (d.playerFacing && !owner.IsEmpty())
         {
+            std::lock_guard<std::mutex> lock(g_overridesMutex);
             auto const runIt = g_overrides.find(owner);
             if (runIt != g_overrides.end())
             {
@@ -351,7 +351,10 @@ namespace DcSettings
         if (d->type != DcType::Float)
             v = std::round(v);
 
-        g_overrides[runOwner][d->key] = v;
+        {
+            std::lock_guard<std::mutex> lock(g_overridesMutex);
+            g_overrides[runOwner][d->key] = v;
+        }
         LOG_DEBUG("playerbots.dungeonclear",
                   "DcSettings: override {} = {} for run {}", d->key, v,
                   runOwner.ToString());
@@ -360,6 +363,7 @@ namespace DcSettings
 
     void ResetOverride(ObjectGuid runOwner, std::string const& key)
     {
+        std::lock_guard<std::mutex> lock(g_overridesMutex);
         auto const runIt = g_overrides.find(runOwner);
         if (runIt == g_overrides.end())
             return;
@@ -377,11 +381,13 @@ namespace DcSettings
 
     void ClearRun(ObjectGuid runOwner)
     {
+        std::lock_guard<std::mutex> lock(g_overridesMutex);
         g_overrides.erase(runOwner);
     }
 
     bool HasOverride(ObjectGuid runOwner, char const* key)
     {
+        std::lock_guard<std::mutex> lock(g_overridesMutex);
         auto const runIt = g_overrides.find(runOwner);
         if (runIt == g_overrides.end())
             return false;
