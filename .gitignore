@@ -36,3 +36,4 @@ testdeck/*.egg-info/
 
 # TypeScript incremental build cache — a local artifact, not a build output.
 testdeck/web/tsconfig.tsbuildinfo
+.env
