@@ -201,10 +201,8 @@ TEST(DcSettingsRegistryTest, SetOverrideClampsAndAcceptsFiniteValues)
     EXPECT_TRUE(DcSettings::SetOverride(run, "PullSetback", 999.0, &err));
     EXPECT_TRUE(err.empty());
     EXPECT_TRUE(DcSettings::HasOverride(run, "PullSetback"));
-    EXPECT_EQ(DcSettings::GetUInt(run, "PullSetback"),
-              static_cast<uint32>(std::round(std::clamp(
-                  999.0, FindDcSetting("PullSetback")->minVal,
-                  FindDcSetting("PullSetback")->maxVal))));
+    EXPECT_FLOAT_EQ(DcSettings::GetFloat(run, "PullSetback"),
+                    static_cast<float>(FindDcSetting("PullSetback")->maxVal));
 
     DcSettings::ClearRun(run);
 }
