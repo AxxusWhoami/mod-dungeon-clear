@@ -339,6 +339,13 @@ namespace DcSettings
             return false;
         }
 
+        if (!std::isfinite(rawValue))
+        {
+            if (err)
+                *err = "value must be a finite number";
+            return false;
+        }
+
         double v = std::clamp(rawValue, d->minVal, d->maxVal);
         // Discrete types snap to whole numbers (bool collapses to 0/1 via clamp).
         if (d->type != DcType::Float)

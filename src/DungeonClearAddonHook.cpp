@@ -16,6 +16,7 @@
  * the message so no further chat processing occurs.
  */
 
+#include <cmath>
 #include <cstdlib>
 
 #include "ScriptMgr.h"
@@ -139,7 +140,7 @@ namespace
 
         char* end = nullptr;
         double const value = std::strtod(valStr.c_str(), &end);
-        if (end == valStr.c_str())
+        if (end == valStr.c_str() || *end != '\0' || !std::isfinite(value))
         {
             SendAddonError(player, "Invalid value for " + key + ".");
             return;

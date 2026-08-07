@@ -7,11 +7,14 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettingsRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
+#include "ObjectGuid.h"
 
 // Invariants of the settings table itself. The resolution CHAIN
 // (override -> heroic conf -> heroic default -> conf -> default) needs a live
@@ -162,4 +165,46 @@ TEST(DcSettingsRegistryTest, TrashBandClampedToHeroicCap)
     EXPECT_EQ(d->defVal, 30);
     ASSERT_TRUE(DcHasHeroicDefault(*d));
     EXPECT_EQ(d->heroicVal, 42);
+}
+
+TEST(DcSettingsRegistryTest, SetOverrideRejectsNonFiniteValues)
+{
+    // A NaN or infinity sent from the addon must never enter the override store:
+    // std::clamp(NaN, min, max) returns NaN, which would silently corrupt the
+    // effective value for the rest of the run.
+    ObjectGuid const run = ObjectGuid(uint64(0xDEADBEEF));
+    std::string err;
+
+    EXPECT_FALSE(DcSettings::SetOverride(run, "PullSetback",
+                                         std::numeric_limits<double>::quiet_NaN(), &err));
+    EXPECT_FALSE(err.empty());
+
+    EXPECT_FALSE(DcSettings::SetOverride(run, "PullSetback",
+                                         std::numeric_limits<double>::infinity(), &err));
+    EXPECT_FALSE(err.empty());
+
+    EXPECT_FALSE(DcSettings::SetOverride(run, "PullSetback",
+                                         -std::numeric_limits<double>::infinity(), &err));
+    EXPECT_FALSE(err.empty());
+
+    EXPECT_FALSE(DcSettings::HasOverride(run, "PullSetback"));
+
+    DcSettings::ClearRun(run);
+}
+
+TEST(DcSettingsRegistryTest, SetOverrideClampsAndAcceptsFiniteValues)
+{
+    ObjectGuid const run = ObjectGuid(uint64(0xBEEFCAFE));
+    std::string err;
+
+    // A finite value outside the range is clamped, not rejected.
+    EXPECT_TRUE(DcSettings::SetOverride(run, "PullSetback", 999.0, &err));
+    EXPECT_TRUE(err.empty());
+    EXPECT_TRUE(DcSettings::HasOverride(run, "PullSetback"));
+    EXPECT_EQ(DcSettings::GetUInt(run, "PullSetback"),
+              static_cast<uint32>(std::round(std::clamp(
+                  999.0, FindDcSetting("PullSetback")->minVal,
+                  FindDcSetting("PullSetback")->maxVal))));
+
+    DcSettings::ClearRun(run);
 }
