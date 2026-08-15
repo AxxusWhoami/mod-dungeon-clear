@@ -29,6 +29,7 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include "Timer.h"
 
 namespace
 {
@@ -131,7 +132,6 @@ namespace
 #include "PlayerbotAI.h"
 #include "Chat.h"
 #include "ServerFacade.h"
-#include "Timer.h"
 #include "World.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 #include "Ai/Dungeon/DungeonClear/Util/ChunkedPathfinder.h"
