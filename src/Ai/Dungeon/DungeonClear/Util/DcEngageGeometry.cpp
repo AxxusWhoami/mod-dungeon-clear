@@ -29,6 +29,78 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+
+namespace
+{
+    // Short-TTL reachability memo for the per-tick PathGenerator probes.
+    // IsNavReachable and IsEngageReachable are called per-candidate per-tick
+    // during corridor/cone trash scans; within a single scan pass the same
+    // bot->target pair is probed multiple times (PickBlockingTrash then
+    // FindBlockingTrash, then the engage target resolver). Each probe builds
+    // a full PathGenerator (Detour A* + string-pull), so a dozen candidates
+    // cost a dozen synchronous path builds per tick. The memo collapses
+    // those to one build per unique pair per TTL window.
+    //
+    // The position is quantized to 2yd cells so a mob drifting a few inches
+    // doesn't invalidate the entry, and the TTL (800ms) is short enough that
+    // a door opening or a mob moving meaningfully invalidates it naturally.
+    struct ReachKey
+    {
+        ObjectGuid guid;
+        int32 qx, qy, qz;
+        bool operator==(ReachKey const& o) const
+        { return guid == o.guid && qx == o.qx && qy == o.qy && qz == o.qz; }
+    };
+    struct ReachKeyHash
+    {
+        size_t operator()(ReachKey const& k) const
+        {
+            size_t h = std::hash<uint64>()(k.guid.GetRawValue());
+            h ^= std::hash<int32>()(k.qx) + 0x9e3779b9u + (h << 6) + (h >> 2);
+            h ^= std::hash<int32>()(k.qy) + 0x9e3779b9u + (h << 6) + (h >> 2);
+            h ^= std::hash<int32>()(k.qz) + 0x9e3779b9u + (h << 6) + (h >> 2);
+            return h;
+        }
+    };
+    struct ReachEntry { bool result; uint32 expireMs; };
+
+    std::unordered_map<ReachKey, ReachEntry, ReachKeyHash> g_reachCache;
+    std::mutex g_reachCacheMutex;
+    constexpr uint32 REACH_CACHE_TTL_MS = 800;
+    constexpr float REACH_CACHE_Q = 2.0f;
+
+    bool QueryReachCache(ObjectGuid guid, float x, float y, float z, uint32 nowMs)
+    {
+        ReachKey key{guid,
+                     static_cast<int32>(std::round(x / REACH_CACHE_Q)),
+                     static_cast<int32>(std::round(y / REACH_CACHE_Q)),
+                     static_cast<int32>(std::round(z / REACH_CACHE_Q))};
+        std::lock_guard<std::mutex> lock(g_reachCacheMutex);
+        auto it = g_reachCache.find(key);
+        if (it == g_reachCache.end())
+            return false;
+        if (it->second.expireMs < nowMs)
+        {
+            g_reachCache.erase(it);
+            return false;
+        }
+        return it->second.result;
+    }
+
+    void StoreReachCache(ObjectGuid guid, float x, float y, float z, bool result, uint32 nowMs)
+    {
+        ReachKey key{guid,
+                     static_cast<int32>(std::round(x / REACH_CACHE_Q)),
+                     static_cast<int32>(std::round(y / REACH_CACHE_Q)),
+                     static_cast<int32>(std::round(z / REACH_CACHE_Q))};
+        std::lock_guard<std::mutex> lock(g_reachCacheMutex);
+        if (g_reachCache.size() > 256)
+            g_reachCache.clear();
+        g_reachCache[key] = {result, nowMs + REACH_CACHE_TTL_MS};
+    }
+
+    uint32 NowMs() { return getMSTime(); }
+}
 #include "AttackersValue.h"
 #include "CellImpl.h"
 #include "Creature.h"
@@ -1177,9 +1249,16 @@ bool DcEngageGeometry::IsNavReachable(Player* bot, Position const& p)
 {
     if (!bot)
         return false;
+
+    uint32 const now = NowMs();
+    if (QueryReachCache(bot->GetGUID(), p.GetPositionX(), p.GetPositionY(), p.GetPositionZ(), now))
+        return true;
+
     PathGenerator gen(bot);
     gen.CalculatePath(p.GetPositionX(), p.GetPositionY(), p.GetPositionZ());
-    return gen.GetPathType() == PATHFIND_NORMAL;
+    bool const ok = gen.GetPathType() == PATHFIND_NORMAL;
+    StoreReachCache(bot->GetGUID(), p.GetPositionX(), p.GetPositionY(), p.GetPositionZ(), ok, now);
+    return ok;
 }
 bool DcEngageGeometry::ClosedDoorBetween(WorldObject* from, float tx, float ty,
                                          float tz, float /*corridorWidth*/)
@@ -1403,12 +1482,25 @@ bool DcEngageGeometry::IsEngageReachable(Player* bot, Unit* u, bool requireDirec
     // would otherwise be trusted and EngageDirected straight into the dividing
     // wall (the Uldaman keeper-hall / Ironaya-seal leak). Always probe the route.
 
+    // Check the reachability cache first — the trash scan probes the same
+    // candidates repeatedly within a single tick. The cache stores only the
+    // final bool; the requireDirect detour-ratio check is folded into the
+    // cached result, so the key encodes requireDirect to avoid a mismatch.
+    uint32 const now = NowMs();
+    ObjectGuid const cacheGuid = bot->GetGUID();
+    ObjectGuid const keyedGuid = requireDirect ? cacheGuid : ObjectGuid(cacheGuid.GetRawValue() ^ 1);
+    if (QueryReachCache(keyedGuid, u->GetPositionX(), u->GetPositionY(), u->GetPositionZ(), now))
+        return true;
+
     // Confirm an actual ground path. A single direct probe suffices — seek trash
     // sits inside the event's radius, comfortably under PathGenerator's range cap.
     PathGenerator gen(bot);
     gen.CalculatePath(u->GetPositionX(), u->GetPositionY(), u->GetPositionZ(), /*forceDest*/ false);
     if (gen.GetPathType() != PATHFIND_NORMAL)
+    {
+        StoreReachCache(keyedGuid, u->GetPositionX(), u->GetPositionY(), u->GetPositionZ(), false, now);
         return false;
+    }
 
     // PathGenerator clamps an off-mesh destination to the nearest walkable
     // poly, which on layered geometry can be the bot's *own* floor directly
@@ -1416,16 +1508,25 @@ bool DcEngageGeometry::IsEngageReachable(Player* bot, Unit* u, bool requireDirec
     // Require the route to actually end on the candidate's level.
     Movement::PointsArray const& path = gen.GetPath();
     if (path.empty())
+    {
+        StoreReachCache(keyedGuid, u->GetPositionX(), u->GetPositionY(), u->GetPositionZ(), false, now);
         return false;
+    }
     G3D::Vector3 const& end = path.back();
     if (std::fabs(end.z - u->GetPositionZ()) > DC_Z_LEVEL_TOLERANCE)
+    {
+        StoreReachCache(keyedGuid, u->GetPositionX(), u->GetPositionY(), u->GetPositionZ(), false, now);
         return false;
+    }
 
     // A complete on-level path already rejects the through-a-wall / wrong-level
     // case. A deliberate seek (requireDirect=false) may legitimately walk a long
     // way to its specific objective creature, so stop here for it.
     if (!requireDirect)
+    {
+        StoreReachCache(keyedGuid, u->GetPositionX(), u->GetPositionY(), u->GetPositionZ(), true, now);
         return true;
+    }
 
     // A path existing is not enough: a mob across a wall (or at the bottom of a
     // ledge) can be 15yd away in a straight line while its real approach is a long
@@ -1438,8 +1539,10 @@ bool DcEngageGeometry::IsEngageReachable(Player* bot, Unit* u, bool requireDirec
     // IsAtBossEngage. The slack term keeps legitimate short around-the-corner
     // detours alive at close range, where the pure ratio is too strict.
     float const straight = bot->GetDistance(u);
-    return gen.getPathLength() <=
+    bool const ok = gen.getPathLength() <=
            std::max(straight * DC_TRASH_DETOUR_RATIO, straight + DC_TRASH_DETOUR_SLACK);
+    StoreReachCache(keyedGuid, u->GetPositionX(), u->GetPositionY(), u->GetPositionZ(), ok, now);
+    return ok;
 }
 bool DcEngageGeometry::ComputeCorridor(Player* bot,
                                        float bx, float by, float bz,

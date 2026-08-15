@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <ctime>
 #include <optional>
 #include <set>
@@ -72,13 +73,13 @@ namespace
 
     std::string MakeRunId()
     {
-        static uint32 counter = 0;
+        static std::atomic<uint32> counter{0};
         std::time_t const now = std::time(nullptr);
         std::tm tmBuf{};
         localtime_r(&now, &tmBuf);
         char buf[32];
         std::strftime(buf, sizeof(buf), "tr-%Y%m%d-%H%M%S", &tmBuf);
-        return std::string(buf) + "-" + std::to_string(++counter);
+        return std::string(buf) + "-" + std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
     }
 
     char const* ClassToken(uint8 classId)

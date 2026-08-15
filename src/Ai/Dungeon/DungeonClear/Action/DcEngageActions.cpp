@@ -282,10 +282,7 @@ namespace
     {
         if (!bot || !target)
             return false;
-        PathGenerator gen(bot);
-        gen.CalculatePath(target->GetPositionX(), target->GetPositionY(),
-                          target->GetPositionZ(), /*forceDest*/ false);
-        return gen.GetPathType() == PATHFIND_NORMAL;
+        return DcEngageGeometry::IsNavReachable(bot, *target);
     }
 
     // Closest valid hostile from `candidates` within `range` of the bot,
