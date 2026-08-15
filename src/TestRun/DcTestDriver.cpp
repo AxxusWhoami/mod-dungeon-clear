@@ -389,7 +389,7 @@ namespace DcTestDriver
             sPlayerbotsMgr.AddPlayerbotData(driver, false);
 
         // 2. Self-mastered: party bots' HasRealPlayerMaster() checks the
-        //    master's AI IsRealPlayer() (master == bot), so this one line is
+        //    master's AI self-master check (GetMaster() == master), so this one line is
         //    what keeps the stock fast path (react delay etc.) for every run
         //    the driver issues.
         ai->SetMaster(driver);

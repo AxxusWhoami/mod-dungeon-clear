@@ -66,7 +66,7 @@ namespace
         // moment a player enables bot self mode they would be silently
         // locked out of every dc command.
         if (PlayerbotAI* ownerAI = GET_PLAYERBOT_AI(owner))
-            if (!ownerAI->IsRealPlayer())
+            if (ownerAI->GetMaster() != owner)
                 return false;
         if (!bot || !bot->GetGroup())
             return false;

@@ -455,8 +455,8 @@ namespace
     constexpr float  MECH_CACHE_CAST_REACH = 4.0f;
 
     // True if a real human is in the leader's party (or is the lone actor). A member
-    // counts as human when it has no PlayerbotAI, or a PlayerbotAI that reports
-    // IsRealPlayer (a self-bot) — both are someone who will walk up and loot the
+    // counts as human when it has no PlayerbotAI, or a PlayerbotAI whose master
+    // is itself (a self-bot) — both are someone who will walk up and loot the
     // cache. A pure bot (PlayerbotAI, not a real player) does not.
     bool PartyHasRealPlayer(Player* bot)
     {
@@ -465,7 +465,7 @@ namespace
             if (!p)
                 return false;
             PlayerbotAI* ai = GET_PLAYERBOT_AI(p);
-            return !ai || ai->IsRealPlayer();
+            return !ai || ai->GetMaster() == p;
         };
 
         Group* group = bot->GetGroup();

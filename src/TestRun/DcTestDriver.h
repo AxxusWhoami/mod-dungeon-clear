@@ -26,7 +26,7 @@ class Player;
 // (sRandomPlayerbotMgr.AddPlayerBot(guid, 0) — the masterless login path),
 // then made to pass for a real player master:
 //   * its own PlayerbotAI is SELF-MASTERED (SetMaster(driver)), so for every
-//     party bot HasRealPlayerMaster() == masterBotAI->IsRealPlayer() == true —
+//     party bot HasRealPlayerMaster() == (masterBotAI->GetMaster() == master) == true —
 //     the react-throttle fast path holds exactly as with a human GM;
 //   * it gets its own PlayerbotMgr (PlayerbotsMgr::AddPlayerbotData(p, false);
 //     the AI map and mgr map are separate, so one character can hold both),
