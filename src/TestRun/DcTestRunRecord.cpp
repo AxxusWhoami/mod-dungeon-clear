@@ -246,21 +246,32 @@ namespace DcTestRunRecord
     void Append(Record const& rec)
     {
         // One process-wide append stream; runs end minutes apart, so a mutex
-        // plus flush-per-line is plenty (same shape as DungeonClearApproachIo).
+        // plus periodic flushing keeps records durable without forcing disk I/O per line.
         static std::mutex mtx;
         static std::ofstream file;
-        static bool opened = false;
+        static unsigned writesSinceFlush = 0;
+        std::string const line = ToJsonl(rec);
 
         std::lock_guard<std::mutex> lock(mtx);
-        if (!opened)
+        if (!file.is_open())
         {
+            file.clear();
             file.open(CapturePath(), std::ios::out | std::ios::app);
-            opened = true;
         }
         if (!file.is_open())
             return;
 
-        file << ToJsonl(rec) << '\n';
-        file.flush();
+        file << line << '\n';
+        if (!file)
+        {
+            file.close();
+            writesSinceFlush = 0;
+            return;
+        }
+        if (++writesSinceFlush >= 64)
+        {
+            file.flush();
+            writesSinceFlush = 0;
+        }
     }
 }
