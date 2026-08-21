@@ -123,9 +123,14 @@ namespace
             return npath;
 
         uint32 req = nvisited - furthestVisited;
+        if (req >= maxPath)
+            return maxPath;
+
         uint32 orig = uint32(furthestPath + 1) < npath ? furthestPath + 1 : npath;
         uint32 size = npath > orig ? npath - orig : 0;
-        if (req + size > maxPath)
+        if (req >= maxPath)
+            size = 0;
+        else if (size > maxPath - req)
             size = maxPath - req;
 
         if (size)
@@ -220,6 +225,8 @@ namespace
             dtVsub(delta, steerPos, iterPos);
             float len = dtMathSqrtf(dtVdot(delta, delta));
             if ((endOfPath || offMeshConnection) && len < LR_SMOOTH_STEP)
+                len = 1.0f;
+            else if (len < 1e-6f)
                 len = 1.0f;
             else
                 len = LR_SMOOTH_STEP / len;

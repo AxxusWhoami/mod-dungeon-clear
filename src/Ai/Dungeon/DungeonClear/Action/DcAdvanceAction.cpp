@@ -1256,7 +1256,8 @@ void DungeonClearAdvanceAction::FillHopObs(AdvanceState& st, DungeonClearApproac
                 bool const honoured = DcEngageGeometry::TruncateWindowAtSphere(
                     remaining, spheres, DC_AVOID_MIN_GLIDE, DC_AVOID_EDGE_BACKOFF,
                     legIdx, idx);
-                if (honoured &&
+                if (honoured && idx >= 0 &&
+                    static_cast<size_t>(idx) < spheres.size() &&
                     spheres[static_cast<size_t>(idx)].guid != appr.glideHazardIgnore)
                 {
                     appr.glideHazardIgnore = spheres[static_cast<size_t>(idx)].guid;
@@ -1336,7 +1337,7 @@ void DungeonClearAdvanceAction::FillHopObs(AdvanceState& st, DungeonClearApproac
         bool const honoured = DcEngageGeometry::TruncateWindowAtSphere(
             st.splineWindow, spheres, DC_AVOID_MIN_GLIDE, DC_AVOID_EDGE_BACKOFF,
             legIdx, idx);
-        if (idx >= 0)
+        if (idx >= 0 && static_cast<size_t>(idx) < spheres.size())
             DC_PULL_DEBUG("[DC:{}] advance window: leg {} violates bystander "
                           "sphere {} (r={:.1f}) -> {} {} -> {} pts",
                           bot->GetName(), legIdx,

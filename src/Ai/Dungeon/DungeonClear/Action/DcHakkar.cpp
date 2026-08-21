@@ -268,6 +268,7 @@ bool DungeonClearHakkarFlameAction::Execute(Event /*event*/)
     }
     // In range — use the flame (fires its GOSSIP_HELLO event: SET_COUNTER 1 +1 on
     // the Shade, the douse that counts toward 4 -> Avatar).
+    ObjectGuid const flameGuid = flame->GetGUID();
     bot->SetFacingToObject(flame);
     flame->Use(bot);
     // Spend ONE Hakkari Blood per flame, by force. There is NO clean built-in
@@ -286,12 +287,12 @@ bool DungeonClearHakkarFlameAction::Execute(Event /*event*/)
     {
         std::lock_guard<std::mutex> lock(DcHakkar::g_hakkarMutex);
         auto& set = DcHakkar::g_doused[bot->GetInstanceId()];
-        set.insert(flame->GetGUID());
+        set.insert(flameGuid);
         doused = static_cast<uint32>(set.size());
     }
     LOG_INFO("playerbots.dungeonclear",
              "[dungeon-clear] {} doused Eternal Flame {} ({}/4 flames doused{})",
-             bot->GetName(), flame->GetGUID().ToString(), doused,
+             bot->GetName(), flameGuid.ToString(), doused,
              doused >= 4 ? " -> Avatar should spawn" : "");
     return true;
 }
@@ -322,6 +323,7 @@ bool DungeonClearHakkarLootBloodAction::Execute(Event /*event*/)
     // corpse's own loot (what opening it does) and taking that item is the genuine
     // article, not a granted copy. FillLoot only when the corpse hasn't been
     // opened yet; then StoreLootItem the blood slot.
+    ObjectGuid const keeperGuid = keeper->GetGUID();
     Loot& loot = keeper->loot;
     if (loot.items.empty() && loot.gold == 0)
         loot.FillLoot(keeper->GetCreatureTemplate()->lootid, LootTemplates_Creature,
@@ -351,11 +353,11 @@ bool DungeonClearHakkarLootBloodAction::Execute(Event /*event*/)
 
     {
         std::lock_guard<std::mutex> lock(DcHakkar::g_hakkarMutex);
-        DcHakkar::g_bloodTaken[bot->GetInstanceId()].insert(keeper->GetGUID());
+        DcHakkar::g_bloodTaken[bot->GetInstanceId()].insert(keeperGuid);
     }
     LOG_INFO("playerbots.dungeonclear",
              "[dungeon-clear] {} looted Hakkari Blood from Bloodkeeper {} (got={})",
-             bot->GetName(), keeper->GetGUID().ToString(), got);
+             bot->GetName(), keeperGuid.ToString(), got);
     return got;
 }
 

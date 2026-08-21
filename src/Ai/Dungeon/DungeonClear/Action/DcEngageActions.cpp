@@ -1155,7 +1155,7 @@ namespace
         if (step.escortDoneEntry &&
             bot->FindNearestCreature(step.escortDoneEntry, 250.0f, /*alive*/ true))
             return true;
-        if (step.escortDoneBit >= 0)
+        if (step.escortDoneBit >= 0 && step.escortDoneBit < 32)
         {
             InstanceScript* inst = DcTargeting::GetInstanceScript(bot);
             if (inst && (inst->GetCompletedEncounterMask() &
