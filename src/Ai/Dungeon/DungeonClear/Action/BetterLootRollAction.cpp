@@ -10,6 +10,8 @@
 #include "Playerbots.h"
 #include "RandomItemMgr.h"
 #include "StatsWeightCalculator.h"
+#include "WorldPacket.h"
+#include "WorldSession.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
 
 namespace
@@ -55,11 +57,27 @@ bool DungeonClearBetterLootRollAction::isUseful()
     return LootRollAction::isUseful();
 }
 
-bool DungeonClearBetterLootRollAction::Execute(Event event)
+namespace
 {
-    if (!DcSettings::GetBool(bot, "BetterLootRolling"))
-        return LootRollAction::Execute(event);
+    // Queue a loot-roll vote as a CMSG_LOOT_ROLL packet so the World thread
+    // processes it on its own update loop. Calling Group::CountRollVote
+    // directly from the MapUpdater worker thread corrupts the Roll's std::map
+    // when two bots roll concurrently — the root cause of the loot-roll
+    // SIGSEGV. QueuePacket defers the handler to World::UpdateSessions, where
+    // all Group mutations are safe.
+    void QueueLootRoll(Player* bot, ObjectGuid itemGuid, uint32 itemSlot,
+                       RollVote vote)
+    {
+        WorldPacket* p = new WorldPacket(CMSG_LOOT_ROLL, 8 + 4 + 1);
+        *p << itemGuid;
+        *p << itemSlot;
+        *p << uint8(vote);
+        bot->GetSession()->QueuePacket(p);
+    }
+}
 
+bool DungeonClearBetterLootRollAction::Execute(Event /*event*/)
+{
     Group* group = bot->GetGroup();
     if (!group)
         return false;
@@ -75,41 +93,58 @@ bool DungeonClearBetterLootRollAction::Execute(Event event)
         if (!proto)
             continue;
 
-        // Stock handles one pending roll per Execute, always the first; if
-        // that first roll is not the over-level case, defer it wholesale.
-        if (!IsFutureWearable(proto))
-            return LootRollAction::Execute(event);
+        RollVote vote;
 
-        int32 randomProperty = 0;
-        if (roll->itemRandomPropId)
-            randomProperty = roll->itemRandomPropId;
-        else if (roll->itemRandomSuffix)
-            randomProperty = -((int)roll->itemRandomSuffix);
-
-        RollVote vote = CalculateFutureVote(proto, randomProperty);
-
-        // Same post-processing as stock LootRollAction::Execute.
-        if (vote == NEED)
+        if (DcSettings::GetBool(bot, "BetterLootRolling") && IsFutureWearable(proto))
         {
-            if (sPlayerbotAIConfig.lootNeedRollLevel == 0 || RollUniqueCheck(proto, bot))
+            int32 randomProperty = 0;
+            if (roll->itemRandomPropId)
+                randomProperty = roll->itemRandomPropId;
+            else if (roll->itemRandomSuffix)
+                randomProperty = -((int)roll->itemRandomSuffix);
+
+            vote = CalculateFutureVote(proto, randomProperty);
+
+            if (vote == NEED)
+            {
+                if (sPlayerbotAIConfig.lootNeedRollLevel == 0 || RollUniqueCheck(proto, bot))
+                    vote = PASS;
+                else if (sPlayerbotAIConfig.lootNeedRollLevel == 1)
+                    vote = GREED;
+            }
+            else if (vote == GREED && !sPlayerbotAIConfig.lootGreedRollLevel)
                 vote = PASS;
-            else if (sPlayerbotAIConfig.lootNeedRollLevel == 1)
-                vote = GREED;
         }
-        else if (vote == GREED && !sPlayerbotAIConfig.lootGreedRollLevel)
-            vote = PASS;
+        else
+        {
+            // Stock vote calculation: ask ItemUsageValue what a real player
+            // would do, then apply the same post-processing. Inlined here
+            // (instead of calling LootRollAction::Execute) so the vote goes
+            // through QueueLootRoll instead of the thread-unsafe direct call.
+            ItemUsage usage = AI_VALUE2(ItemUsage, "item usage", proto->ItemId);
+            vote = (usage == ITEM_USAGE_EQUIP || usage == ITEM_USAGE_REPLACE) ? NEED : GREED;
+
+            if (vote == NEED)
+            {
+                if (sPlayerbotAIConfig.lootNeedRollLevel == 0 || RollUniqueCheck(proto, bot))
+                    vote = PASS;
+                else if (sPlayerbotAIConfig.lootNeedRollLevel == 1)
+                    vote = GREED;
+            }
+            else if (vote == GREED && !sPlayerbotAIConfig.lootGreedRollLevel)
+                vote = PASS;
+        }
 
         switch (group->GetLootMethod())
         {
             case MASTER_LOOT:
             case FREE_FOR_ALL:
-                group->CountRollVote(bot->GetGUID(), roll->itemGUID, PASS);
+                QueueLootRoll(bot, roll->itemGUID, roll->itemSlot, PASS);
                 break;
             default:
-                group->CountRollVote(bot->GetGUID(), roll->itemGUID, vote);
+                QueueLootRoll(bot, roll->itemGUID, roll->itemSlot, vote);
                 break;
         }
-        // One item at a time
         return true;
     }
 
