@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstddef>
 #include <mutex>
+#include <shared_mutex>
 #include <unordered_map>
 
 #include "Config.h"
@@ -24,12 +25,13 @@
 namespace
 {
     // Per-run override store, keyed by the run's leader-tank GUID. Values are
-    // stored as doubles already clamped/normalised by SetOverride. Accessed only
-    // from the map thread (config reads during the AI tick, and the addon hook's
-    // OnPlayerBeforeSendChatMessage, both run there), so no lock is needed — and
-    // the worker-thread centering path never reaches here because its keys are
-    // server-only (see GetRaw).
+    // stored as doubles already clamped/normalised by SetOverride. Read from the
+    // map-update worker threads during the AI tick and written from the World
+    // thread via the addon hook's OnPlayerBeforeSendChatMessage, so a
+    // shared_mutex guards all access: readers take a shared lock, writers take a
+    // unique lock.
     std::unordered_map<ObjectGuid, std::unordered_map<std::string, double>> g_overrides;
+    std::shared_mutex g_overridesMutex;
 
     std::string FullKey(char const* keySuffix)
     {
@@ -309,6 +311,7 @@ namespace
     {
         if (d.playerFacing && !owner.IsEmpty())
         {
+            std::shared_lock<std::shared_mutex> lock(g_overridesMutex);
             auto const runIt = g_overrides.find(owner);
             if (runIt != g_overrides.end())
             {
@@ -436,7 +439,10 @@ namespace DcSettings
         if (d->type != DcType::Float)
             v = std::round(v);
 
-        g_overrides[runOwner][d->key] = v;
+        {
+            std::unique_lock<std::shared_mutex> lock(g_overridesMutex);
+            g_overrides[runOwner][d->key] = v;
+        }
         LOG_DEBUG("playerbots.dungeonclear",
                   "DcSettings: override {} = {} for run {}", d->key, v,
                   runOwner.ToString());
@@ -445,6 +451,7 @@ namespace DcSettings
 
     void ResetOverride(ObjectGuid runOwner, std::string const& key)
     {
+        std::unique_lock<std::shared_mutex> lock(g_overridesMutex);
         auto const runIt = g_overrides.find(runOwner);
         if (runIt == g_overrides.end())
             return;
@@ -462,11 +469,13 @@ namespace DcSettings
 
     void ClearRun(ObjectGuid runOwner)
     {
+        std::unique_lock<std::shared_mutex> lock(g_overridesMutex);
         g_overrides.erase(runOwner);
     }
 
     bool HasOverride(ObjectGuid runOwner, char const* key)
     {
+        std::shared_lock<std::shared_mutex> lock(g_overridesMutex);
         auto const runIt = g_overrides.find(runOwner);
         if (runIt == g_overrides.end())
             return false;

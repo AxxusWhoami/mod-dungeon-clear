@@ -128,6 +128,8 @@ bool DungeonClearBetterLootRollAction::Execute(Event event)
             continue;
 
         ItemTemplate const* proto = sObjectMgr->GetItemTemplate(roll->itemid);
+        if (!proto)
+            continue;
         // Anything that is not the over-level case is stock's to answer, and
         // the pass below answers it — leave the vote unemitted for now.
         if (!IsFutureWearable(proto))

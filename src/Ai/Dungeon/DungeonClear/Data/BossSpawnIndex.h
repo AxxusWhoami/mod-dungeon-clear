@@ -19,11 +19,7 @@ public:
     static std::vector<DungeonBossInfo> const& Get(uint32 mapId, Difficulty difficulty);
 
 private:
-    static void EnsureBuilt();
-    static void Build();
-
-    static std::unordered_map<uint64, std::vector<DungeonBossInfo>> _store;
-    static bool _built;
+    static std::unordered_map<uint64, std::vector<DungeonBossInfo>> const& Store();
 
     static uint64 MakeKey(uint32 mapId, Difficulty difficulty)
     {

@@ -1763,11 +1763,14 @@ bool DungeonClearEngageActionBase::DriveUseItemOnGO(EventStep const& step)
         if (!DcMovement::DcMovementAllowed(botAI))
             return false;
         DcMovement::ResolveEscortConflict(bot);
-        bot->GetMotionMaster()->Clear();
-        bot->GetMotionMaster()->MovePoint(0, target->GetPositionX(), target->GetPositionY(),
+        if (MotionMaster* mm = bot->GetMotionMaster())
+        {
+            mm->Clear();
+            mm->MovePoint(0, target->GetPositionX(), target->GetPositionY(),
                                           target->GetPositionZ(), FORCED_MOVEMENT_NONE,
                                           0.0f, 0.0f, /*generatePath*/ true,
                                           /*forceDestination*/ true);
+        }
         return true;
     }
 
