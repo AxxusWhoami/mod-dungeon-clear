@@ -79,7 +79,7 @@ def host_allowed(cfg, header):
 
 
 def create_app(cfg, start_collectors=True):
-    from .routes import logs, plans, roster, runs, status
+    from .routes import logs, mappack, plans, roster, runs, status
 
     timelines = runs.TimelineStore()
     throttle = auth.LoginThrottle(cfg.login_max_attempts, cfg.login_window_s)
@@ -147,7 +147,7 @@ def create_app(cfg, start_collectors=True):
         return resp
 
     for r in (auth.router, status.router, runs.router, plans.router,
-              roster.router, logs.router):
+              roster.router, logs.router, mappack.router):
         app.include_router(r)
 
     # Vite emits content-hashed filenames under assets/, safe to cache

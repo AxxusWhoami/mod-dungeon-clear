@@ -1,8 +1,13 @@
-/* The home page and the golden path: pick a dungeon card, hit Start. The
- * drawer closes and you stay here — launching several dungeons in a row is
- * the common case, and Live is one click away when you want to watch. Plans
- * and roster launches are tabs in the same drawer so a tester never hunts for
- * a second form. */
+/* The home page and the golden path: pick a dungeon, hit Start. The drawer
+ * closes and you stay here — launching several dungeons in a row is the
+ * common case, and Live is one click away when you want to watch. Plans and
+ * roster launches are tabs in the same drawer so a tester never hunts for a
+ * second form.
+ *
+ * The catalogue is ~60 rows and growing, so the list is shelved: filter
+ * pills (expansion, or raids-only) over compact one-line rows grouped into
+ * titled sections. Raids always sit in their own sections — a raid launch
+ * fields a different party and is never picked by accident. */
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
@@ -10,7 +15,7 @@ import { api, ApiError } from "../api/client";
 import { usePoll } from "../api/hooks";
 import { startRosterRun, startRun } from "../api/launch";
 import type { Catalogue, CommandReply, Dungeon, SavedRoster } from "../api/types";
-import { QUALITY_CHOICES } from "../data/wow";
+import { EXPANSION_NAME, expansionOfRow, QUALITY_CHOICES } from "../data/wow";
 import {
   EmptyState,
   Field,
@@ -35,6 +40,42 @@ const MODE_HELP: Record<Mode, string> = {
   roster: "A saved party of real characters instead of pool bots.",
 };
 
+type Shelf = "all" | "classic" | "tbc" | "wotlk" | "raids";
+
+const SHELF_KEY = "tdeck.launch.shelf";
+const SHELVES: [Shelf, string][] = [
+  ["all", "All"],
+  ["classic", "Classic"],
+  ["tbc", "Burning Crusade"],
+  ["wotlk", "Wrath"],
+  ["raids", "Raids"],
+];
+
+const EXP_SHELF = ["classic", "tbc", "wotlk"] as const;
+
+/* Six buckets — dungeons and raids per expansion — rendered as titled
+ * sections. A shelf is a filter over the buckets, so "Classic" includes the
+ * classic raids and "Raids" spans every expansion, and either agrees with
+ * the section a row sits under on "All". */
+function sectionsFor(dungeons: Dungeon[], shelf: Shelf) {
+  const buckets: Dungeon[][] = [[], [], [], [], [], []];
+  for (const d of dungeons)
+    buckets[expansionOfRow(d) + (d.raid ? 3 : 0)].push(d);
+  const titles = [
+    ...EXPANSION_NAME,
+    ...EXPANSION_NAME.map((n) => `${n} — raids`),
+  ];
+  const order =
+    shelf === "all"
+      ? [0, 1, 2, 3, 4, 5]
+      : shelf === "raids"
+        ? [3, 4, 5]
+        : [EXP_SHELF.indexOf(shelf), EXP_SHELF.indexOf(shelf) + 3];
+  return order
+    .filter((i) => buckets[i].length)
+    .map((i) => ({ title: titles[i], items: buckets[i] }));
+}
+
 export default function LaunchPage() {
   const { data: catalogue, error } = usePoll(
     () => api.get<Catalogue>("/api/testdungeons"),
@@ -42,17 +83,49 @@ export default function LaunchPage() {
   );
   const status = useStatus();
   const [query, setQuery] = useState("");
+  const [shelf, setShelfState] = useState<Shelf>(() => {
+    const s = localStorage.getItem(SHELF_KEY);
+    return SHELVES.some(([v]) => v === s) ? (s as Shelf) : "all";
+  });
   const [selected, setSelected] = useState<Dungeon | null>(null);
 
-  const dungeons = useMemo(() => {
-    const all = catalogue?.dungeons ?? [];
-    const q = query.trim().toLowerCase();
-    if (!q) return all;
-    return all.filter(
-      (d) =>
-        d.name.toLowerCase().includes(q) || d.token.toLowerCase().includes(q),
-    );
-  }, [catalogue, query]);
+  function setShelf(v: Shelf) {
+    setShelfState(v);
+    setQuery("");
+    localStorage.setItem(SHELF_KEY, v);
+  }
+
+  const all = useMemo(() => catalogue?.dungeons ?? [], [catalogue]);
+  const q = query.trim().toLowerCase();
+
+  /* A typed search suspends the shelf filter — a tester hunting a name
+   * should not also have to remember which shelf it lives on. Picking a
+   * shelf pill clears the search, so the two never silently fight. */
+  const sections = useMemo(() => {
+    const matched = q
+      ? all.filter(
+          (d) =>
+            d.name.toLowerCase().includes(q) ||
+            d.token.toLowerCase().includes(q),
+        )
+      : all;
+    return sectionsFor(matched, q ? "all" : shelf);
+  }, [all, q, shelf]);
+
+  const counts = useMemo(() => {
+    const c: Record<Shelf, number> = {
+      all: all.length,
+      classic: 0,
+      tbc: 0,
+      wotlk: 0,
+      raids: 0,
+    };
+    for (const d of all) {
+      c[EXP_SHELF[expansionOfRow(d)]]++;
+      if (d.raid) c.raids++;
+    }
+    return c;
+  }, [all]);
 
   if (error) {
     return (
@@ -75,11 +148,11 @@ export default function LaunchPage() {
 
   return (
     <div>
-      <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
+      <div className="mb-4 flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="text-2xl font-semibold">Launch a test run</h1>
           <p className="mt-1 text-sm text-ink-400">
-            Pick a dungeon — a full 5-bot party spawns, clears it, and reports
+            Pick a dungeon — a full bot party spawns, clears it, and reports
             back.
           </p>
         </div>
@@ -91,38 +164,50 @@ export default function LaunchPage() {
         />
       </div>
 
-      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-        {dungeons.map((d) => (
+      <div className="mb-5 flex flex-wrap gap-1.5">
+        {SHELVES.map(([v, label]) => (
           <button
-            key={d.token + d.wing}
-            onClick={() => setSelected(d)}
-            className="group rounded-2xl border border-ink-800 bg-ink-900/60 p-4 text-left transition hover:border-iris-500/50 hover:bg-ink-900"
+            key={v}
+            type="button"
+            onClick={() => setShelf(v)}
+            className={`rounded-full border px-3 py-1.5 text-sm transition ${
+              shelf === v && !q
+                ? "border-iris-500/40 bg-iris-500/15 text-iris-100"
+                : "border-ink-800 bg-ink-900/60 text-ink-400 hover:border-ink-700 hover:text-ink-200"
+            }`}
           >
-            <div className="flex items-start justify-between gap-2">
-              <div className="font-medium text-ink-100 group-hover:text-iris-200">
-                {d.name}
-              </div>
-              <span className="rounded-full bg-ink-800 px-2 py-0.5 text-xs text-ink-400">
-                lv {d.level}
-              </span>
-            </div>
-            <div className="mt-1 flex items-center gap-2 text-xs text-ink-500">
-              <span className="font-mono">{d.token}</span>
-              {d.wing && <span>· {d.wing}</span>}
-              {d.heroicLevel > 0 && (
-                <span className="rounded bg-fuchsia-500/15 px-1.5 py-0.5 text-fuchsia-300">
-                  heroic
-                </span>
-              )}
-            </div>
+            {label}
+            <span
+              className={`ml-1.5 text-xs ${
+                shelf === v && !q ? "text-iris-300/70" : "text-ink-600"
+              }`}
+            >
+              {counts[v]}
+            </span>
           </button>
         ))}
-        {!dungeons.length && (
-          <div className="col-span-full">
-            <EmptyState icon="🔍" title={`No dungeon matches “${query}”`} />
-          </div>
-        )}
       </div>
+
+      {sections.map((s) => (
+        <section key={s.title} className="mb-6">
+          <h2 className="mb-2 flex items-baseline gap-2 text-xs font-semibold uppercase tracking-wider text-ink-500">
+            {s.title}
+            <span className="font-normal text-ink-600">{s.items.length}</span>
+          </h2>
+          <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2 xl:grid-cols-3">
+            {s.items.map((d) => (
+              <DungeonRow
+                key={d.token + d.wing}
+                d={d}
+                onPick={() => setSelected(d)}
+              />
+            ))}
+          </div>
+        </section>
+      ))}
+      {!sections.length && (
+        <EmptyState icon="🔍" title={`No dungeon matches “${query}”`} />
+      )}
 
       {selected && (
         <LaunchDrawer
@@ -132,6 +217,37 @@ export default function LaunchPage() {
         />
       )}
     </div>
+  );
+}
+
+/* One line per dungeon: name, token, a heroic marker, and the level (raids
+ * show their party size instead — level 60/70/80 says less about a raid than
+ * how many bots it fields). The old two-line cards made 58 rows into three
+ * screens of scrolling. */
+function DungeonRow({ d, onPick }: { d: Dungeon; onPick: () => void }) {
+  return (
+    <button
+      onClick={onPick}
+      className="group flex items-center gap-2 rounded-xl border border-ink-800 bg-ink-900/60 px-3 py-2 text-left transition hover:border-iris-500/50 hover:bg-ink-900"
+    >
+      <span className="min-w-0 flex-1 truncate text-sm font-medium text-ink-100 group-hover:text-iris-200">
+        {d.name}
+      </span>
+      <span className="hidden shrink-0 font-mono text-xs text-ink-600 group-hover:text-ink-500 sm:inline">
+        {d.token}
+      </span>
+      {d.heroicLevel > 0 && (
+        <span
+          title={`Heroic · lv ${d.heroicLevel}`}
+          className="shrink-0 rounded bg-fuchsia-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-fuchsia-300"
+        >
+          H
+        </span>
+      )}
+      <span className="shrink-0 rounded-full bg-ink-800 px-2 py-0.5 text-xs tabular-nums text-ink-400">
+        {d.raid && d.defaultSize ? `${d.defaultSize}-man` : `lv ${d.level}`}
+      </span>
+    </button>
   );
 }
 
@@ -183,6 +299,12 @@ function LaunchDrawer({
      box means "the default", which for all four of these is 0. */
   const [levelText, setLevelText] = useState("");
   const [seedText, setSeedText] = useState("");
+  /* Raid rows only: party size, prefilled with the catalogue's default so a
+     bare launch fields the size the raid plan expects. Blank = classic 5-man
+     comp (still legal on a raid map — the harness raid-groups any size). */
+  const [sizeText, setSizeText] = useState(
+    dungeon.raid && dungeon.defaultSize ? String(dungeon.defaultSize) : "",
+  );
   const [ilvl, setIlvl] = useState(0);
   const [quality, setQuality] = useState(0);
   const [totalText, setTotalText] = useState("5");
@@ -195,6 +317,9 @@ function LaunchDrawer({
 
   const level = Number(levelText || 0);
   const seed = Number(seedText || 0);
+  const size = dungeon.raid ? Number(sizeText || 0) : 0;
+  const sizeMin = dungeon.sizeMin ?? 2;
+  const sizeMax = dungeon.sizeMax ?? 40;
   const total = Number(totalText);
   const concurrent = Number(concurrentText);
 
@@ -208,6 +333,8 @@ function LaunchDrawer({
   const maxConcurrent = catalogue.limits?.maxConcurrent || 0;
 
   const levelOk = level <= 80;
+  const sizeOk =
+    size === 0 || (Number.isInteger(size) && size >= sizeMin && size <= sizeMax);
   const totalOk = /^\d+$/.test(totalText) && total >= 1 && (!maxTotal || total <= maxTotal);
   const concurrentOk =
     /^\d+$/.test(concurrentText) && (!maxConcurrent || concurrent <= maxConcurrent);
@@ -215,6 +342,7 @@ function LaunchDrawer({
   const canLaunch =
     busy === null &&
     levelOk &&
+    sizeOk &&
     (mode !== "roster" || !!rosterName) &&
     (mode !== "plan" || planOk);
 
@@ -248,6 +376,7 @@ function LaunchDrawer({
           heroic,
           level,
           seed,
+          size,
           ilvl,
           quality,
         });
@@ -267,7 +396,7 @@ function LaunchDrawer({
       }
 
       const outcome = await startRun(
-        { dungeon: dungeon.token, heroic, level, seed, ilvl, quality },
+        { dungeon: dungeon.token, heroic, level, seed, size, ilvl, quality },
         (attempt, of) => {
           setBusy(`driver logging in — retrying (${attempt}/${of})…`);
           setPendingNote(
@@ -441,6 +570,25 @@ function LaunchDrawer({
             </>
           ) : (
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              {dungeon.raid && (
+                <Field
+                  label="Raid size"
+                  hint={
+                    `${sizeMin}–${sizeMax}` +
+                    (dungeon.sizePresets?.length
+                      ? ` · presets ${dungeon.sizePresets.join("/")}`
+                      : "") +
+                    " · blank = 5-man comp"
+                  }
+                >
+                  <NumberBox
+                    value={sizeText}
+                    onChange={setSizeText}
+                    invalid={!sizeOk}
+                    placeholder={String(dungeon.defaultSize ?? 10)}
+                  />
+                </Field>
+              )}
               <Field label="Bot level" hint="blank = dungeon default">
                 <NumberBox
                   value={levelText}

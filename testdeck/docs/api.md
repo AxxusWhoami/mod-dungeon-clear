@@ -45,9 +45,11 @@ forces `ONLINE`. `health.problems` is the config-validation banner. Cached 5s.
 ## Catalogue
 
 `GET /api/testdungeons` → the module's `dc_test_dungeons.json` verbatim:
-`{limits, gearDefaults, qualities, dungeons:[{token, name, mapId, level,
-heroicLevel, wing, gear:[{ilvl,label}], gearHeroic?}]}`. Empty shape until the
-worldserver has written it.
+`{limits, gearDefaults, qualities, dungeons:[{token, name, mapId, expansion,
+level, heroicLevel, wing, gear:[{ilvl,label}], gearHeroic?}]}`. Empty shape
+until the worldserver has written it. `expansion` is Map.dbc's own id (0
+classic, 1 TBC, 2 WotLK), so the UI shelves rows by the server's client build
+instead of its own map-id table.
 
 ## Runs
 
@@ -84,3 +86,30 @@ worldserver has written it.
 |---|---|
 | `GET /api/logs` | `*.log` files in the server's `log_dir` |
 | `GET /api/logs/stream?file=X&lines=200` | SSE: one `lines` batch, then `line` events; `--- rotated ---` marker on truncation; 15s keepalives |
+
+## Dungeon map pack
+
+Generated per host by `python3 -m testdeck mappack`; the Live page draws bot
+positions on it. Absent is an ordinary state — the routes say so rather than
+leaving the UI to guess.
+
+| Route | Notes |
+|---|---|
+| `GET /api/mappack` | `{available, generated, usable, maps[]}`, or `{available: false, reason}` naming the command that builds one |
+| `GET /api/mappack/{mapId}` | One map: `{mapId, name, kind, floors[], floorRule?}`; 404 when the pack has no art for it. `floorRule.chunks` is **stripped** — it is most of a full manifest's ~230 KB and is meaningless without a WMO group |
+| `GET /api/mappack/img/{mapId}/{floor}` | The floor image (WebP by default). Path is resolved-then-contained against the pack directory |
+
+Each floor carries the world rect (`minX/maxX` are world **X**, north, and drive
+the *vertical* image axis; `minY/maxY` are world **Y**, west, horizontal) and a
+ready-made affine:
+
+```
+px = ax*worldX + bx*worldY + cx
+py = ay*worldX + by*worldY + cy      # in a w x h image
+```
+
+Pick a floor by rect containment first, using `floorRule.zsteps` (Blizzard's own
+`DungeonMapChunk` MinZ thresholds, ascending) only to break a tie between floors
+whose rects both contain the position. `pick_floor()` in `testdeck/mappack.py`
+is the reference implementation. A position on no floor is a real answer, not a
+failure.

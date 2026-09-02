@@ -281,6 +281,19 @@ public:
     }
 };
 
+// Per-bot heartbeat stamp (see DcTickHeartbeat). Deliberately NOT a field on
+// DcApproachState: that struct is wholesale wiped by Reset() on dc on/off, death
+// and every pull interrupt, and a heartbeat a run-state reset can zero would
+// report "never ticked" for a bot that is ticking perfectly well.
+class DungeonClearLastTickMsValue : public ManualSetValue<uint32>
+{
+public:
+    DungeonClearLastTickMsValue(PlayerbotAI* botAI)
+        : ManualSetValue<uint32>(botAI, 0u, DcKey::LastTickMs)
+    {
+    }
+};
+
 // The per-approach stuck/recovery counters and give-up latches that used to
 // live in five loose values — the consecutive-rebuild count, the loot-yield
 // commit anchor, the path-ends-short escalation counter, and the direct-pursuit

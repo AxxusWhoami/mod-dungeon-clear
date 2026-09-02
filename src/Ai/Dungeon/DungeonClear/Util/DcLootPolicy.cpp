@@ -57,6 +57,23 @@
 #include "Ai/Dungeon/DungeonClear/Value/DungeonClearLiveBossValue.h"
 #include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
+namespace
+{
+    // The loot this bot would commit to NEXT: stock's chosen target when it has
+    // one, else the nearest thing in the available stack. One body, so the
+    // "is there anything to judge?" guard and the drain loop below can never
+    // disagree about what the next pickup is (they are the same question).
+    LootObject NextLootCandidate(AiObjectContext* ctx)
+    {
+        LootObject target = ctx->GetValue<LootObject>(DcKey::Stock::LootTarget)->Get();
+        if (target.guid.IsEmpty())
+            if (LootObjectStack* stack =
+                    ctx->GetValue<LootObjectStack*>(DcKey::Stock::AvailableLoot)->Get())
+                target = stack->GetLoot(sPlayerbotAIConfig.lootDistance);
+        return target;
+    }
+}
+
 void DcLootPolicy::StripSkippedLoot(PlayerbotAI* botAI)
 {
     if (!botAI)
@@ -189,6 +206,18 @@ bool DcLootPolicy::MaybeSkipUnworthyLoot(PlayerbotAI* botAI)
     Player* bot = botAI->GetBot();
     AiObjectContext* ctx = botAI->GetAiObjectContext();
 
+    // NOTHING TO JUDGE -> don't resolve the settings. This runs unconditionally at
+    // the top of every follow-tank / advance tick of every bot, and the common case
+    // by far is a bot with no loot in range at all. Each DcSettings read below
+    // costs a registry scan plus a run-owner resolve (FindLeaderTank: a
+    // process-wide mutex and an ObjectAccessor lookup) — paid, before this guard,
+    // on every tick that had nothing to do. The peek is exactly the resolve the
+    // loop's first iteration would perform, so the guard is free and the outcome
+    // ("no target -> break -> return false") is unchanged.
+    LootObject target = NextLootCandidate(ctx);
+    if (target.guid.IsEmpty())
+        return false;
+
     uint32 const minQuality = DcSettings::GetUInt(bot, "LootMinQuality");
     // When set, the tank never stops for chests (or any other world object) —
     // only creature corpses are worth a detour. Default on: chests routinely
@@ -215,10 +244,10 @@ bool DcLootPolicy::MaybeSkipUnworthyLoot(PlayerbotAI* botAI)
     constexpr int kMaxDrain = 32;
     for (int i = 0; i < kMaxDrain; ++i)
     {
-        LootObject target = ctx->GetValue<LootObject>(DcKey::Stock::LootTarget)->Get();
-        if (target.guid.IsEmpty())
-            if (LootObjectStack* stack = ctx->GetValue<LootObjectStack*>(DcKey::Stock::AvailableLoot)->Get())
-                target = stack->GetLoot(sPlayerbotAIConfig.lootDistance);
+        // i == 0 reuses the candidate the guard above already resolved (the same
+        // call, so the loop is unchanged); later passes re-resolve after a skip.
+        if (i)
+            target = NextLootCandidate(ctx);
         if (target.guid.IsEmpty())
             break;  // nothing left to judge
 

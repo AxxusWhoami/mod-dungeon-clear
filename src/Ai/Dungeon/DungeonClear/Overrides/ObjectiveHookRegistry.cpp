@@ -6,7 +6,6 @@
 #include "ObjectiveHookRegistry.h"
 
 #include <atomic>
-#include <unordered_map>
 #include <utility>
 
 #include "Creature.h"
@@ -26,9 +25,14 @@
 #include "WorldPacket.h"
 #include "WorldSession.h"
 #include "PlayerbotAI.h"
+
+#include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 #include "Playerbots.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
+#include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcFormGate.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcMovement.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcPlayerbotCompat.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTargeting.h"
 
 namespace
@@ -44,6 +48,15 @@ namespace
     // at_ring_of_law for real (which itself honours the 2-minute post-wipe
     // cooldown and no-ops if already started). Done once the encounter is at
     // least IN_PROGRESS; Running (and re-fires, harmlessly idempotent) until then.
+    //
+    // It is ALSO the arena's RESTART: the event's garrison step re-runs it every
+    // tick while holding (.WhileHolding, see BlackrockDepthsEvents). The state is
+    // not monotonic — npc_grimstone's 30s "no summon has a victim" watchdog
+    // SetData(FAIL)s back to NOT_STARTED and despawns everything — and this is the
+    // only thing that notices. The re-fire during the core's 2-minute post-fail
+    // cooldown is a no-op it drops on the floor, which is what makes "just fire it
+    // every tick" the right shape here: no cooldown bookkeeping of our own to keep
+    // in step with the core's.
     constexpr uint32 BRD_TYPE_RING_OF_LAW = 1;  // DataTypes::TYPE_RING_OF_LAW
     constexpr uint32 BRD_RING_IN_PROGRESS = 1;  // EncounterState::IN_PROGRESS
     constexpr uint32 BRD_RING_OF_LAW_TRIGGER = 1526;
@@ -66,6 +79,16 @@ namespace
         p << uint32(BRD_RING_OF_LAW_TRIGGER);
         p.rpos(0);
         bot->GetSession()->HandleAreaTriggerOpcode(p);
+
+        // Log the fire that TOOK, not every fire: while the encounter refuses to
+        // start (out of the trigger radius, or inside the core's post-fail
+        // cooldown) this runs every tick, and one line per start is the whole
+        // signal — a second one in a run means the arena reset and was restarted.
+        if (inst->GetData(BRD_TYPE_RING_OF_LAW) >= BRD_RING_IN_PROGRESS)
+            LOG_INFO("playerbots.dungeonclear",
+                     "[DC:{}] Ring of Law started by forged areatrigger {} at ({:.1f},{:.1f},{:.1f})",
+                     bot->GetName(), BRD_RING_OF_LAW_TRIGGER, bot->GetPositionX(),
+                     bot->GetPositionY(), bot->GetPositionZ());
         return ObjectiveArriveResult::Running;
     }
 
@@ -398,6 +421,210 @@ namespace
         return ObjectiveArriveResult::Done;
     }
 
+    // --- The Underbog: SendGhazanToPlatform (hook id 10) ------------------
+    // Ghaz'an (18105) spawns in the lake and swims DB waypoint path 1383920 —
+    // every node between z 32 and z 47, i.e. underwater. The ONLY thing that
+    // moves him out is at_underbog_ghazan (areatrigger 4302), whose
+    // ACTION_MOVE_TO_PLATFORM starts path 1383921 up the ramp onto his platform
+    // at (256.28, -458.73, 81.37). Same class as the Ring of Law / Zum'rah /
+    // Nethekurse bugs: a bot never sends CMSG_AREATRIGGER on its own.
+    //
+    // DcTestAreaTriggers relays that packet now, so this is the BACKSTOP, not
+    // the primary path — 4302's radius is only 10yd and map 546 has no
+    // hand-authored route hints, so a party can path around the volume. If it
+    // does, the boss anchor points at an empty platform and the run stalls.
+    //
+    // Fire the same DoAction the areatrigger script fires. It carries its own
+    // `_movedToPlatform` guard, so when the relay already worked this is a
+    // no-op — and the event's predicate has usually already read him as up and
+    // never called us at all. Driven by the Conditional + Repeatable "Send
+    // Ghaz'an up to his platform" event (UnderbogEvents), whose predicate is the
+    // deadlock signature: alive and still below the ramp.
+    //
+    // Logged at INFO for the same reason WakeZumrah is: this is the one place an
+    // Underbog second-boss stall gets fixed silently, and it also tells us
+    // whether the relay is doing its job — a run that logs this fired the
+    // backstop, which means the route missed AT 4302.
+    constexpr uint32 UB_GHAZAN = 18105;
+    constexpr int32 UB_ACTION_MOVE_TO_PLATFORM = 1;  // boss_ghazan.cpp
+    // Matches the event predicate's band: his patrol tops out at z 46.8 and the
+    // ramp's first dry node is z 74.7, so the gap is unambiguous.
+    constexpr float UB_GHAZAN_WATER_Z = 60.0f;
+
+    ObjectiveArriveResult SendGhazanToPlatform(Player* bot, AiObjectContext* context,
+                                               DungeonBossInfo const& /*info*/)
+    {
+        // Map-wide and already resolved this tick by the event's own predicate —
+        // see UbGhazanStillInTheLake for why this is not a radius scan.
+        Creature* ghazan = DcTargeting::GetLiveBoss(bot, context, UB_GHAZAN);
+        if (!ghazan || !ghazan->IsAlive())
+            return ObjectiveArriveResult::Done;  // gone/dead — nothing to send
+
+        // Already climbing or up (the relay fired, or a human's client tripped
+        // AT 4302). Height, not a flag: the AI's own _movedToPlatform is private
+        // and his z is the thing we actually care about.
+        if (ghazan->GetPositionZ() >= UB_GHAZAN_WATER_Z)
+            return ObjectiveArriveResult::Done;
+
+        ghazan->AI()->DoAction(UB_ACTION_MOVE_TO_PLATFORM);
+        LOG_INFO("playerbots.dungeonclear",
+                 "DungeonClear: The Underbog — sent Ghaz'an ({}) up to his platform for {} "
+                 "(the route missed area trigger 4302, so he was still in the lake at z {:.1f})",
+                 UB_GHAZAN, bot->GetName(), ghazan->GetPositionZ());
+        // Done even if the action did not take: the Repeatable event's predicate
+        // still reads him below the ramp next tick and re-fires this hook.
+        return ObjectiveArriveResult::Done;
+    }
+
+    // --- Azjol-Nerub: HadronoxHasWebbedTheDoors (hook id 13) --------------
+    // A WAIT, not an action — the one hook here that does nothing to the world.
+    //
+    // Hadronox's add swarm is infinite: three world triggers (23472) summoned in
+    // her Reset() carry periodic summon auras that keep firing for as long as
+    // the encounter is not done, and every add she kills while it carries her
+    // Leech Poison heals her 10% of max HP. The only off-switch is
+    // EVENT_HADRONOX_MOVE3 — gated on every Anub'ar Crusher (28922) being dead,
+    // scheduled 70s after the pull, and re-checked every 2s — which walks her up
+    // to (530.4, 560.0, 733.2) and casts Web Front Doors (53177) on arrival.
+    //
+    // Killing the crushers therefore only makes the web ELIGIBLE. The clear has
+    // to keep the party on the platform until it has actually happened, or boss
+    // navigation takes the tank down to meet her mid-climb while the swarm is
+    // still pouring in.
+    //
+    // `_doorsWebbed` is private and has exactly one exposure: boss_hadronox::
+    // GetData(me->GetEntry()), the 'Hadronox Denied' achievement probe, which
+    // returns 0 once the doors are webbed and 1 while they are open. Read it
+    // with her OWN entry — any other id falls through to the same `return 0`
+    // and would read as "webbed" from the first tick.
+    constexpr uint32 AN_HADRONOX = 28921;
+
+    ObjectiveArriveResult HadronoxHasWebbedTheDoors(Player* bot, AiObjectContext* context,
+                                                    DungeonBossInfo const& /*info*/)
+    {
+        // Map-wide, like the Underbog's Ghaz'an probe: she spends the whole
+        // event walking a 120yd lap between z 695 and z 733 and a radius scan
+        // would lose her halfway through it.
+        Creature* hadronox = DcTargeting::GetLiveBoss(bot, context, AN_HADRONOX);
+        if (!hadronox || !hadronox->IsAlive() || !hadronox->AI())
+            return ObjectiveArriveResult::Done;  // dead/gone — nothing left to wait for
+
+        return hadronox->AI()->GetData(AN_HADRONOX) == 0 ? ObjectiveArriveResult::Done
+                                                         : ObjectiveArriveResult::Running;
+    }
+
+    // --- Drak'Tharon Keep: HoldNovosCamp (hook id 14) ---------------------
+    // The whole of Novos' phase 1, and the ONLY step of map 600's conditional
+    // event 1. Like the Black Morass wave driver it re-decides from live world
+    // state every tick rather than walking a step list, because what the
+    // encounter needs is not a sequence but a standing position preference held
+    // under continuous fire. The dungeon-side reasoning — why a camp, why THIS
+    // camp, what the gate is — lives in DrakTharonKeepEvents.cpp; this is the
+    // mechanism.
+    //
+    // THREE THINGS CAN GO WRONG POSITIONALLY, and the hook is one test per:
+    //
+    //  1. THE ARCANE FIELD. 47346 is a PERSISTENT_AREA_AURA at Novos' feet,
+    //     11.0yd, 1665 damage per second, for the whole of phase 1. The tank
+    //     lands the pull IN it and the corpse stream keeps giving it reasons to
+    //     drift back north. The DcHazardRegistry row and its vacate rung already
+    //     push every bot out; this pushes the LEADER specifically, on the tick
+    //     the driver owns, so the two agree rather than take turns.
+    //  2. THE STAIRCASE. Every Risen Shadowcaster and Hulking Corpse of the phase
+    //     is left standing, passive but hostile, at the spawn trigger 45yd up the
+    //     stairs (56yd from the camp). A clear that wanders down there is off the
+    //     80yd leash and out of the fight.
+    //  3. ORDINARY DRIFT. The corpses arrive 15yd south of the camp and the
+    //     handlers walk in from the room's corners, so a tank that simply chases
+    //     its current victim ends the phase somewhere else entirely.
+    //
+    // AND ONE THING MUST NOT GO WRONG: the tank must still FIGHT. This hook runs
+    // above the stock combat movers (DcRel::EventDueCombat), and Engine::
+    // DoNextAction runs exactly ONE action per tick, so a driver that returns
+    // Running every tick starves the rotation outright — no target, no swing, no
+    // threat. That is how Black Morass wiped parties. Hence: Done is the DEFAULT
+    // answer here, and Done means "nothing to steer, take your tick back"
+    // (DungeonEvent::stepsOwnMovement makes DcRunEventAction yield on it).
+    //
+    // The melee-contact exemption is the same idea one step down. Between the
+    // 6yd leash and the 25yd hard leash the tank is left alone WHILE it is
+    // actually swinging at something, so the driver never yanks it off a corpse
+    // it is holding at the stairs' foot; the exemption stops the moment the
+    // victim dies or walks away.
+    //
+    // NO isMoving() GUARD, deliberately — the trap the Black Morass driver
+    // documents. In combat the bot is essentially always moving under MoveChase,
+    // so `if (isMoving()) return;` would make this a no-op for the entire
+    // encounter. The re-issue floor below is what keeps re-taking the tick from
+    // becoming spline spam instead.
+    //
+    // The camp, the scan radius, the Arcane Field keep-out and the two leashes
+    // are all DcDrakTharonKeep (Data/Events/DungeonEventTables.h) — shared with
+    // the event that drives this hook, and with t/TestDcHazard, which pins the
+    // camp against the 47346 row's own keep-out cylinder. One definition each.
+    //
+    // Same-destination re-issue floor. The camp is ONE fixed point, so unlike the
+    // Black Morass there is no "which portal" question to answer — this exists
+    // purely so a MoveChase that stomps our point-move is recovered from promptly
+    // without re-pathing every tick.
+    constexpr uint32 DTK_REISSUE_MS = 1000;
+
+    ObjectiveArriveResult HoldNovosCamp(Player* bot, AiObjectContext* context,
+                                        DungeonBossInfo const& /*info*/)
+    {
+        Creature* novos = bot->FindNearestCreature(DcDrakTharonKeep::NOVOS,
+                                                   DcDrakTharonKeep::NOVOS_SCAN, /*alive*/ true);
+        if (!novos)
+            return ObjectiveArriveResult::Done;  // dead / out of the room — nothing to hold for
+
+        // The encounter's own phase bit: set by JustEngagedWith, cleared in the
+        // same statement that starts phase 2. Once it is gone the pool is gone
+        // with it (47346 is channeled and the phase flip interrupts it), so melee
+        // must be free to close on him.
+        if (!novos->HasUnitFlag(UNIT_FLAG_NOT_SELECTABLE))
+            return ObjectiveArriveResult::Done;
+
+        float const toCamp = bot->GetExactDist2d(DcDrakTharonKeep::CAMP_X, DcDrakTharonKeep::CAMP_Y);
+        bool const inField = bot->GetExactDist2d(novos) < DcDrakTharonKeep::FIELD_KEEPOUT;
+
+        bool inMelee = false;
+        if (Unit* victim = bot->GetVictim())
+            inMelee = victim->IsAlive() && bot->IsWithinMeleeRange(victim);
+
+        if (!inField && toCamp <= DcDrakTharonKeep::CAMP_HARD_LEASH &&
+            (toCamp <= DcDrakTharonKeep::CAMP_LEASH || inMelee))
+            return ObjectiveArriveResult::Done;  // in position — hand the tick back
+
+        // Throttled re-issue. A point move inside one chamber is at most ~56yd
+        // (the stairs), well inside what MovePoint's PathGenerator delivers, so
+        // there is no long-haul spline branch to take here.
+        // On the bot's own run state — see Util/DcThrottle.h for why not in a
+        // file-scope thread_local map keyed by GUID.
+        if (DcRun::Of(context).Throttled(DcThrottle::DtkCampIssue, DTK_REISSUE_MS))
+            return ObjectiveArriveResult::Running;  // still walking home
+
+        // Drop any escort glide first: a coast-past from the advance ladder is
+        // aimed somewhere else entirely and would ride out over this point move.
+        DcMovement::ResolveEscortConflict(bot);
+        bot->GetMotionMaster()->MovePoint(0, DcDrakTharonKeep::CAMP_X,
+                                          DcDrakTharonKeep::CAMP_Y, DcDrakTharonKeep::CAMP_Z,
+                                          FORCED_MOVEMENT_NONE, 0.0f, 0.0f,
+                                          /*generatePath*/ true, false);
+
+        static uint32 lastHoldLog = 0;
+        if (!lastHoldLog || GetMSTimeDiffToNow(lastHoldLog) > 10000)
+        {
+            lastHoldLog = getMSTime();
+            LOG_DEBUG("playerbots.dungeonclear",
+                      "DungeonClear: Drak'Tharon Keep — walking {} back to the Novos camp "
+                      "({:.1f}yd out, {:.1f}yd from Novos{})",
+                      bot->GetName(), toCamp, bot->GetExactDist2d(novos),
+                      inField ? ", INSIDE the Arcane Field" : "");
+        }
+
+        return ObjectiveArriveResult::Running;
+    }
+
     // --- Old Hillsbrad: GrantIncendiaryBombs (hook id 3) ------------------
     // Brazen (18725) only offers his drake ride to Durnholde Keep when the player
     // HOLDS the Pack of Incendiary Bombs (item 25853) — gossip menu 7959 option 0
@@ -455,17 +682,19 @@ namespace
     constexpr float  MECH_CACHE_CAST_REACH = 4.0f;
 
     // True if a real human is in the leader's party (or is the lone actor). A member
-    // counts as human when it has no PlayerbotAI, or a PlayerbotAI whose master
-    // is itself (a self-bot) — both are someone who will walk up and loot the
-    // cache. A pure bot (PlayerbotAI, not a real player) does not.
+    // counts as human when it has no PlayerbotAI at all, or is a self-bot — both
+    // are someone who will walk up and loot the cache. A pure bot (a PlayerbotAI
+    // driven for somebody else) does not.
     bool PartyHasRealPlayer(Player* bot)
     {
         auto const isHuman = [](Player* p) -> bool
         {
-            if (!p)
-                return false;
-            PlayerbotAI* ai = GET_PLAYERBOT_AI(p);
-            return !ai || ai->GetMaster() == p;
+            // Pre-PR-2592 this read `!ai || ai->IsRealPlayer()`. That member is
+            // gone, and the free IsRealPlayer() which inherited the NAME covers
+            // only the first half of it — no bot AI at all. The second half, the
+            // self-bot, is IsSelfBot(). Writing IsRealPlayer(p) alone here would
+            // compile and quietly stop counting the self-bot as human.
+            return DcPlayerbotCompat::IsHumanControlled(p);
         };
 
         Group* group = bot->GetGroup();
@@ -576,12 +805,19 @@ namespace
             Reg::AddHook(t, 6, &DriveMellicharWaves);    // Arcatraz — poke Mellichar, hold through the waves
             Reg::AddHook(t, 7, &DriveAnzuSummon);        // Sethekk Halls — force-summon Anzu (send-event 14797)
             Reg::AddHook(t, 9, &StartNethekurseIntro);   // Shattered Halls — fire Nethekurse's client-only intro
+            Reg::AddHook(t, 10, &SendGhazanToPlatform);  // The Underbog — send Ghaz'an up his ramp (AT 4302)
+            Reg::AddHook(t, 13, &HadronoxHasWebbedTheDoors);  // Azjol-Nerub — hold until Hadronox webs the doors
+            Reg::AddHook(t, 14, &HoldNovosCamp);         // Drak'Tharon Keep — hold the Novos camp through phase 1
 
             // Controllers, one TU each. Called explicitly (not self-registering)
             // because this module is a static lib: a TU whose only output is
             // constructor side-effects has no referenced symbol and the linker
             // drops it, taking its hooks with it. Ids 8 and 12 live here.
             RegisterBlackMorassHooks(t);
+            RegisterVioletHoldHooks(t);
+            RegisterBlackwingLairHooks(t);
+            RegisterHallsOfStoneHooks(t);
+            RegisterHallsOfLightningHooks(t);
             return t;
         }();
         return kHooks;

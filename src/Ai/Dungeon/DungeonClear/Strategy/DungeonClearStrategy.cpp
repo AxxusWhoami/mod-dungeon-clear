@@ -5,6 +5,8 @@
 
 #include "DungeonClearStrategy.h"
 
+#include "Ai/Dungeon/DungeonClear/Data/DcTargetExclusionRegistry.h"
+#include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 #include "Ai/Dungeon/DungeonClear/Multiplier/DungeonClearMultiplier.h"
 #include "Ai/Dungeon/DungeonClear/Strategy/DcRelevance.h"
 #include "Playerbots.h"
@@ -21,9 +23,10 @@ void DungeonClearStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
         "dungeon clear all cleared",
         { NextAction("dungeon clear disable on cleared", DcRel::AllCleared) }));
 
-    // Stranded-member recovery failsafe (leader-only, non-combat). When the run
+    // Stranded-member recovery failsafe (single-owner, non-combat). When the run
     // has frozen for the configured window with a bot member stuck out of range
-    // (fell under the world / wedged), teleport the strays to the tank. Relevance
+    // (fell under the world / wedged), teleport the strays to the tank — or, when
+    // the tank is a corpse, to the corpse, so the rez has a party standing over it. Relevance
     // 42 sits above the whole leader driving ladder — which, by definition, has
     // been failing to progress for minutes — so the rescue wins the tick its
     // narrow trigger arms; it is inert otherwise. See DungeonClearRecoverStranded
@@ -254,6 +257,40 @@ void DungeonClearStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
         "dungeon clear break stuck combat",
         { NextAction("dungeon clear break stuck combat", DcRel::BreakStuckCombat) }));
 
+    // Pull maneuver, NON-combat side — a LIVENESS NET, not a second driver.
+    //
+    // Every watchdog the maneuver owns — the tag-leg and return-leg timeouts, the
+    // CC abort, the turn-and-plant debounce, the arrive-at-camp release — is
+    // evaluated INSIDE DungeonClearPullManeuverAction::Execute. So they only exist
+    // on ticks where that action actually runs, and while the trigger was
+    // combat-only that meant "only while the tank is on the combat engine". The
+    // hatch above recovers a bot with NOTHING to fight; this covers the other half,
+    // where the fight is entirely real and the tank has simply been moved off the
+    // engine that steers it.
+    //
+    // Which is exactly what an LOS-break pull does to itself: the camp is chosen so
+    // the tank cannot see the mob it tagged, and that is InvalidTargetValue's
+    // out-of-LOS clause, so stock `drop target` (99) flips the tank to this engine
+    // mid-drag. DungeonClearCombatMultiplier now suppresses that drop, but the
+    // suppression is a prevention and this is the backstop: ANY future path onto the
+    // non-combat engine mid-maneuver would otherwise re-freeze the FSM in a holding
+    // phase with no clock running at all. Live before the fix
+    // (tp-20260815-162044-2, Deadmines workshop): phase pinned at Returning for
+    // 130-215s across three runs, zero log lines emitted, party passive at camp,
+    // nobody below 100% HP — a 10s return-leg watchdog sat unreachable the whole time.
+    //
+    // Contention: none. The non-combat pull DRIVER ("dungeon clear pull", 35) gates
+    // on !IsInCombat for every non-Idle phase and this trigger requires
+    // IsInCombat(), so the two are partitioned by the combat flag and can never be
+    // armed on the same tick. 60 sits above HazardVacate (55) — a maneuver in
+    // flight outranks stepping off a pulse — and below BreakStuckCombat (65), which
+    // is inert whenever anything is fightable. Same node as the combat side: every
+    // gate (leader-only, run enabled, pull mode, holding phase) lives in the
+    // trigger, so this widens WHERE the maneuver can be ticked, not WHEN.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear pull maneuver",
+        { NextAction("dungeon clear pull maneuver", DcRel::PullManeuver) }));
+
     // Hazard vacate, NON-combat side — the essential half. After the party kills
     // an Arcatraz Sentinel, the Destroyed Sentinel (21761) summon pulses 15yd/1s
     // at the corpse and combat usually drops (it is NOT_SELECTABLE, so it does not
@@ -266,6 +303,62 @@ void DungeonClearStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
     triggers.push_back(new TriggerNode(
         "dungeon clear hazard vacate",
         { NextAction("dungeon clear hazard vacate", DcRel::HazardVacate) }));
+
+    // Razorgore's orb runner (Blackwing Lair only, one elected member). Registered
+    // in BOTH engines: the walk to the ledge starts before the raid pulls and has
+    // to survive the pull, and the click itself can land either side of the combat
+    // flag. Inert everywhere else — the trigger's first test is the map id. See
+    // DungeonClearRazorgoreOrbTrigger.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear razorgore orb",
+        { NextAction("dungeon clear razorgore orb", DcRel::RazorgoreOrb) }));
+
+    // The raid's half of the same encounter, NON-combat side. It used to be
+    // combat-only, on the reasoning that out of combat the walk-in and the raid
+    // muster own the raid's position — true before the pull, and the trigger is
+    // inert then (it arms on the leader's pull stamp). What it missed is that the
+    // egg run has plenty of out-of-combat ticks — the adds die, the possessed
+    // boss is not attacking anybody, and combat drops — and on those ticks the
+    // NON-combat driving ladder had the raid: the advance walked the tank at the
+    // possessed boss (45yd and 42yd splines, live) and the followers followed it.
+    // The camp has to own both engines or it only owns half the fight.
+    //
+    // 61.5 is above the whole non-combat ladder including the rez rung (31.5),
+    // which is intended and cheap: the raid fights at the camp, so its corpses
+    // are inside the leash and the rezzer never sees this rung. A corpse the
+    // other side of the chamber is one the raid must not walk to mid-egg-run
+    // anyway. See DungeonClearRazorgoreCampTrigger.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear razorgore camp",
+        { NextAction("dungeon clear razorgore camp", DcRel::RazorgoreCamp) }));
+
+    // Blackwing Lair only: hold the raid inside one leash of the leader's route
+    // cursor while it crosses the Suppression Rooms. Registered in BOTH engines
+    // for the same reason the Razorgore camp is — the crossing has plenty of
+    // out-of-combat ticks (a whelp wave dies, combat drops for a second) and on
+    // those the NON-combat driving ladder owns the followers, walking them at the
+    // tank with follow-tank / assist-camp instead of keeping the column tight.
+    //
+    // 36 clears every follower rung it has to (assist 29 / hold-at-camp 28 /
+    // follow-tank 25 / advance 15) and RezParty (31.5) — walking a rezzer back
+    // across the gauntlet for a corpse is a second death, not a recovery — while
+    // staying under StrandedRecovery (42) and HealReposition (41). It is inert
+    // everywhere else: the trigger's first test is the map id, and its second is
+    // whether the leader is publishing a cursor at all.
+    // See DungeonClearTransitPackTrigger.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear transit pack",
+        { NextAction("dungeon clear transit pack", DcRel::TransitPack) }));
+
+    // Let go of a creature the run is barred from damaging right now
+    // (DcTargetExclusionRegistry). Registered in BOTH engines for the same reason
+    // the camp is: the barred window spans combat and the gaps in it, and a bot
+    // that walked out of combat still carrying the target resumes on it the moment
+    // it walks back in. Inert on every map with no rows.
+    // See DungeonClearHoldFireTrigger.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear hold fire",
+        { NextAction("dungeon clear hold fire", DcRel::HoldFire) }));
 
     // Rest-target override: top up to the run's chosen HP/mana before pulling.
     // Relevance 26.5 (DcRel::NeedsRest) — above advance (15) and follow-tank (25)
@@ -444,6 +537,54 @@ void DungeonClearCombatStrategy::InitTriggers(std::vector<TriggerNode*>& trigger
         "dungeon clear hazard vacate",
         { NextAction("dungeon clear hazard vacate", DcRel::HazardVacate) }));
 
+    // Razorgore's orb runner (Blackwing Lair only, one elected member). Registered
+    // in BOTH engines: the walk to the ledge starts before the raid pulls and has
+    // to survive the pull, and the click itself can land either side of the combat
+    // flag. Inert everywhere else — the trigger's first test is the map id. See
+    // DungeonClearRazorgoreOrbTrigger.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear razorgore orb",
+        { NextAction("dungeon clear razorgore orb", DcRel::RazorgoreOrb) }));
+
+    // The raid's half of Razorgore's egg run: everyone but the orb runner holds the
+    // camp at the foot of the ledge so the rooted runner is not left to the adds.
+    // Registered in BOTH engines (see the non-combat copy for why the combat-only
+    // shape left the raid touring the room behind the possessed boss); nothing is
+    // hijacked before the pull, because the trigger arms on the leader's pull
+    // stamp and is inert for the whole walk-in and muster.
+    // See DungeonClearRazorgoreCampTrigger.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear razorgore camp",
+        { NextAction("dungeon clear razorgore camp", DcRel::RazorgoreCamp) }));
+
+    // Blackwing Lair only: hold the raid inside one leash of the leader's route
+    // cursor while it crosses the Suppression Rooms. Registered in BOTH engines
+    // for the same reason the Razorgore camp is — the crossing has plenty of
+    // out-of-combat ticks (a whelp wave dies, combat drops for a second) and on
+    // those the NON-combat driving ladder owns the followers, walking them at the
+    // tank with follow-tank / assist-camp instead of keeping the column tight.
+    //
+    // 36 clears every follower rung it has to (assist 29 / hold-at-camp 28 /
+    // follow-tank 25 / advance 15) and RezParty (31.5) — walking a rezzer back
+    // across the gauntlet for a corpse is a second death, not a recovery — while
+    // staying under StrandedRecovery (42) and HealReposition (41). It is inert
+    // everywhere else: the trigger's first test is the map id, and its second is
+    // whether the leader is publishing a cursor at all.
+    // See DungeonClearTransitPackTrigger.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear transit pack",
+        { NextAction("dungeon clear transit pack", DcRel::TransitPack) }));
+
+    // Let go of a creature the run is barred from damaging right now
+    // (DcTargetExclusionRegistry). Registered in BOTH engines for the same reason
+    // the camp is: the barred window spans combat and the gaps in it, and a bot
+    // that walked out of combat still carrying the target resumes on it the moment
+    // it walks back in. Inert on every map with no rows.
+    // See DungeonClearHoldFireTrigger.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear hold fire",
+        { NextAction("dungeon clear hold fire", DcRel::HoldFire) }));
+
     // Conditional-event driver, COMBAT side. Fires only for an event that opted in
     // with DrivesInCombat() — a continuous WAVE encounter where the party is in
     // combat from the first pull to the last, so the non-combat copy (relevance 31)
@@ -488,4 +629,45 @@ void DungeonClearCombatStrategy::InitMultipliers(std::vector<Multiplier*>& multi
     // can hold the combat engine instead of ping-ponging back out. See
     // DungeonClearCombatMultiplier.
     multipliers.push_back(new DungeonClearCombatMultiplier(botAI));
+}
+
+bool DungeonClearCombatStrategy::HasTargetExclusions() const
+{
+    Player* const self = botAI ? botAI->GetBot() : nullptr;
+    return self && DcTargetExclusionRegistry::HasRowsFor(self->GetMapId());
+}
+
+void DungeonClearCombatStrategy::AppendTargetExclusions(GuidSet& exclusions,
+                                                        TargetValueExclusionType type)
+{
+    // DPS, ATTACKER and — for rows that ask for it — TANK pools.
+    //
+    // The tank was untouched wholesale, on the reasoning that the encounters
+    // needing this are the ones where somebody must still HOLD the creature
+    // everyone else is barred from killing. That is Razorgore's case and it still
+    // holds; it is exactly wrong for an OUT-OF-ORDER boss, where a tank answering
+    // a creature two rooms ahead is the thing that walks the raid there. So the
+    // carve-out moved into the row (`alsoTank`) rather than staying here.
+    if (type != TargetValueExclusionType::Dps &&
+        type != TargetValueExclusionType::Attacker &&
+        type != TargetValueExclusionType::Tank)
+        return;
+
+    bool const forTank = type == TargetValueExclusionType::Tank;
+
+    Player* const self = botAI ? botAI->GetBot() : nullptr;
+    if (!self)
+        return;
+
+    uint32 const mapId = self->GetMapId();
+    if (!DcTargetExclusionRegistry::HasRowsFor(mapId))
+        return;
+
+    AiObjectContext* context = botAI->GetAiObjectContext();
+    for (ObjectGuid const guid : AI_VALUE(GuidVector, DcKey::Stock::Attackers))
+    {
+        Unit* unit = botAI->GetUnit(guid);
+        if (unit && DcTargetExclusionRegistry::IsExcluded(self, mapId, unit->GetEntry(), forTank))
+            exclusions.insert(guid);
+    }
 }

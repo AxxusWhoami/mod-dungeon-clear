@@ -9,10 +9,12 @@
 #include <fstream>
 #include <sstream>
 
+#include "DBCStores.h"
 #include "PlayerbotAIConfig.h"
 
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
 
+#include "TestRun/DcTestComp.h"
 #include "TestRun/DcTestGearTiers.h"
 #include "TestRun/DcTestRunRecord.h"
 
@@ -29,8 +31,13 @@ namespace DcTestDungeonRegistry
         static std::vector<Row> const rows = {
             // --- Classic ---------------------------------------------------
             { "rfc",             "Ragefire Chasm",                389,     3.81f,   -14.82f,  -17.84f, 4.390f, 15, "" },
-            { "deadmines",       "The Deadmines",                  36,   -16.40f,  -383.07f,   61.78f, 1.860f, 18, "" },
             { "wc",              "Wailing Caverns",                43,  -163.49f,   132.90f,  -73.66f, 5.830f, 18, "" },
+            // Deadmines runs at 20, not the 18 the instance nominally opens at.
+            // Its back half is a level-18 party's problem: Gilnid is a level-20
+            // elite and his foundry holds 19 level-18 ELITES, so at 18 the party
+            // fights same-level elites the whole way in with no level margin at
+            // all. See the RoomAggroRegistry row for map 36.
+            { "deadmines",       "The Deadmines",                  36,   -16.40f,  -383.07f,   61.78f, 1.860f, 20, "" },
             { "sfk",             "Shadowfang Keep",                33,  -229.13f,  2109.18f,   76.89f, 1.267f, 20, "" },
             { "stockade",        "The Stockade",                   34,    54.23f,     0.28f,  -18.34f, 6.260f, 24, "" },
             { "bfd",             "Blackfathom Deeps",              48,  -151.89f,   106.96f,  -39.87f, 4.530f, 24, "" },
@@ -70,22 +77,29 @@ namespace DcTestDungeonRegistry
             { "arcatraz",        "The Arcatraz",                  552,    -1.23f,     0.01f,   -0.20f, 0.016f, 70, "", 70 },
             { "mgt",             "Magisters' Terrace",            585,     7.09f,    -0.45f,   -2.80f, 0.050f, 70, "", 70 },
             // --- Wrath of the Lich King -----------------------------------
-            { "uk",              "Utgarde Keep",                  574,   153.79f,   -86.55f,   12.55f, 0.304f, 70, "" },
-            { "nexus",           "The Nexus",                     576,   145.87f,   -10.55f,  -16.64f, 1.528f, 71, "" },
-            { "an",              "Azjol-Nerub",                   601,   413.31f,   795.97f,  831.35f, 5.500f, 74, "" },
-            { "ok",              "Ahn'kahet: The Old Kingdom",    619,   333.35f, -1109.94f,   69.77f, 0.553f, 74, "" },
-            { "dtk",             "Drak'Tharon Keep",              600,  -517.34f,  -487.98f,   11.01f, 4.831f, 75, "" },
-            { "vh",              "The Violet Hold",               608,  1808.82f,   803.93f,   44.36f, 6.282f, 75, "" },
-            { "gundrak",         "Gundrak",                       604,  1891.84f,   832.17f,  176.67f, 2.109f, 77, "" },
-            { "hos",             "Halls of Stone",                599,  1153.24f,   806.16f,  195.94f, 4.715f, 78, "" },
-            { "hol",             "Halls of Lightning",            602,  1331.47f,   259.62f,   53.40f, 4.772f, 79, "" },
-            { "cos",             "The Culling of Stratholme",     595,  1431.10f,   556.92f,   36.69f, 5.160f, 79, "" },
-            { "oculus",          "The Oculus",                    578,  1055.93f,   986.85f,  361.07f, 5.745f, 79, "" },
-            { "up",              "Utgarde Pinnacle",              575,   584.12f,  -327.97f,  110.14f, 3.122f, 79, "" },
-            { "toc",             "Trial of the Champion",         650,   805.23f,   618.04f,  412.39f, 3.146f, 80, "" },
-            { "fos",             "The Forge of Souls",            632,  4922.86f,  2175.63f,  638.73f, 2.004f, 80, "" },
-            { "pos",             "Pit of Saron",                  658,   435.74f,   212.41f,  528.71f, 6.256f, 80, "" },
-            { "hor",             "Halls of Reflection",           668,  5239.01f,  1932.64f,  707.70f, 0.801f, 80, "" },
+            { "uk",              "Utgarde Keep",                  574,   153.79f,   -86.55f,   12.55f, 0.304f, 70, "", 80 },
+            { "nexus",           "The Nexus",                     576,   145.87f,   -10.55f,  -16.64f, 1.528f, 71, "", 80 },
+            { "an",              "Azjol-Nerub",                   601,   413.31f,   795.97f,  831.35f, 5.500f, 74, "", 80 },
+            { "ok",              "Ahn'kahet: The Old Kingdom",    619,   333.35f, -1109.94f,   69.77f, 0.553f, 74, "", 80 },
+            { "dtk",             "Drak'Tharon Keep",              600,  -517.34f,  -487.98f,   11.01f, 4.831f, 75, "", 80 },
+            { "vh",              "The Violet Hold",               608,  1808.82f,   803.93f,   44.36f, 6.282f, 75, "", 80 },
+            { "gundrak",         "Gundrak",                       604,  1891.84f,   832.17f,  176.67f, 2.109f, 77, "", 80 },
+            { "hos",             "Halls of Stone",                599,  1153.24f,   806.16f,  195.94f, 4.715f, 78, "", 80 },
+            { "hol",             "Halls of Lightning",            602,  1331.47f,   259.62f,   53.40f, 4.772f, 80, "", 80 },
+            { "cos",             "The Culling of Stratholme",     595,  1431.10f,   556.92f,   36.69f, 5.160f, 80, "", 80 },
+            { "oculus",          "The Oculus",                    578,  1055.93f,   986.85f,  361.07f, 5.745f, 80, "", 80 },
+            { "up",              "Utgarde Pinnacle",              575,   584.12f,  -327.97f,  110.14f, 3.122f, 80, "", 80 },
+            { "toc",             "Trial of the Champion",         650,   805.23f,   618.04f,  412.39f, 3.146f, 80, "", 80 },
+            { "fos",             "The Forge of Souls",            632,  4922.86f,  2175.63f,  638.73f, 2.004f, 80, "", 80 },
+            { "pos",             "Pit of Saron",                  658,   435.74f,   212.41f,  528.71f, 6.256f, 80, "", 80 },
+            { "hor",             "Halls of Reflection",           668,  5239.01f,  1932.64f,  707.70f, 0.801f, 80, "", 80 },
+
+            // --- Classic RAIDS (raid-support Plan D/E). Entrances are the
+            // world-DB areatrigger targets (MC 2886, BWL 3726); level 60, no
+            // heroic mode; a raid run picks its size via `size=` (default 10
+            // for iteration speed — see the raid-support plan).
+            { "mc",              "Molten Core",                   409,  1091.89f,  -466.99f, -105.08f, 3.142f, 60, "" },
+            { "bwl",             "Blackwing Lair",                469, -7673.03f, -1106.08f,  396.65f, 0.178f, 60, "" },
         };
         return rows;
     }
@@ -114,6 +128,12 @@ namespace DcTestDungeonRegistry
                 hit = &row;
             }
         return hit;
+    }
+
+    std::uint32_t ExpansionOf(Row const& row)
+    {
+        MapEntry const* mapEntry = sMapStore.LookupEntry(row.mapId);
+        return mapEntry ? mapEntry->Expansion() : 0u;
     }
 
     void WriteSidecar()
@@ -176,10 +196,22 @@ namespace DcTestDungeonRegistry
             s << "{\"token\":\"" << EscapeJson(row.token) << '"'
               << ",\"name\":\"" << EscapeJson(row.name) << '"'
               << ",\"mapId\":" << row.mapId
+              << ",\"expansion\":" << ExpansionOf(row)
               << ",\"level\":" << row.recommendedLevel
               << ",\"heroicLevel\":" << row.heroicLevel
-              << ",\"wing\":\"" << EscapeJson(row.wing) << '"'
-              << ",\"gear\":";
+              << ",\"wing\":\"" << EscapeJson(row.wing) << '"';
+            // RAID rows (raid-support Plan D): tell the dashboard's launch
+            // form to offer the size control, with the module's own bounds so
+            // the two can't drift. defaultSize 10 mirrors the plan's
+            // iteration-speed choice; the worldserver still validates.
+            if (MapEntry const* mapEntry = sMapStore.LookupEntry(row.mapId);
+                mapEntry && mapEntry->IsRaid())
+                s << ",\"raid\":true"
+                  << ",\"sizeMin\":" << DcTestComp::kMinPartySize
+                  << ",\"sizeMax\":" << DcTestComp::kMaxPartySize
+                  << ",\"sizePresets\":[10,25]"
+                  << ",\"defaultSize\":10";
+            s << ",\"gear\":";
             appendLadder(s, row.mapId, row.recommendedLevel);
             if (row.heroicLevel)
             {

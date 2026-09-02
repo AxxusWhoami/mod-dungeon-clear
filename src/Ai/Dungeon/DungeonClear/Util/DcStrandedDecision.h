@@ -30,9 +30,12 @@
 //      combat flag — a hostile area aura sets that flag with nothing aggroed, and
 //      keying on it made this failsafe permanently inert exactly when the run
 //      needed it (see DcCombatFlag).
-//   2. At least one BOT member must be stranded beyond maxSpread of the tank
-//      (PartyMaxSpread — the module's canonical "out of range"). A human is never
-//      relocated (player agency); dead members are the rez recovery's job.
+//   2. At least one BOT member must be stranded beyond maxSpread of the tank.
+//      That threshold is NOT simply PartyMaxSpread: the glue passes whatever the
+//      tank's advance gate is really enforcing (see RescueSpread below), because
+//      a rescue looser than the gate it exists to unblock is a permanent stall.
+//      A human is never relocated (player agency); dead members are the rez
+//      recovery's job.
 //
 // Extracted engine-free so it is unit-testable in isolation, mirroring
 // DcRezDecision / DcSmartRestDecision. Header-only; nothing here touches a
@@ -40,6 +43,42 @@
 
 namespace DcStrandedDecision
 {
+    // The distance past which this failsafe calls a member STRANDED.
+    //
+    // This used to be PartyMaxSpread alone, and that opened a DEAD BAND against
+    // the gate the rescue exists to unblock. GetSpreadGate does not always
+    // enforce the setting: on a SEALED-ENCOUNTER final approach it overrides it
+    // with the row's musterSpread (10yd on all three rows) measured against the
+    // TANK, because the boss's room locks the instant the fight starts and the
+    // party has to cross the threshold with the tank. A straggler in
+    // (musterSpread, PartyMaxSpread] then fails the advance gate while sitting
+    // inside the rescue's own threshold: the tank yields "party not ready — out
+    // of range" forever and the rescue never looks at it.
+    //
+    // Live (tr-20260831-164201-61, Gundrak heroic): nine of ten objectives done,
+    // party healthy and out of combat, healer 24.5yd from the tank on Gal'darah's
+    // approach. Gate 10 (SealedEncounterRegistry row 604/29306), setting 25 —
+    // 10 < 24.5 <= 25. 3174 consecutive party-not-ready yields, ~300/minute for
+    // ten minutes, then the 600s no-progress watchdog killed a run that was one
+    // boss from finishing.
+    //
+    // MIN, never max, and only when the gate is TANK-ANCHORED. Taking the min
+    // means this can only ever become STRICTER than the old behaviour, never
+    // laxer: a waived gate (100000 while a pull maneuver holds) and the ordinary
+    // tank-anchored gate (== the setting) both leave it exactly where it was.
+    // And the anchor test is load-bearing, not tidy — in pull mode the gate is
+    // measured from the CAMP while this rescue measures from the TANK, so
+    // borrowing that radius would compare a distance to one origin against a
+    // radius sized for another and could yank a member who is correctly set at
+    // its camp. Same lesson as the party-gate ring: match the ORIGIN and the
+    // RADIUS, or match neither.
+    inline float RescueSpread(float partySpread, float leaderGateSpread, bool gateIsTankAnchored)
+    {
+        if (!gateIsTankAnchored || leaderGateSpread <= 0.0f)
+            return partySpread;
+        return leaderGateSpread < partySpread ? leaderGateSpread : partySpread;
+    }
+
     // One same-map group member, snapshotted by the glue.
     struct Member
     {
@@ -57,7 +96,7 @@ namespace DcStrandedDecision
         std::uint32_t lastProgressMs = 0;         // clock; 0 = unarmed (no verdict yet)
         std::uint32_t noProgressTimeoutMs = 60000;   // StrandedRecoveryNoProgressSecs * 1000
         bool          partyEngaged = false;      // a real fight (not the bare flag)
-        float         maxSpread = 25.0f;          // PartyMaxSpread: the out-of-range threshold
+        float         maxSpread = 25.0f;          // out-of-range threshold; see RescueSpread
     };
 
     struct Result

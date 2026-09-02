@@ -12,6 +12,7 @@
 class Player;
 class Creature;
 class GameObject;
+class GossipMenu;
 class AiObjectContext;
 
 // Result of running ONE event step on a tick.
@@ -77,6 +78,15 @@ struct DungeonEventProgress
     // transient real-combat transition can never trip it. 0 => not wedged.
     uint32 escortCombatWedgeMs{0};
 
+    // TeleportParty combat hold: ms-time the leader first had to wait for the
+    // PARTY's fight to end before a one-way relocation. A relocation that fires
+    // mid-fight leaves the party's holders on the far side of a navmesh break,
+    // still holding combat references nobody can walk back to — the bots then
+    // try. The gate reads AnyPartyHeldByLiveEnemy, so a phantom flag never arms
+    // it at all; this bounds a real fight that cannot be finished at the
+    // checkpoint. 0 => not waiting.
+    uint32 relocationCombatHoldMs{0};
+
     // Drive-log throttle: the per-tick step line is logged only on a transition
     // (step or result change) or every kLogHeartbeatMs while Running, so a long
     // WaitForSpawn doesn't spam one line per tick.
@@ -96,6 +106,7 @@ struct DungeonEventProgress
         progressMs = 0;
         escortProgressMs = 0;
         escortCombatWedgeMs = 0;
+        relocationCombatHoldMs = 0;
         lastLoggedStep = -1;
         lastLoggedResult = -1;
         lastLogMs = 0;
@@ -139,6 +150,21 @@ public:
     // place. The caller is responsible for being in interact range and (if it
     // matters) facing the NPC.
     static bool SelectGossip(Player* bot, Creature* npc, int32 option);
+
+    // Translate a POSITIONAL gossip option into the gossipListId the protocol
+    // wants. GossipMenu keys its items by the DB's gossip_menu_option.OptionID
+    // (Player::PrepareGossipMenu adds each row as AddMenuItem(OptionID, ...)), so
+    // GetItem(n) is a key find(), NOT the n-th option — and every caller in the
+    // dungeon tables passes a position. Most gossip NPCs happen to use OptionID 0,
+    // which is why passing the position straight through read as correct until
+    // Brann Bronzebeard (OptionIDs 37476/36142/36412/36236) made every Halls of
+    // Stone gossip a silent no-op. Returns false when the menu is empty or has no
+    // option at that position; callers treat that as "retry next tick".
+    //
+    // Exposed (rather than file-static) so the translation is directly testable —
+    // it is the one line standing between an authored `option 0` and a dungeon
+    // that cannot start.
+    static bool ResolveGossipListId(GossipMenu const& menu, int32 option, uint32& listId);
 
     // Static-geometry (vmap-only) line of sight from the bot to a step's
     // GameObject, eye-bumped on both ends. Shared by the UseItemOnGO RunStep and
@@ -190,7 +216,10 @@ public:
                                                 uint32 mapId);
 
     // True if `context`'s run is currently driving a PERSISTENT anchored event
-    // that has started (stepIndex past 0) — i.e. a long multi-phase set-piece
+    // that has started — stepIndex past 0, or still on a LEADING MoveTo, the one
+    // step that walks the tank out of its own arriveRadius before any latch could
+    // hold it (see the .cpp for the Gundrak altar deadlock that shape caused) —
+    // i.e. a long multi-phase set-piece
     // (ZulFarrak's temple) owns the tank. Single source of truth used to stand
     // other systems down for the event's whole duration:
     //   - the PULL pipeline (no advanced-pull camp-drag mid-event),
@@ -200,6 +229,18 @@ public:
     // Reads the run's "next dungeon boss" + "dungeon clear event progress" values,
     // so pass the context of the bot whose run state you mean (the leader's).
     static bool IsPersistentAnchoredEventActive(AiObjectContext* context);
+
+    // True while an event that OWNS THE PULL is driving this run — either the
+    // anchored case above, or a CONDITIONAL event whose row carries
+    // DungeonEvent::ownsThePull and whose activation predicate reads true right
+    // now. This is the predicate the pull-mode value and the scout-lag should ask;
+    // IsPersistentAnchoredEventActive alone answers only half the question,
+    // because a conditional event never appears in the anchor roster at all
+    // (NextDungeonBoss stays on the boss beyond it) and so could never satisfy it.
+    //
+    // Needs the bot as well as the context: the conditional half re-evaluates
+    // activation predicates, which are written against a Player.
+    static bool IsPullOwningEventDriving(Player* bot, AiObjectContext* context);
 
     // If `context`'s current objective drives an event with a KillCreature ENGAGE
     // step (KillCreatureEngage — .engage set), report true and fill `outEntry` /

@@ -6,6 +6,7 @@
 #include "gtest/gtest.h"
 
 #include "Ai/Dungeon/DungeonClear/Strategy/DcRelevance.h"
+#include "Ai/Dungeon/DungeonClear/Util/DungeonClearTuning.h"
 
 // Executable form of the trigger relevance ladder (arch-review F3). Pins the
 // ordering both strategies depend on and documents every same-value tie with the
@@ -65,6 +66,31 @@ TEST(DungeonClearRelevanceTest, LeaderAssistFillsGapBelowOwnEngageScans)
     EXPECT_LT(DcRel::LeaderAssist, DcRel::AtBoss);
 }
 
+TEST(DungeonClearRelevanceTest, LeaderAssistOutranksAdvanceSoItMustYieldWhenItCannotAct)
+{
+    // The pairing that made tp-20260828-175353-1 unrecoverable, pinned so the
+    // reasoning survives the next reader.
+    //
+    // Leader-assist sits ABOVE advance, and DC runs one action per tick. That is
+    // correct — a tank must go help the fight rather than keep walking to the next
+    // boss — but it means the rung is only allowed to claim the tick when it can
+    // actually DO something. When it cannot, the cost of claiming anyway is not a
+    // wasted tick, it is a stopped run: advance never gets to drive, the party
+    // never leaves the ground that is flagging it, and the flag therefore never
+    // clears either. All five BWL raids died in that loop, watchdogs clear,
+    // 0.0yd from the "fight" they were closing on, for as long as anyone watched.
+    EXPECT_GT(DcRel::LeaderAssist, DcRel::Advance);
+    EXPECT_GT(DcRel::LeaderAssist, DcRel::Stalled);
+
+    // Hence DungeonClearLeaderAssistAction's two exits: the co-located guard
+    // (nothing reachable to assist and the flagged member is already here) and
+    // reporting DcMoveTo's own refusal instead of discarding it. The guard's band
+    // has to stay well under the ranges a REAL assist covers, or it would start
+    // swallowing the case the rung exists for.
+    EXPECT_LT(DC_LEADER_ASSIST_COLOCATED_RANGE, DC_ENGAGE_RANGE);
+    EXPECT_GT(DC_LEADER_ASSIST_COLOCATED_RANGE, 0.0f);
+}
+
 TEST(DungeonClearRelevanceTest, StrandedRecoveryOutranksTheFrozenDrivingLadder)
 {
     // The failsafe fires only after the leader driving ladder has, by definition,
@@ -102,6 +128,36 @@ TEST(DungeonClearRelevanceTest, RezPartyOutranksEveryLadderItCanLandOn)
     EXPECT_LT(DcRel::RezParty, DcRel::HakkarLootBlood);
     EXPECT_LT(DcRel::RezParty, DcRel::Pull);
     EXPECT_LT(DcRel::RezParty, DcRel::PartyDied);
+}
+
+TEST(DungeonClearRelevanceTest, RezPartyRankAloneDoesNotProtectTheApproach)
+{
+    // A COMPANION WARNING TO THE TEST ABOVE, because reading that one on its own
+    // is what cost run tr-20260807-080834-115 its recovery: outranking the
+    // follower stack does NOT mean the follower stack cannot run during a
+    // recovery, and the rez approach is not safe merely because 31.5 > 25.
+    //
+    // Two holes, both real:
+    //
+    //  1. Engine::DoNextAction only stops walking the queue when an action
+    //     RETURNS TRUE. A rez rung that returns false — as it did on every tick
+    //     after the first, because DcMoveTo reports a duplicate destination while
+    //     its own glide is running — hands the tick straight down to scout-lag,
+    //     whose in-the-bubble branch stops the bot. Fix: the approach branch owns
+    //     the tick unconditionally (DcFollowerActions).
+    //
+    //  2. HealReposition sits ABOVE RezParty and is registered in the non-combat
+    //     engine too, so on a healer — the class the election PREFERS — it takes
+    //     the tick outright and walks toward the tank for line of sight while the
+    //     corpse lies the other way.
+    //
+    // This assertion pins hole 2 as a deliberate ordering rather than an
+    // oversight. Do not "fix" it by lifting RezParty over HealReposition: that
+    // ordering is load-bearing the rest of the time (a healer must reposition to
+    // heal), and StrandedRecovery/HazardVacate sit above it for the same reason.
+    // The stand-down gate — DcRezRecovery::IsElectedRezzer, consulted by the
+    // follower movers — is what makes the rez rung reachable, not the number.
+    EXPECT_GT(DcRel::HealReposition, DcRel::RezParty);
 }
 
 TEST(DungeonClearRelevanceTest, HakkarSuppressorOutranksFlameOutranksBlood)
@@ -157,6 +213,30 @@ TEST(DungeonClearRelevanceTest, HazardVacateOutranksNonCombatDrivers)
     EXPECT_LT(DcRel::HazardVacate, DcRel::Chat);
 }
 
+// The pull maneuver is dual-engine for the same reason HazardVacate and
+// BreakStuckCombat are: stock `drop target` (99) can move a still-flagged bot onto
+// the NON-combat engine, and every watchdog the maneuver owns lives inside its
+// action — so a combat-only registration lets an LOS-break drag freeze in a holding
+// phase with no clock running at all. In the non-combat ladder 60 must clear the
+// driving rungs it is unblocking and stay under the phantom-combat hatch.
+TEST(DungeonClearRelevanceTest, PullManeuverIsDualEngineAndClearsBothLadders)
+{
+    // Above every non-combat driving rung it now shares an engine with.
+    EXPECT_GT(DcRel::PullManeuver, DcRel::HazardVacate);
+    EXPECT_GT(DcRel::PullManeuver, DcRel::StrandedRecovery);
+    EXPECT_GT(DcRel::PullManeuver, DcRel::HealReposition);
+    EXPECT_GT(DcRel::PullManeuver, DcRel::Pull);
+    EXPECT_GT(DcRel::PullManeuver, DcRel::AssistCamp);
+    EXPECT_GT(DcRel::PullManeuver, DcRel::HoldAtCamp);
+    EXPECT_GT(DcRel::PullManeuver, DcRel::Advance);
+    // Below the phantom-combat hatch, which is inert whenever anything is fightable
+    // and must win the tick when it does fire.
+    EXPECT_LT(DcRel::PullManeuver, DcRel::BreakStuckCombat);
+    // Below the terminal bailouts on both sides.
+    EXPECT_LT(DcRel::PullManeuver, DcRel::Chat);
+    EXPECT_LT(DcRel::PullManeuver, DcRel::PartyDied);
+}
+
 // Contribution-gated combat regroup (Option B) is pinned BELOW the stock combat
 // movers, unlike the old distance-tether rung that had to sit above them. Stock
 // ACTION_MOVE / MoveChase is 30; the regroup only fires when stock movement has no
@@ -197,6 +277,46 @@ TEST(DungeonClearRelevanceTest, PartitionedTiesAreEqualByDesign)
     // AssistCamp (29) ONLY in the non-combat engine. They can never arbitrate on
     // the same tick, so the shared value is safe (contribution-gate rework).
     EXPECT_FLOAT_EQ(DcRel::RegroupCombat, DcRel::AssistCamp);
+    // MAP-partitioned: the transit pack rung (36) is Blackwing Lair's and its
+    // first test is `GetMapId() == 469`; the Hakkar suppressor (36) is the Sunken
+    // Temple's. Two maps cannot both be under a bot's feet.
+    EXPECT_FLOAT_EQ(DcRel::TransitPack, DcRel::HakkarSuppressor);
+}
+
+// The transit pack rung is the one that keeps the raid one body while the leader
+// crosses Blackwing Lair's Suppression Rooms — and a strung-out raid there is not
+// untidy, it is a run with no driver at all (every straggler holds the WHOLE party
+// in combat, and DcCombatFlag::MayDrive is false while anything is engaged). So
+// what it outranks is load-bearing, and so is what outranks it.
+TEST(DungeonClearRelevanceTest, TransitPackOutranksTheRungsThatStringTheRaidOut)
+{
+    // The movers that would take a follower off the column: a whelp 40yd off the
+    // line is precisely the string-out this exists to stop.
+    EXPECT_GT(DcRel::TransitPack, DcRel::AssistCampCombat);   // combat engine
+    EXPECT_GT(DcRel::TransitPack, DcRel::RegroupCombat);
+    EXPECT_GT(DcRel::TransitPack, DcRel::AssistCamp);         // non-combat engine
+    EXPECT_GT(DcRel::TransitPack, DcRel::HoldAtCamp);
+    EXPECT_GT(DcRel::TransitPack, DcRel::FollowTank);
+    EXPECT_GT(DcRel::TransitPack, DcRel::Advance);
+    // ...and the rez rung, deliberately: walking a rezzer back through the
+    // gauntlet for a corpse is a second death, not a recovery. Same call the
+    // Razorgore camp (61.5) makes one room over.
+    EXPECT_GT(DcRel::TransitPack, DcRel::RezParty);
+
+    // What must still win. Stranded recovery is the floor under the whole ladder,
+    // heal-reposition is healer-only and above every driver, and in the combat
+    // engine the camp owners / hazard vacate / the phantom hatch all outrank it.
+    EXPECT_GT(DcRel::StrandedRecovery, DcRel::TransitPack);
+    EXPECT_GT(DcRel::HealReposition,   DcRel::TransitPack);
+    EXPECT_GT(DcRel::HazardVacate,     DcRel::TransitPack);
+    EXPECT_GT(DcRel::PullManeuver,     DcRel::TransitPack);
+    EXPECT_GT(DcRel::StayAtCamp,       DcRel::TransitPack);
+    EXPECT_GT(DcRel::BreakStuckCombat, DcRel::TransitPack);
+
+    // The leader's own transit driver runs on the COMBAT event rung (61) and must
+    // outrank the pack rung: the leader is exempt from the pack anyway, but if the
+    // two ever landed on one bot, moving the column is what matters.
+    EXPECT_GT(DcRel::EventDueCombat, DcRel::TransitPack);
 }
 
 TEST(DungeonClearRelevanceTest, HealRepositionAboveLeaderDriversIsRolePartitioned)
@@ -204,6 +324,11 @@ TEST(DungeonClearRelevanceTest, HealRepositionAboveLeaderDriversIsRolePartitione
     // In BOTH engines heal-reposition (41, healer-only) sits above the leader-only
     // pull/hakkar/at-boss drivers. It never contends because of the healer-vs-leader
     // role split — asserted so a future non-healer trigger at 41 is caught.
+    //
+    // THE SPLIT DOES NOT COVER EVERYTHING BELOW 41. RezParty runs on ALL bots,
+    // healers first, so on the elected rezzer these two are the same bot and DO
+    // contend — see RezPartyRankAloneDoesNotProtectTheApproach. Role partitioning
+    // is a claim about the rungs listed here, not a general one.
     EXPECT_GT(DcRel::HealReposition, DcRel::Pull);
     EXPECT_GT(DcRel::HealReposition, DcRel::HakkarSuppressor);
     EXPECT_GT(DcRel::HealReposition, DcRel::AtBoss);
@@ -215,4 +340,29 @@ TEST(DungeonClearRelevanceTest, PreviouslyTiedRungsAreNowStrictlyOrdered)
     // ordering never depends on trigger registration order.
     EXPECT_NE(DcRel::HakkarFlame, DcRel::Pull);
     EXPECT_NE(DcRel::NeedsRest,   DcRel::RoomTrash);
+}
+
+// The pull rung OUTRANKS the objective rung, which is correct — a pull in flight
+// must not be interrupted by the objective driver — but it is also what turns any
+// stuck pull verdict into a stalled run: while the pull action owns the tick, an
+// anchored event never gets to drive its own steps.
+//
+// tr-20260817-100413-43/44/45 (Shattered Halls) is the live case. The governor
+// latched decision == PatrolHold, then the persistent "Sweep the assassin hallway"
+// event armed the pull stand-down — which stopped the governor from ever running
+// again, so nothing could move the code off PatrolHold. The pull trigger keeps its
+// rung live on that code, the pull action re-planted the tank every tick, and the
+// event's own rung 5 points below never fired again: 913s parked, no_progress.
+//
+// The fix is that the stand-down now CLEARS the verdict (DcPullContext::
+// ClearDynamicVerdict) and the trigger reads the same stand-down. This test pins
+// the ordering the fix assumes: pull above objective, so "the pull rung is live"
+// always means "the event is not driving".
+TEST(DungeonClearRelevanceTest, PullOutranksTheObjectiveDriverItCanStarve)
+{
+    EXPECT_GT(DcRel::Pull, DcRel::AtObjective);
+    EXPECT_GT(DcRel::Pull, DcRel::AtBoss);
+    // The event-driven rungs sit in the same band, so a stuck pull starves them
+    // all alike — the stand-down has to be authoritative, not advisory.
+    EXPECT_GT(DcRel::Pull, DcRel::EventDue);
 }

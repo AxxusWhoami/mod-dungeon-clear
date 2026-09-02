@@ -5,8 +5,10 @@
 
 #include "DcPartyState.h"
 
+#include "DcTickMemo.h"
 #include "DungeonClearMath.h"
 #include "DungeonClearTuning.h"
+#include "DungeonClearUtil.h"   // DC_PULL_* log macros
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
 #include <algorithm>
 #include <cmath>
@@ -52,12 +54,14 @@
 #include "Timer.h"
 #include "World.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
+#include "Ai/Dungeon/DungeonClear/Data/ScriptedPullRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/SealedEncounterRegistry.h"
 #include "Ai/Dungeon/DungeonClear/DcPullContext.h"
 #include "Ai/Dungeon/DungeonClear/Util/ChunkedPathfinder.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcCombatFlag.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcLeaderSignal.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRezRecovery.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcSmartRest.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonPathFollower.h"
 #include "Ai/Dungeon/DungeonClear/Util/NavmeshSnap.h"
@@ -99,21 +103,10 @@ bool DcPartyState::IsPartyReady(Player* bot, float minHpPct, float minMpPct, flo
     if (!group)
         return true;  // Solo tank — always "ready."
 
-    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+    // One member's readiness against the bars. Factored so the strict 5-man
+    // walk and the raid quorum walk below judge a member identically.
+    auto const memberMeetsBars = [&](Player* member)
     {
-        Player* member = ref->GetSource();
-        if (!member)
-            continue;
-        if (member->GetMapId() != bot->GetMapId())
-            continue;
-        if (member->isDead())
-            continue;  // Dead members hold the run via DcRezRecovery::IsPending
-                       // (or, with PostCombatRez off / recovery unviable, the
-                       // party-died bailout) — never via these readiness floors.
-                       // The moment one is rezzed they re-enter this walk as a
-                       // living-but-low member and the floors hold the tank
-                       // while they eat/drink back up.
-
         if (member != bot)
         {
             float const spread = spreadAnchor ? member->GetDistance(*spreadAnchor)
@@ -138,8 +131,63 @@ bool DcPartyState::IsPartyReady(Player* bot, float minHpPct, float minMpPct, flo
                     return false;
             }
         }
+        return true;
+    };
+
+    // RAID QUORUM form: with 10-40 members, all-or-nothing readiness pins the
+    // whole run on any one straggler forever. Ready when every TANK and HEALER
+    // meets the bars (the roles a pull genuinely cannot start without) AND at
+    // least RaidReadyQuorumPct of living same-map members meet them AND no
+    // failing member is still visibly walking in (isMoving — someone closing
+    // will pass in a moment; releasing under them wastes the wait). A wedged
+    // straggler (failing, stationary) is quorum-tolerated and left to the
+    // stranded-recovery ladder. Dungeons keep the strict every-member walk.
+    // Boss musters stay strict on top of this via the Plan C muster gate.
+    bool const raid = bot->GetMap() && bot->GetMap()->IsRaid();
+    uint32 living = 0;
+    uint32 meeting = 0;
+
+    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+    {
+        Player* member = ref->GetSource();
+        if (!member)
+            continue;
+        if (member->GetMapId() != bot->GetMapId())
+            continue;
+        if (member->isDead())
+            continue;  // Dead members hold the run via DcRezRecovery::IsPending
+                       // (or, with PostCombatRez off / recovery unviable, the
+                       // party-died bailout) — never via these readiness floors.
+                       // The moment one is rezzed they re-enter this walk as a
+                       // living-but-low member and the floors hold the tank
+                       // while they eat/drink back up.
+
+        bool const ok = memberMeetsBars(member);
+        if (!raid)
+        {
+            if (!ok)
+                return false;
+            continue;
+        }
+
+        ++living;
+        if (ok)
+        {
+            ++meeting;
+            continue;
+        }
+        if (member == bot || PlayerbotAI::IsTank(member) || PlayerbotAI::IsHeal(member))
+            return false;
+        if (member->isMoving())
+            return false;
     }
-    return true;
+
+    if (!raid)
+        return true;
+    if (!living)
+        return false;
+    uint32 const quorumPct = DcSettings::GetUInt(bot, "RaidReadyQuorumPct");
+    return meeting * 100 >= living * quorumPct;
 }
 DcPartyState::SpreadGate DcPartyState::GetSpreadGate(Player* bot, AiObjectContext* context)
 {
@@ -229,6 +277,21 @@ DcPartyState::SpreadGate DcPartyState::GetSpreadGate(Player* bot, AiObjectContex
     }
     return gate;
 }
+DcPartyState::SpreadGate DcPartyState::LeaderGate(Player* bot)
+{
+    SpreadGate own;
+    if (!bot)
+        return own;
+    own.maxSpread = DcSettings::GetFloat(bot, "PartyMaxSpread");
+    Player* leader = DcLeaderSignal::FindLeaderTank(bot);
+    if (!leader)
+        return own;
+    PlayerbotAI* leaderAI = GET_PLAYERBOT_AI(leader);
+    if (!leaderAI)
+        return own;   // a real-player leader runs no DC gate to be inside of
+    return GetSpreadGate(leader, leaderAI->GetAiObjectContext());
+}
+
 float DcPartyState::LeaderEffectiveMaxSpread(Player* bot)
 {
     if (!bot)
@@ -256,6 +319,34 @@ DcPartyState::RestGate DcPartyState::GetRestGate(Player* bot, AiObjectContext* c
     // HP/mana is a deadlock. See the header.
     if (DcCombatFlag::IsPhantomFlag(bot, context))
         return gate;
+
+    // THE RAID MUSTER'S OWN OVERRIDE MUST NOT FEED THIS GATE.
+    //
+    // Plan C's pre-boss muster pushes RestHealthPct/RestManaPct to 100 for the
+    // run so bots actually eat and drink all the way to the bars. That is a REST
+    // DRIVE, not a readiness bar, and reading it back here closes a loop the
+    // muster cannot get out of:
+    //
+    //   IsBetweenPullsReady is the LAST gate in DungeonClearAtBossTrigger; the
+    //   muster's phase machine lives in DungeonClearEngageBossAction, i.e.
+    //   BEHIND that trigger. With the floors at 100/100 the gate is effectively
+    //   unsatisfiable in a raid — IsPartyReady is strict on every tank and
+    //   healer, and one priest single-target buffing thirty-nine people is a
+    //   healer who is never at full mana. So the trigger stays down, the engage
+    //   action never runs, the muster's clocks are never SAMPLED, and every one
+    //   of its budgets (rest / rebuff / whole-muster) silently cannot fire.
+    //
+    // Live at Vaelastrasz, 2026-08-28, five concurrent 40-mans on a 60s ceiling:
+    // the kernel was evaluated three times in 126s (13:28:40, 13:29:32,
+    // 13:30:46) and released 66s late; the other four ran 77s, 89s, 116s and
+    // 218s. Nothing was wrong with DcRaidMusterDecision — it was never asked.
+    //
+    // The top-off is not lost by waiving the floors here: the muster's own
+    // staged/topped snapshot still enforces it, and unlike this gate it is
+    // timeout-bounded.
+    if (DcRun::Of(context).musterRestOverride)
+        return gate;
+
     gate.minHp = RestMinHpPct(bot);
     gate.minMp = RestMinMpPct(bot);
     return gate;
@@ -294,6 +385,99 @@ bool DcPartyState::IsBetweenPullsReady(Player* bot, AiObjectContext* context, bo
     return IsPartyReady(bot, rest.minHp, rest.minMp, gate.maxSpread, gate.anchor,
                         gate.maxTankGap);
 }
+bool DcPartyState::IsScriptedStageMustering(Player* bot, AiObjectContext* context)
+{
+    if (!bot || !context)
+        return false;
+
+    DcPullContext& pull = context->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
+
+    // Only ever gates the START of a stage. A maneuver already in flight has the
+    // pack tagged and is running it home; holding there would strand the tank
+    // mid-drag, which is the failure this whole pipeline is built to avoid.
+    bool const stagePending = pull.scriptedStage < 0 && pull.phase == DcPullPhase::Idle &&
+                              DcTickMemoAccess::ScriptedStage(bot, context) != nullptr;
+
+    // Phantom flag: nobody can eat or drink while flagged, so a floor waited on
+    // there can never be met. Same waiver, same reason, as GetRestGate's. (An
+    // ARMED muster still holds its substance floor first — see minMs below —
+    // which gives the phantom-recovery hatch a few seconds to clear the flag.)
+    //
+    // HP AND MANA ONLY. The spread limit is waived (0 would mean "everyone stands
+    // exactly on the tank" — IsPartyReady compares `spread > maxSpread` — not "no
+    // limit"), because spread is the business of IsBetweenPullsReady one rung
+    // earlier and has already passed by the time we are asked.
+    //
+    // A corpse on this map is NOT "topped up". IsPartyReady skips the dead by
+    // design (rez recovery holds the run), but when recovery is not pending — no
+    // viable rezzer, or the death is one tick old — the gate passed over the
+    // corpse and stages armed short-handed within 10s of a death
+    // (tr-20260806-172345-34: healer dies, "muster over after 1s", tank dead 8s
+    // into the stage). The muster budget still bounds the wait.
+    bool const toppedUp =
+        !stagePending || DcCombatFlag::IsPhantomFlag(bot, context) ||
+        (!HasDeadSameMapMember(bot) &&
+         IsPartyReady(bot, DC_SCRIPTED_PULL_MUSTER_HP, DC_SCRIPTED_PULL_MUSTER_MP,
+                      /*maxSpread*/ 100000.0f, /*spreadAnchor*/ nullptr,
+                      /*maxTankGap*/ 0.0f));
+
+    uint32 const now = getMSTime();
+    uint32 const prev = pull.scriptedMusterSince;
+    uint32 musterSince = prev;
+    bool const hold = DungeonClearMath::ShouldMusterForScriptedStage(
+        stagePending, toppedUp, musterSince, now, DC_SCRIPTED_PULL_MUSTER_MS,
+        DC_SCRIPTED_PULL_MUSTER_MIN_MS, musterSince);
+    pull.scriptedMusterSince = musterSince;
+
+    // Log the two EDGES only. The latch deliberately stays armed past the timeout
+    // (so one stage cannot muster twice), which means "latched and not holding" is
+    // the steady state after the budget is spent, not an event — deriving the old
+    // hold from the old stamp is what keeps this to two lines per muster instead of
+    // one per tick.
+    bool const wasHolding = prev != 0 && now >= prev && (now - prev) < DC_SCRIPTED_PULL_MUSTER_MS;
+    if (!wasHolding && hold)
+        DC_PULL_INFO("[DC:{}] scripted-pull: mustering before the next stage — the party "
+                     "is below {:.0f}% HP / {:.0f}% mana (up to {}s)", bot->GetName(),
+                     DC_SCRIPTED_PULL_MUSTER_HP, DC_SCRIPTED_PULL_MUSTER_MP,
+                     DC_SCRIPTED_PULL_MUSTER_MS / 1000);
+    else if (wasHolding && !hold)
+        DC_PULL_INFO("[DC:{}] scripted-pull: muster over after {}s ({})",
+                     bot->GetName(), (now - prev) / 1000,
+                     toppedUp ? "party topped up — arming the stage"
+                              : "budget spent — arming on the ordinary floors");
+    return hold;
+}
+
+bool DcPartyState::IsScriptedMusterHolding(Player* bot, AiObjectContext* context)
+{
+    if (!bot || !context)
+        return false;
+    DcPullContext const& pull = context->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
+    if (pull.scriptedMusterSince == 0)
+        return false;  // no muster armed (or released topped-up)
+    uint32 const now = getMSTime();
+    // A stale stamp past the budget is the "armed forever so it never re-fires"
+    // steady state, not a hold.
+    return now >= pull.scriptedMusterSince &&
+           now - pull.scriptedMusterSince < DC_SCRIPTED_PULL_MUSTER_MS;
+}
+
+bool DcPartyState::HasDeadSameMapMember(Player* bot)
+{
+    if (!bot)
+        return false;
+    Group* group = bot->GetGroup();
+    if (!group)
+        return false;
+    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+    {
+        Player* member = ref->GetSource();
+        if (member && member->GetMapId() == bot->GetMapId() && member->isDead())
+            return true;
+    }
+    return false;
+}
+
 bool DcPartyState::IsAnyPartyMemberLooting(Player* bot)
 {
     if (!bot)

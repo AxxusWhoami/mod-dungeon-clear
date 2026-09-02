@@ -58,6 +58,26 @@ TEST(EventBuilderTest, BuildsTypedStepsInOrder)
     EXPECT_EQ(e.steps[2].timeoutMs, 8000u);
 }
 
+TEST(EventBuilderTest, ReportUseIsOptInAndTagsOnlyTheStepItFollows)
+{
+    // GameObject::Use() and the report-use opcode are not interchangeable: Use()
+    // hands the script GossipHello(player, FALSE), and a GameObjectAI that keys
+    // its work off that flag does nothing (BWL's Chromaggus lever does worse —
+    // it marks itself spent without opening the cage). So the executor has to be
+    // told which delivery a step wants, and the default must stay Use().
+    DungeonEvent e = EventBuilder(469, 99, "two levers")
+                         .Anchored(1)
+                         .UseGO(179148, 80.0f)
+                         .ReportUse()
+                         .UseGO(100, 10.0f)
+                         .Build();
+
+    ASSERT_EQ(e.steps.size(), 2u);
+    EXPECT_TRUE(e.steps[0].reportUse);
+    EXPECT_FALSE(e.steps[1].reportUse)
+        << "the modifier tags the LAST step at the time it is chained, not the event";
+}
+
 TEST(EventBuilderTest, JumpStepCarriesLandingAndRadius)
 {
     // A drop-down event: walk onto the lip, then jump the off-mesh gap onto the
@@ -555,11 +575,50 @@ TEST(DungeonEventRegistryTest, BlackrockRingOfLawEventShape)
     EXPECT_EQ(e->steps[1].hookId, 1u);
 
     // 3. garrison the centre until TYPE_RING_OF_LAW (1) reaches DONE (3); long
-    //    timeout for the boss fight.
+    //    timeout for the boss fight. The garrison re-runs the SAME start hook
+    //    while it holds, because the state is not monotonic (npc_grimstone's
+    //    no-victim watchdog resets it to NOT_STARTED).
     EXPECT_EQ(e->steps[2].kind, EventStepKind::MoveTo);
     EXPECT_EQ(e->steps[2].instanceDataId, 1);    // TYPE_RING_OF_LAW
     EXPECT_EQ(e->steps[2].instanceDataMin, 3u);  // EncounterState::DONE
     EXPECT_EQ(e->steps[2].timeoutMs, 600000u);
+    EXPECT_EQ(e->steps[2].hookId, 1u);           // .WhileHolding(EnsureRingStarted)
+    EXPECT_FLOAT_EQ(e->steps[2].radius, e->steps[0].radius)
+        << "walk-in and hold must agree on where the centre is";
+}
+
+// Blackrock Depths Shadowforge Lock (map 230 event 2): walk to the lever in the
+// East Garrison, pull it, then confirm the Giant Doors it drives actually closed.
+// ANCHORED because the lever is 113yd from — and a floor above — the doors it
+// moves, so only boss-nav can deliver the tank to it.
+TEST(DungeonEventRegistryTest, BlackrockShadowforgeLockEventShape)
+{
+    DungeonEvent const* e = DungeonEventRegistry::Find(230, 2);
+    ASSERT_NE(e, nullptr);
+    EXPECT_EQ(e->activation, EventActivation::Anchored);
+    EXPECT_EQ(e->orderIndex, 9u);  // between Bael'Gar (8) and Angerforge (9)
+    EXPECT_TRUE(e->required);
+
+    ASSERT_EQ(e->steps.size(), 3u);
+
+    // 1. settle at the lever, on the garrison floor beneath it.
+    EXPECT_EQ(e->steps[0].kind, EventStepKind::MoveTo);
+    EXPECT_FLOAT_EQ(e->steps[0].x, 615.61f);
+    EXPECT_FLOAT_EQ(e->steps[0].y, -49.78f);
+    EXPECT_EQ(e->steps[0].instanceDataId, -1);  // plain MoveTo, no gate
+
+    // 2. pull it. UseGO goes straight through GameObject::Use(), whose DOOR
+    //    branch has no lock check — which is how the Shadowforge Key is bypassed.
+    EXPECT_EQ(e->steps[1].kind, EventStepKind::UseGameObject);
+    EXPECT_EQ(e->steps[1].goEntry, 161460u);  // The Shadowforge Lock
+
+    // 3. gate on the DOORS, not on the lever: the lever flipping only proves the
+    //    click landed, GO_STATE_READY (1) on 157923 proves its SmartAI chain ran.
+    EXPECT_EQ(e->steps[2].kind, EventStepKind::WaitForGameObjectState);
+    EXPECT_EQ(e->steps[2].goEntry, 157923u);  // Giant Doors
+    EXPECT_EQ(e->steps[2].wantState, 1u);     // GO_STATE_READY == shut
+    EXPECT_GT(e->steps[2].radius, 113.0f)
+        << "the doors are 113yd from the lever — the scan must reach them";
 }
 
 // Deadmines Defias Cannon: walk to the cannon, fire it (Custom hook 2 casts the
@@ -723,8 +782,10 @@ TEST(DungeonEventRegistryTest, UnderbogDropDownEventShape)
     EXPECT_FLOAT_EQ(hop2.landY, -471.68f);
     EXPECT_FLOAT_EQ(hop2.landZ, 24.32f);
 
-    // Anchored, so it is not in the map's conditional set.
-    EXPECT_TRUE(DungeonEventRegistry::Conditional(546).empty());
+    // Anchored, so it is not itself in the map's conditional set — which is not
+    // empty: 546 also carries the conditional "Send Ghaz'an up to his platform".
+    for (DungeonEvent const* c : DungeonEventRegistry::Conditional(546))
+        EXPECT_NE(c->id, 1u) << "the drop-down chain must stay Anchored";
 }
 
 // Stratholme (329) dead-side "Baron run": the persistent Slaughterhouse chain

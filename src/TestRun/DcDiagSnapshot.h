@@ -69,6 +69,17 @@ namespace DcDiag
         bool reachable = false;
         bool reachChecked = false;
         bool canAttackMe = true;      // CreatureAI::CanAIAttack(member)
+        // A boss can be ALIVE, reachable and allowed to attack while being
+        // scripted out of the fight entirely. MgT's Kael'thas clamps damage to
+        // health-1, goes SetImmuneToAll + REACT_PASSIVE, despawns his summons and
+        // schedules KillSelf ELEVEN SECONDS later — and for all eleven the blame
+        // row read `0% reachable -> LEGITIMATE`, which is true and tells the reader
+        // nothing. Two runs in tp-20260808-162331-1 were disabled inside that
+        // window, already won, and it took reading the boss script to find out why.
+        // These three fields are that answer, printed where the question is asked.
+        bool immune = false;          // Unit::IsImmuneToAll
+        bool passive = false;         // Creature::GetReactState == REACT_PASSIVE
+        bool atOneHp = false;         // health == 1: a damage clamp, not a rounding
         float dist = -1.f;            // -1 when on another map
         std::uint32_t healthPct = 0;
         std::string victim;           // what the holder itself is fighting, if anything
@@ -97,6 +108,18 @@ namespace DcDiag
         std::string victim;       // name of GetVictim(), "" when not fighting
         bool dcStrategy = false;      // has the "dungeon clear" strategy
         bool dcCombatStrategy = false;
+
+        // HEARTBEAT: how long ago this member's own DC trigger ladder last ran
+        // (DcTickHeartbeat, stamped on both engines before any gate).
+        // `dcTickSeen == false` means it has never run for this bot.
+        //
+        // This is the field that separates "DC stood every rung down" from "this
+        // bot's AI is not being updated", which every other column reports
+        // identically. Read it per MEMBER, not just off the tank: the freeze it
+        // was written for is precisely a tank whose age climbs into the hundreds
+        // of seconds while its four followers stay in the tens of milliseconds.
+        std::uint32_t dcTickAgeMs = 0;
+        bool dcTickSeen = false;
 
         // --- combat blame (populated only while inCombat) ------------------
         // WHICH ENGINE the bot is actually running, which is a different
@@ -208,6 +231,11 @@ namespace DcDiag
         std::uint32_t inCombatCount = 0;
         std::uint32_t clearedAnchors = 0;
         std::uint32_t skippedCount = 0;
+
+        // The tank's own heartbeat, mirrored out of its member row so the
+        // one-line Summarize can carry it. See MemberSnapshot::dcTickAgeMs.
+        std::uint32_t dcTickAgeMs = 0;
+        bool dcTickSeen = false;
 
         std::vector<MemberSnapshot> members;
         std::vector<BossSnapshot> roster;

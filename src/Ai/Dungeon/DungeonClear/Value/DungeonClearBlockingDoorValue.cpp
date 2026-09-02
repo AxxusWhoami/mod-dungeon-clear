@@ -4,6 +4,7 @@
  */
 
 #include "DungeonClearBlockingDoorValue.h"
+#include "Ai/Dungeon/DungeonClear/DcApproachState.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 
 #include <algorithm>
@@ -24,6 +25,7 @@
 #include "Ai/Dungeon/DungeonClear/Util/DcEngageGeometry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearMath.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearUtil.h"
+#include "Ai/Dungeon/DungeonClear/Util/DungeonPathFollower.h"
 #include "Playerbots.h"
 #include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 
@@ -176,6 +178,65 @@ ObjectGuid DungeonClearBlockingDoorValue::Calculate()
     float const botZ = bot->GetPositionZ();
     size_t const cursor = DungeonClearMath::PathProgressCursor(pts, botX, botY, botZ);
 
+    // CRITICAL #4: the JOINING LEG (bot -> pts[cursor]) is synthesised, not
+    // pathfound, so it is only corridor while the bot is standing on the route.
+    // #2 and #3 fixed where that leg STARTS; this is about how far it REACHES.
+    // Nothing bounded it, and on a folded-back map the nearest route vertex can
+    // be at the far end of the walk with a mountain in between.
+    //
+    // Blackwing Lair, run tr-20260828-103056-1: Vaelastrasz dies, the raid turns
+    // for Broodlord Lashlayer, and Advance builds the authored anchor route
+    // ("path rebuilt -> Broodlord Lashlayer (sync (anchor route)): segs=21
+    // firstSegPts=1") whose first point — the staging shelf at the head of the
+    // climb — is 150yd away, so the raid starts the leg 145yd off its own route.
+    // BWL folds back on itself: the route's LAST anchor, the Broodlord standoff,
+    // sits 82yd from Vaelastrasz's floor through solid rock, nearer than any
+    // other vertex. The cursor therefore landed on the route's END, the scan
+    // synthesised an 82yd bot -> standoff bee-line through the mountain, and that
+    // line passes 0.5yd from GO 179365 — the Broodlord PASSAGE portcullis, which
+    // is 342yd away along the real walk and opens only when Broodlord dies. It
+    // was flagged as corridor-blocking, the walk-in could not place it on the
+    // path at all ("-1.0yd along path (-1 = unplaced)"), and because a passage
+    // door carries no lock the not-openable branch auto-paused a 40-bot raid on
+    // a door it was never walking to. 3/8 bosses, unrecoverable.
+    //
+    // So: refuse the scan outright unless the bot could RE-ANCHOR onto the cursor
+    // vertex — Resnap's own two conditions, in Resnap's own order. Distance first
+    // (free), then line of sight, which is the half that actually distinguishes
+    // "a few yards off the centreline" from "through a wall". Static VMAP only:
+    // an LOS check that counted GameObjects would be blocked by the very shut
+    // door the scan exists to find. Returning empty is the right answer, not a
+    // conservative one — with no trustworthy corridor there is no evidence of a
+    // blocker, and the value re-evaluates the moment the bot rejoins its route.
+    if (!DungeonClearMath::PathCursorIsJoinable(pts, cursor, botX, botY, botZ,
+                                                DungeonPathFollower::RESNAP_RADIUS) ||
+        !map->isInLineOfSight(botX, botY, botZ + 1.5f,
+                              pts[cursor].x, pts[cursor].y, pts[cursor].z + 1.5f,
+                              bot->GetPhaseMask(), LINEOFSIGHT_CHECK_VMAP,
+                              VMAP::ModelIgnoreFlags::Nothing))
+    {
+        LOG_DEBUG("playerbots.dungeonclear",
+                  "[DC:{}] blocking-door: off route ({:.1f}yd to cursor vertex {}/{}) "
+                  "-> corridor unknown, nothing flagged",
+                  bot->GetName(),
+                  std::sqrt((pts[cursor].x - botX) * (pts[cursor].x - botX) +
+                            (pts[cursor].y - botY) * (pts[cursor].y - botY) +
+                            (pts[cursor].z - botZ) * (pts[cursor].z - botZ)),
+                  uint32(cursor), uint32(pts.size()));
+        // Same bookkeeping as a corridor that has genuinely cleared: whatever we
+        // last flagged is no longer supported by evidence, so drop it and end the
+        // door-blocked action's stall window rather than leaving a stale GUID for
+        // it to keep parking on.
+        if (!_lastFlagged.IsEmpty())
+        {
+            _lastFlagged = ObjectGuid::Empty;
+            context->GetValue<DcApproachState&>(DcKey::ApproachState)
+                ->Get()
+                .ClearDoorStall();
+        }
+        return ObjectGuid::Empty;
+    }
+
     float prevX = botX;
     float prevY = botY;
     float prevZ = botZ;
@@ -315,6 +376,17 @@ ObjectGuid DungeonClearBlockingDoorValue::Calculate()
     if (best != _lastFlagged)
     {
         _lastFlagged = best;
+        // The blocker CHANGED — the corridor cleared, or a different door is on
+        // it now. Either way the door-blocked action's blocked-state watchdog is
+        // measuring a stall that has ended, so end its window here: the next
+        // arrival park arms a fresh one. This is the guaranteed half of the fix
+        // (the action's own reset only fires if the 500ms value cache happens to
+        // still name a door the tick after it swings open); without it an
+        // auto-closing gate accumulates its successful opens into one long
+        // "stall" and auto-pauses the run. See DcApproachState::ClearDoorStall.
+        context->GetValue<DcApproachState&>(DcKey::ApproachState)
+            ->Get()
+            .ClearDoorStall();
         if (bestGo)
             LOG_INFO("playerbots.dungeonclear",
                      "[DC:{}] blocking-door: flagged {} '{}' (entry {}) "

@@ -12,6 +12,7 @@
 #include "MoveSplineInitArgs.h"
 #include "Position.h"
 #include "Ai/Dungeon/DungeonClear/Util/ChunkedPathfinder.h"
+#include "Ai/Dungeon/DungeonClear/Util/DungeonPathFollower.h"
 
 class Player;
 class Unit;
@@ -54,11 +55,56 @@ public:
     // FindBlockingTrashCorridor for long routes that fan across multiple chunks.
     // With DungeonClear.DynamicAggroRange on the band is each candidate's real
     // aggro range (clamped to the trash floor/cap); off it is `corridorWidth`.
+    //
+    // `cursor` is the caller's live follower cursor: the scan starts THERE, not
+    // at segment 0. Route behind the cursor is route already walked, and on an
+    // authored anchor route reading it as forward corridor is what sent the BWL
+    // raid up through Firemaw's floor — see BuildRouteWindow.
     static Unit* FindBlockingTrashOnPath(Player* bot,
                                          std::vector<PathSegment> const& segments,
                                          float maxLookAhead,
                                          float corridorWidth,
-                                         GuidVector const& candidates);
+                                         GuidVector const& candidates,
+                                         DungeonFollowerState const& cursor);
+
+    // EN-ROUTE PACK SWEEP. The pack whose aggro sphere the next `maxLookAhead`
+    // yards of route ENTERS FIRST, or nullptr.
+    //
+    // The companion to FindBlockingTrashOnPath, and deliberately a different
+    // question. That one asks what is standing ON the path — a corridor band,
+    // nearest in-LOS candidate wins — which in a hall with rooms off it targets the
+    // mob on the centre line and walks the tank through the aggro of everything
+    // flanking it. This one asks whose aggro the walk is about to enter, in ROUTE
+    // ORDER, so a room gets pulled from its threshold instead of woken in passing.
+    //
+    // The reference geometry is Stormwind Stockade (34), issue #17: the first boss
+    // sits 105yd dead ahead of the entrance up the central axis, and the cells
+    // flanking that axis hold elites 10-21yd off the route line against a ~25yd
+    // aggro reach — every one of them inside aggro of the corridor itself. The tank
+    // targeted the mob ON the line, walked to it, and arrived with three cells in
+    // tow. En-route AVOIDANCE cannot fix that: there is no clear line to detour to,
+    // so TruncateWindowAtSphere correctly declines and the tank walks through
+    // anyway. The pack has to be pulled, not dodged.
+    //
+    // Shares BystanderSpheres / FirstViolatedSphereOnPolyline with that avoidance,
+    // so detection and evasion can never disagree about what "inside aggro" means.
+    // Adds vetoes the avoidance has no need of, because a sphere it merely walks
+    // around is one this WALKS TO: encounter and room-aggro bosses (the dedicated
+    // at-boss / pre-clear paths own those), a closed door in between,
+    // level-reachability — and, most importantly, an en-route LINE OF SIGHT test.
+    // The sphere set is LOS-blind by design; a mob behind a solid wall never aggros
+    // no matter how far its sphere reaches over the corridor, so it must be shown
+    // to see some point on the walk before it is worth walking to.
+    //
+    // NORMAL difficulty only (DcEngageGeometry::EnRouteSweepApplies — heroic is
+    // the avoidance's job, not this one), and nullptr there — so callers may call
+    // unconditionally. Costs one grid search plus at most kSweepProbeBudget
+    // reachability/LOS probes; leader-only call sites, and the pull side sits
+    // behind the 250ms sticky value.
+    static Unit* FindEnRouteAggroPack(Player* bot, AiObjectContext* ctx,
+                                      std::vector<PathSegment> const& segments,
+                                      float maxLookAhead,
+                                      DungeonFollowerState const& cursor);
 
     // The trash pack the advanced-pull maneuver should grab, or nullptr. Mirrors
     // the blocking-trash trigger's primary detection (corridor scan along the
@@ -101,6 +147,28 @@ public:
     // fallback to kill obstacles when no path to the boss exists.
     static Unit* FindNearestReachableHostile(Player* bot);
 
+    // Every unit that currently holds `member` in combat, GUID-deduped and
+    // appended to `out`: the PvE combat references first (the authoritative
+    // "who has me flagged" list — the same set DcCombatFlag::ScanCombatHolders
+    // and the teardown snapshot walk), then getAttackers() as a superset guard
+    // for anything mid-swing that has not registered a reference yet, then the
+    // member's own victim.
+    //
+    // getAttackers() ALONE IS NOT THE ANSWER, and the difference is the whole
+    // reason this helper exists. That set holds only units whose CURRENT VICTIM
+    // is this member. A mob that tagged the party from range and then stood off
+    // — never entering melee, never picking a victim — is absent from it while
+    // its CombatReference goes on holding every member flagged forever
+    // (instanced creatures never leash). DungeonEventExecutor's
+    // DropCombatLeftBehind learnt this the hard way and already walks both; the
+    // assist pickers did not, and returned nullptr for a fight that was
+    // demonstrably happening.
+    //
+    // Read-only: collects, never clears. Callers that DROP combat must still do
+    // their own collect-then-clear pass, because CombatReference::EndCombat
+    // deletes the reference it is iterating.
+    static void CollectCombatHolders(Unit* member, std::vector<Unit*>& out);
+
     // The unit the leader is fighting, from `bot`'s perspective: the nearest live,
     // valid-attack-target among the leader's attackers, falling back to the
     // leader's victim, then nullptr. LOS-blind on purpose — the whole point is to
@@ -112,8 +180,12 @@ public:
     // uses (kept as a shared, testable helper).
     static Unit* LeaderFightAnchor(Player* bot, Player* leader, Position& anchorPos);
 
-    // Returns a live spawned creature with the given entry on the bot's map, or
-    // nullptr if none exists or all are dead.
+    // Returns a live creature with the given entry on the bot's map, or nullptr
+    // if none exists or all are dead. Walks the creature-by-spawn-id store, then
+    // falls back to a bounded grid search — the store holds only DB-spawned
+    // creatures (m_spawnId != 0), so a boss the instance script SUMMONS (Molten
+    // Core's Majordomo and Ragnaros, Blackrock Depths' Nefarian) is invisible to
+    // it and the fallback is the only thing that finds one.
     static Creature* FindLiveCreatureOnMap(Player* bot, uint32 entry);
 
     // Live boss creature for `entry`, resolved through the cached
@@ -125,8 +197,10 @@ public:
     // Returns nullptr when the boss isn't loaded/alive on the map.
     static Creature* GetLiveBoss(Player* bot, AiObjectContext* ctx, uint32 entry);
 
-    // Returns true if at least one spawned creature with the given entry exists
-    // on the bot's map (alive or dead). Distinguishes "missing" from "killed".
+    // Returns true if at least one creature with the given entry exists on the
+    // bot's map (alive or dead). Distinguishes "missing" from "killed". Carries
+    // the same script-summon grid fallback as FindLiveCreatureOnMap; without it
+    // Advance's not-spawned stall fires on a summoned boss standing in the room.
     static bool IsCreaturePresentOnMap(Player* bot, uint32 entry);
 
     // --- Event-summoned bosses (e.g. RFD's gong -> Tuten'kash) ------------
@@ -178,8 +252,9 @@ public:
     // pull pipeline that normally stand bosses down: the trigger's pull-mode
     // requirement (a pull-back is MANDATORY, so it runs even with the player's
     // pull setting Off) and its at-boss stand-down (which otherwise hands the boss
-    // to the walk-in engage — for Ghaz'an, a swim into a 47yd pit). Cheap: a
-    // registry Find plus the already-memoised at-boss probe.
+    // to the walk-in engage). Cheap: a registry Find plus the already-memoised
+    // at-boss probe — and the Find misses outright while the table is empty, which
+    // it has been since S1593.
     static bool IsPullbackBossDue(Player* bot, AiObjectContext* ctx);
 
     // --- Room-wide-aggro pre-clear (RoomAggroRegistry) --------------------

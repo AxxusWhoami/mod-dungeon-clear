@@ -25,6 +25,11 @@ CATALOGUE = {
          "level": 70, "heroicLevel": 70, "wing": "",
          "gear": [{"ilvl": 100, "label": "normal"}],
          "gearHeroic": [{"ilvl": 115, "label": "heroic"}]},
+        {"token": "mc", "name": "Molten Core", "mapId": 409,
+         "level": 60, "heroicLevel": 0, "wing": "",
+         "raid": True, "sizeMin": 2, "sizeMax": 40,
+         "sizePresets": [10, 25], "defaultSize": 10,
+         "gear": [{"ilvl": 66, "label": "T1"}]},
     ],
 }
 
@@ -72,6 +77,29 @@ def test_run_start_builds_command(client, cfg):
     assert body["pending"] is False and body["ok"] is True
 
 
+def test_run_start_raid_size(client, cfg):
+    """A raid row forwards size= to the worldserver; 0 stays a classic run."""
+    write_catalogue(cfg)
+    br = use_bridge(["Test run started"])
+    r = client.post("/api/testruns/start", json={"dungeon": "mc", "size": 10})
+    assert r.status_code == 200, r.text
+    r = client.post("/api/testruns/start", json={"dungeon": "mc"})
+    assert r.status_code == 200, r.text
+    assert br.cmds == [".dc test start mc size=10", ".dc test start mc"]
+
+
+def test_plan_start_raid_size(client, cfg):
+    write_catalogue(cfg)
+    br = use_bridge(["Plan started"])
+    r = client.post("/api/testplans/start",
+                    json={"dungeon": "mc", "total": 3, "size": 25})
+    assert r.status_code == 200, r.text
+    assert br.cmds == [".dc test plan start mc total=3 size=25"]
+    assert client.post("/api/testplans/start",
+                       json={"dungeon": "blackfathom", "total": 3,
+                             "size": 10}).status_code == 400
+
+
 def test_run_start_pending_detected(client, cfg):
     write_catalogue(cfg)
     use_bridge(["test driver 'Dcdriver' is logging in — retry in a few seconds"])
@@ -89,6 +117,9 @@ def test_run_start_refusals(client, cfg):
         {"dungeon": "blackfathom", "ilvl": 33},              # not on ladder
         {"dungeon": "blackfathom", "quality": 9},
         {"dungeon": "blackfathom", "level": 99},
+        {"dungeon": "blackfathom", "size": 10},              # size on a 5-man row
+        {"dungeon": "mc", "size": 1},                        # under the raid bounds
+        {"dungeon": "mc", "size": 41},                       # over the raid bounds
     ]
     for payload in bad:
         assert client.post("/api/testruns/start", json=payload).status_code == 400
@@ -230,10 +261,12 @@ def test_roster_save_load_delete(client, cfg):
 
 def test_roster_name_guards(client):
     bad_sets = [
-        MEMBERS[:4],                                  # wrong count
+        MEMBERS[:1],                                  # too few (bounds are 2-40)
+        [f"Name{chr(ord('a') + i // 26)}{chr(ord('a') + i % 26)}"
+         for i in range(41)],                         # too many
         MEMBERS[:4] + ["Tanky"],                      # duplicate
         MEMBERS[:4] + ["Bad'Name"],                   # injection charset
-        MEMBERS[:4] + ["X"],                          # too short
+        MEMBERS[:4] + ["X"],                          # too short a name
     ]
     for members in bad_sets:
         r = client.post("/api/rosters", json={"name": "x", "members": members})

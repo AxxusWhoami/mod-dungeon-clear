@@ -51,6 +51,32 @@ namespace DcRel
     inline constexpr float HealReposition  = 41.0f;  // healer-only; both engines (see note below)
 
     // ===== non-combat leader driving ladder =====
+    // BLACKWING LAIR ONLY, every member but the leader: hold the pack inside one
+    // leash around the leader's route cursor while it crosses the Suppression
+    // Rooms. Registered in BOTH engines (the crossing has out-of-combat ticks and
+    // the non-combat driving ladder owns the followers on those), and listed here
+    // rather than in the combat block only because its higher-value siblings are.
+    //
+    // 36 is chosen against what it must OUTRANK, which on this leg is the whole
+    // reason the pack strings out: stock MoveChase (~30), AssistCampCombat (35)
+    // and RegroupCombat (29) — a follower chasing a whelp 40yd off the line is
+    // exactly the string-out this exists to stop, and a strung-out raid sweeps a
+    // far larger cylinder of a room whose spawns are the problem. It also clears
+    // the non-combat follower rungs it would otherwise lose to (AssistCamp 29,
+    // HoldAtCamp 28, FollowTank 25, Advance 15) and RezParty (31.5), which is
+    // deliberate and the same call the Razorgore camp makes: walking a rezzer 40yd
+    // back across the gauntlet for a corpse is not a recovery, it is a second
+    // death.
+    //
+    // It stays BELOW everything that must still win: StrandedRecovery (42) and
+    // HealReposition (41) above it, and in the combat engine the camp owners (60),
+    // HazardVacate (55) and the phantom hatch (65) — none of which contend on this
+    // leg, and all of which should if they ever did.
+    //
+    // TIES HakkarSuppressor (36, non-combat, Sunken Temple). Map-partitioned: map
+    // 109 and map 469 cannot both be under a bot's feet. Asserted in
+    // t/TestRelevanceLadder.cpp with the rest of the legitimate ties.
+    inline constexpr float TransitPack      = 36.0f; // raid: hold the transit pack together
     inline constexpr float HakkarSuppressor = 36.0f; // ST Hakkar: silence a resetting suppressor
     inline constexpr float HakkarFlame      = 35.5f; // ST Hakkar: douse (tie-broken above Pull)
     inline constexpr float Pull             = 35.0f; // advanced/dynamic pull-to-camp maneuver
@@ -119,12 +145,71 @@ namespace DcRel
     // Inert on every map without a drivesInCombat event, which is all of them bar
     // Black Morass — the trigger resolves the flag before it fires.
     inline constexpr float EventDueCombat         = 61.0f; // leader: wave-encounter event driver
+    // BLACKWING LAIR ONLY, one member: the elected orb runner's walk to the Orb of
+    // Domination and the click itself (DungeonClearRazorgoreOrbTrigger).
+    //
+    // 62 because of what it has to beat on a raid map, which is not the DC ladder
+    // at all — during a raid encounter every other DC rung is zeroed by the
+    // stand-down (see DungeonClearCombatMultiplier) and the bot's tick belongs to
+    // mod-playerbots' `bwl` strategy, whose nodes sit at ACTION_RAID (60) and
+    // ACTION_RAID+1 (61). One of them, `bwl razorgore avoid aoe`, exists precisely
+    // to walk bots out of the boss's frontal cone — and it would walk the runner
+    // off the orb ledge every tick of the trip. So this has to outrank 61.
+    //
+    // Kept BELOW the Hakkar band (62-64, Sunken Temple — another map, cannot
+    // contend) and the phantom-combat hatch (65). It ties nothing: it is the only
+    // rung in the module gated on a single elected member of a single map's single
+    // encounter, and it YIELDS (returns false) the moment the runner is parked, so
+    // it owns the tick only while actually travelling or clicking.
+    inline constexpr float RazorgoreOrb           = 62.0f; // runner: take the orb
+    // The same encounter's other half: every member EXCEPT the runner, walking to
+    // the camp at the foot of the orb platform. BOTH engines — the egg run has
+    // out-of-combat ticks (the wave dies, the possessed boss attacks nobody), and
+    // on those the non-combat driving ladder used to walk the tank at the boss
+    // and the raid after it.
+    //
+    // 61.5 sits between the raid strategy's nodes (ACTION_RAID 60 / +1 61) and the
+    // runner's rung (62), and both boundaries are deliberate. ABOVE 61 because
+    // `bwl razorgore avoid aoe` exists to walk bots out of the boss's frontal cone
+    // and would happily walk them out of the camp; BELOW the runner because if one
+    // bot is somehow both, going for the orb is the more urgent job. The rung goes
+    // INERT inside the leash rather than yielding, so a bot in position never
+    // contends with its own rotation at all — the fine positioning inside the camp
+    // stays the strategy's.
+    inline constexpr float RazorgoreCamp          = 61.5f; // raid: hold the orb camp
+    // Every member, BOTH engines: let go of a creature the run is forbidden to
+    // damage right now (DcTargetExclusionRegistry). One tick's work — drop the
+    // victim, clear the current target — and then the rung goes inert again.
+    //
+    // 61.25 puts it under the camp (61.5) and the orb (62) and over the raid
+    // strategy's own nodes (ACTION_RAID 60 / +1 61), which is exactly the ordering
+    // the Razorgore case needs: `bwl razorgore mark boss` sits at 61 and paints the
+    // moon icon on a boss the raid must not kill, and RtiTargetValue short-circuits
+    // the exclusion pass, so something above it has to take the target back off the
+    // DPS. It ranks BELOW the positioning rungs because a bot in the wrong place is
+    // the more urgent problem — and because dropping a target it is no longer
+    // shooting at is free to defer by a tick.
+    inline constexpr float HoldFire               = 61.25f; // drop a barred target
+
+    // Registered in BOTH engines (like BreakStuckCombat / HazardVacate). The combat
+    // registration is the working one; the NON-combat registration is a liveness net.
+    // Every watchdog the maneuver owns — tag-leg and return-leg timeouts, the CC
+    // abort, the arrive-at-camp release — is evaluated inside the action, so they
+    // only tick while the action runs. An LOS-break pull ends with the tank unable to
+    // see its own target, which is InvalidTargetValue's out-of-LOS clause, so stock
+    // `drop target` (99) can move the tank to the non-combat engine mid-drag and
+    // freeze the FSM in a holding phase with no clock running (Deadmines workshop,
+    // tp-20260815-162044-2: Returning pinned 130-215s). 60 also clears the non-combat
+    // ladder it lands in — above HazardVacate (55), below BreakStuckCombat (65).
     inline constexpr float PullManeuver           = 60.0f; // leader: drag the pack back to camp
     inline constexpr float StayAtCamp             = 60.0f; // follower: pin at camp (role peer of PullManeuver)
-    // Survival: move OUT of an active-vacate hazard's pulse. The Arcatraz
-    // "Destroyed Sentinel" (21761) is summoned on a Sentinel's death at the corpse,
-    // is NOT_SELECTABLE (can't be fought), and pulses ~563-937 every second in
-    // 15yd until it despawns. The party is standing right on it after the kill and
+    // Survival: move OUT of an active-vacate hazard's pulse. Two shapes, one rung.
+    // The Arcatraz "Destroyed Sentinel" (21761) is summoned on a Sentinel's death
+    // at the corpse, is NOT_SELECTABLE (can't be fought), and pulses ~563-937 every
+    // second in 15yd until it despawns. Scholomance's "Cloud of Disease" (17742) is
+    // the same problem one tier down and with no creature at all — a persistent
+    // area aura dropped where a Diseased Ghoul dies, 350/s in 5yd for 20s.
+    // Either way the party is standing right on it after the kill and
     // nothing else moves them off, so they die where they stand. This drives EVERY
     // bot (no tank exemption — there is nothing to tank) out of the pulse, after
     // which normal driving advances them past it. Registered in BOTH engines because the summon

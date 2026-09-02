@@ -45,6 +45,7 @@
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcLeaderSignal.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearApproach.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcEngageGeometry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearMath.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearApproachIo.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
@@ -53,9 +54,11 @@
 #include "Ai/Dungeon/DungeonClear/Overrides/ObjectiveHookRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonEventExecutor.h"
 #include "Ai/Dungeon/DungeonClear/Util/ChunkedPathfinder.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcCombatPurge.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcDoorPolicy.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcMovement.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcPathWorker.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcSocialQuarantine.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTargeting.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTickMemo.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearTuning.h"
@@ -268,7 +271,21 @@ namespace DcActionShared
         // are deliberately separate (their pre-run lifetime differs).
         DcRun::Of(ctx).Reset();
         if (bot)
+        {
             DcStatusPublisher::UnmarkActiveTank(bot->GetGUID());
+            // Post-purge target bars are the other piece of run state kept OUTSIDE
+            // the bot — keyed by instance id, which the server reuses — so a bar
+            // left standing would silently follow the next run into the same
+            // instance and hide a legitimate target from it. See DcCombatPurge.h.
+            DcCombatPurge::ClearBars(bot);
+            // Hand the room back. The social quarantine is the one piece of run
+            // state that lives OUTSIDE the bot — it is stored as react state on the
+            // creatures themselves — so a reset that only clears context values
+            // would leave a wing of the instance permanently unable to call for
+            // help behind a party that has stopped clearing it. See
+            // DcSocialQuarantine.h.
+            DcSocialQuarantine::ReleaseAll(bot);
+        }
         ctx->GetValue<ObjectGuid>(DcKey::EngageTrashTarget)->Set(ObjectGuid::Empty);
         ctx->GetValue<std::string&>(DcKey::StallReason)->Get().clear();
         ctx->GetValue<std::string&>(DcKey::LastSaidReason)->Get().clear();
@@ -405,12 +422,22 @@ namespace DcActionShared
                  path.reachable ? "" : (" UNREACHABLE: " + path.failureReason));
 
         ctx->GetValue<uint32>(DcKey::CurrentHop)->Set(0u);
-        ctx->GetValue<DungeonFollowerState&>(DcKey::FollowerState)->Get() = DungeonFollowerState{};
 
-        // Re-baseline the TTL-defer progress cursor to the freshly-reset follower
-        // (segment 0, point 0) so the first real advance reads as progress.
-        appr.lastProgressSegmentIdx = 0;
-        appr.lastProgressPointIdx = 0;
+        // SEED the follower rather than flatly resetting it. For a route built
+        // from the bot's own position the two are identical (SeedCursor early-
+        // outs at segment 0 without a raycast); for an AUTHORED ANCHOR route,
+        // whose segment 0 is a fixed world point, a flat reset aims the follower
+        // at the route's START — which is how a BWL raid standing at Broodlord
+        // was ordered back down the gauntlet to Vaelastrasz's chamber on every
+        // rebuild, ~3Hz, for minutes. See DungeonPathFollower::SeedCursor.
+        DungeonFollowerState& follower =
+            ctx->GetValue<DungeonFollowerState&>(DcKey::FollowerState)->Get();
+        DungeonPathFollower::SeedCursor(bot, path, follower);
+
+        // Re-baseline the TTL-defer progress cursor to the freshly-seeded
+        // follower so the first real advance reads as progress.
+        appr.lastProgressSegmentIdx = follower.segmentIdx;
+        appr.lastProgressPointIdx = follower.pointIdx;
     }
 
 
@@ -758,16 +785,72 @@ bool DcMovementAction::DcMoveTo(uint32 mapId, float x, float y, float z, bool id
     // (MovementActions.cpp:215), so one retry defeats the ratchet whatever seeded it.
     // Gated on "refused AND standing still" so healthy movement never reaches here: a
     // refusal mid-walk is the ordinary duplicate/last-move guard and must stay a no-op.
-    // Path generation is still on inside DoMovePoint — this trades stock's z-search for
-    // MotionMaster's own pathing, it does not straight-line the bot through geometry.
-    if (!moved && !bot->isMoving() && !exact_waypoint)
+    //
+    // AND GATED ON THE BOT'S OWN LEVEL, which is the difference between defeating a
+    // stock bug and defeating the geometry. The retry claims path generation is still
+    // on inside DoMovePoint, so this "does not straight-line the bot through geometry".
+    // That holds only where there IS a mesh: a Player always gets PATHFIND_NORMAL, and
+    // with no poly under the destination PathGenerator falls back to a straight line
+    // and still reports normal — so a destination one storey up is WALKED THERE,
+    // through the floor between. Live, that is the whole Blackwing Lair ceiling clip
+    // (tp-20260828-171530-1, 5 of 5 runs): the heal-reposition fallback asked for hall
+    // x/y at the drake hall's z, stock's z-search refused it — correctly — and this
+    // retry overrode the refusal. Healers arrived inside a 14-mob formation 24.8yd
+    // overhead, the tank followed, and the evading remnant held the raid in combat for
+    // the rest of the run.
+    //
+    // Nothing the retry was written for is lost. Every case it exists for is a
+    // legitimate destination on the bot's own floor a few yards away — Xomja refused
+    // 45x at 1.7yd, the Steamvault strand origins — and those clear the same-level
+    // test for one fabs, with no probe at all.
+    //
+    // BUT A Z BAND IS NOT THE PREDICATE, only a cheap sufficient case for it. The
+    // defect is "the destination has no route", and "the destination is more than
+    // DC_Z_LEVEL_TOLERANCE off my own z" is a different claim: a ramp, a stair
+    // flight, a walkway one tier up — Old Hillsbrad's keep ramp, BRD, the Steamvault
+    // walkways this file already cites as stacked geometry — clear five yards at
+    // ordinary range while being perfectly reachable. Gating on the band alone hands
+    // every one of those back to the ratchet the retry exists to defeat, and the
+    // failure is silent: a stationary bot and one WITHHELD line.
+    //
+    // So the band is the FAST PATH and the probe is the answer. Off-level, ask
+    // whether a complete route actually arrives at the height requested — the one
+    // thing PATHFIND_NORMAL cannot tell us, because a Player gets it for free even
+    // where the "route" is a straight line drawn through a floor. That is exactly
+    // the Blackwing Lair ceiling clip (tp-20260828-171530-1, 5 of 5 runs): the
+    // heal-reposition fallback asked for hall x/y at the drake hall's z, stock's
+    // z-search refused it — correctly — and this retry overrode the refusal, putting
+    // healers inside a 14-mob formation 24.8yd overhead. The probe answers no there
+    // and yes on every ramp.
+    //
+    // Cost is one Detour query, and only on the branch that has already refused AND
+    // left the bot standing still — never on a healthy move, and never per candidate.
+    bool const sameLevel = DungeonClearMath::MayRetryExactWaypoint(
+        destZ, bot->GetPositionZ(), DC_Z_LEVEL_TOLERANCE);
+    bool const stalled = !moved && !bot->isMoving() && !exact_waypoint;
+    bool const mayRetry =
+        stalled && (sameLevel || DcEngageGeometry::IsPointLevelReachable(bot, x, y, destZ));
+
+    if (mayRetry)
     {
         moved = MoveTo(mapId, x, y, destZ, idle, react, normal_only, /*exact_waypoint*/ true,
                        priority, lessDelay, backwards);
         if (moved)
             DC_PULL_TRACE("[DC:{}] move refused by the z-search -> exact-waypoint retry "
-                          "RESCUED it (dest {:.1f},{:.1f},{:.1f} at {:.1f}yd)",
-                          bot->GetName(), x, y, destZ, bot->GetExactDist(x, y, destZ));
+                          "RESCUED it (dest {:.1f},{:.1f},{:.1f} at {:.1f}yd, {})",
+                          bot->GetName(), x, y, destZ, bot->GetExactDist(x, y, destZ),
+                          sameLevel ? "same level" : "off-level but routable");
+    }
+    else if (stalled)
+    {
+        // Named, because a caller handing out unroutable destinations is a bug at the
+        // SOURCE and this line is the only place it is visible. The move is correctly
+        // refused either way; what this says is that DC declined to override it.
+        DC_PULL_TRACE("[DC:{}] move refused -> exact-waypoint retry WITHHELD, no route "
+                      "arrives at the dest ({:.1f}yd off this level; dest "
+                      "{:.1f},{:.1f},{:.1f}, bot z {:.1f})",
+                      bot->GetName(), std::fabs(destZ - bot->GetPositionZ()), x, y, destZ,
+                      bot->GetPositionZ());
     }
 
     // A refused move that leaves the bot STANDING STILL is the signature behind every
@@ -911,6 +994,55 @@ DcMovementAction::GlideOutcome DcMovementAction::DriveGlideToEnd(
     if (hop.isDone)
         return GlideOutcome::ReachedEnd;
 
+    // --- The two RAMP guards DcAdvanceAction's ladder carries and this sibling
+    // did not. Both failure modes are the follower cursor's, not the tank rung's,
+    // so they belong here too; the door walk-in walks the same ramps.
+    //
+    // (1) Stranded cursor. Recast rasterizes an incline into plateaus, so a route
+    // point on a ramp routinely floats a couple of yards off the collision floor
+    // the bot stands on. Arrive under it and NextHop can never advance: the wedge
+    // detector above fires, Resnap searches forward FROM THE CURSOR and considers
+    // the cursor point itself first — which, being within POINT_REACHED
+    // horizontally, is the nearest candidate — so it re-picks the same point, and
+    // the glide is re-issued at a point the bot is standing beneath. Forever.
+    // Step past it, exactly as the tank ladder does.
+    //
+    // (2) Hop behind the bot. RouteDeviation is PERPENDICULAR, so a bot carried
+    // along its own corridor past the cursor reads a small deviation with its hop
+    // behind it, and the off-line rejoin below then walks it BACKWARD to that hop.
+    // Direction, not distance: a hop behind is never worth walking to, the route
+    // is one-way. ---
+    if (!hop.isJump)
+    {
+        G3D::Vector3 skipped;
+        if (DungeonPathFollower::SkipStrandedPoint(bot, path, follower, skipped))
+        {
+            LOG_INFO("playerbots.dungeonclear",
+                     "[DC:{}] {} stranded cursor: standing {:.1f}yd under/over route point "
+                     "({:.1f},{:.1f},{:.1f}) -> skipped to seg {} pt {}",
+                     bot->GetName(), tag, bot->GetPositionZ() - skipped.z,
+                     skipped.x, skipped.y, skipped.z, follower.segmentIdx, follower.pointIdx);
+            hop = DungeonPathFollower::NextHop(bot, path, follower);
+            if (hop.isDone)
+                return GlideOutcome::ReachedEnd;
+        }
+
+        if (!hop.isJump && DungeonPathFollower::HopIsBehind(bot, path, follower, hop))
+        {
+            bool const reanchored = DungeonPathFollower::Resnap(bot, path, follower);
+            LOG_DEBUG("playerbots.dungeonclear",
+                      "[DC:{}] {} re-anchor: next hop is behind the bot -> {}",
+                      bot->GetName(), tag,
+                      reanchored ? "Resnapped + refetched hop" : "Resnap failed, falling through");
+            if (reanchored)
+            {
+                hop = DungeonPathFollower::NextHop(bot, path, follower);
+                if (hop.isDone)
+                    return GlideOutcome::ReachedEnd;
+            }
+        }
+    }
+
     // --- Leave an in-flight escort glide alone, INCLUDING across a momentary
     // isMoving()==false flicker: the ACTIVE escort generator type alone is the
     // "spline still travelling" signal (the core pops it the instant the spline
@@ -934,16 +1066,26 @@ DcMovementAction::GlideOutcome DcMovementAction::DriveGlideToEnd(
     // corridor, the escort spline's opening straight leg back to the route clips
     // wall corners. Rejoin via PathGenerator (MoveTo) while off the line; the
     // glide resumes once RouteDeviation drops back under the on-corridor threshold.
+    //
+    // The vertical half is the module's documented metric-mismatch repeat
+    // offender and this sibling was missing it: RouteDeviation is 2D-only, so a
+    // bot on a different floor directly under or over its route reads deviation
+    // ~= 0 and would let a STRAIGHT escort spline launch through the floor or
+    // ceiling. Same DC_CORRIDOR_Z_BAND test DcAdvanceAction::FillHopObs applies.
     float const deviation = DungeonPathFollower::RouteDeviation(bot, path, follower);
-    if (deviation > DungeonPathFollower::OFF_PATH_THRESHOLD)
+    std::optional<G3D::Vector3> const curPt = DungeonPathFollower::CurrentPoint(path, follower);
+    bool const vertOff = curPt.has_value() &&
+                         std::fabs(bot->GetPositionZ() - curPt->z) > DC_CORRIDOR_Z_BAND;
+    if (deviation > DungeonPathFollower::OFF_PATH_THRESHOLD || vertOff)
     {
         DcMoveTo(mapId, hop.point.x, hop.point.y, hop.point.z,
                  /*idle*/ false, /*react*/ false, /*normal_only*/ false,
                  /*exact_waypoint*/ false, MovementPriority::MOVEMENT_NORMAL);
         LOG_DEBUG("playerbots.dungeonclear",
-                  "[DC:{}] {} off-line {:.1f}yd -> rejoining route via generated path "
-                  "(seg {} pt {})",
-                  bot->GetName(), tag, deviation, follower.segmentIdx, follower.pointIdx);
+                  "[DC:{}] {} off-line {:.1f}yd (vertOff={}) -> rejoining route via "
+                  "generated path (seg {} pt {})",
+                  bot->GetName(), tag, deviation, vertOff,
+                  follower.segmentIdx, follower.pointIdx);
         return GlideOutcome::Moved;
     }
 

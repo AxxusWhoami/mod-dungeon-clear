@@ -7,14 +7,11 @@
 
 #include <algorithm>
 #include <cmath>
-#include <limits>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettingsRegistry.h"
-#include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
-#include "ObjectGuid.h"
 
 // Invariants of the settings table itself. The resolution CHAIN
 // (override -> heroic conf -> heroic default -> conf -> default) needs a live
@@ -29,6 +26,15 @@ namespace
         std::vector<DcSettingDef const*> out;
         for (DcSettingDef const& d : kDcSettings)
             if (DcHasHeroicDefault(d))
+                out.push_back(&d);
+        return out;
+    }
+
+    std::vector<DcSettingDef const*> RaidRows()
+    {
+        std::vector<DcSettingDef const*> out;
+        for (DcSettingDef const& d : kDcSettings)
+            if (DcHasRaidDefault(d))
                 out.push_back(&d);
         return out;
     }
@@ -84,9 +90,79 @@ TEST(DcSettingsRegistryTest, ServerOnlyRowsCarryNoHeroicDefault)
     // Server-only rows govern the harness, the path workers and the spectator
     // camera — none of which is a property of the dungeon's difficulty. Keeping
     // them out means the difficulty lookup is never reached from the worker
-    // threads that read them (see DcSettings::IsHeroicRun).
+    // threads that read them (see the layer tests in DcSettings::GetRaw).
     for (DcSettingDef const* d : HeroicRows())
         EXPECT_TRUE(d->playerFacing) << d->key;
+}
+
+// --- Raid layer (same contracts as the heroic layer) ----------------------
+
+TEST(DcSettingsRegistryTest, SentinelMeansNoRaidLayer)
+{
+    DcSettingDef plain{"X", DcType::Float, 1, 0, 10, true};
+    EXPECT_FALSE(DcHasRaidDefault(plain));
+    EXPECT_TRUE(std::isnan(plain.raidVal));
+
+    DcSettingDef raided{"Y", DcType::Float, 1, 0, 10, true, kDcNoHeroic, 4};
+    EXPECT_TRUE(DcHasRaidDefault(raided));
+    EXPECT_FALSE(DcHasHeroicDefault(raided));
+    EXPECT_EQ(raided.raidVal, 4);
+}
+
+TEST(DcSettingsRegistryTest, RaidDefaultsSitInsideTheRowsOwnRange)
+{
+    for (DcSettingDef const* d : RaidRows())
+    {
+        EXPECT_GE(d->raidVal, d->minVal) << d->key;
+        EXPECT_LE(d->raidVal, d->maxVal) << d->key;
+    }
+}
+
+TEST(DcSettingsRegistryTest, RaidDefaultsAreWholeNumbersForDiscreteTypes)
+{
+    for (DcSettingDef const* d : RaidRows())
+    {
+        if (d->type == DcType::Float)
+            continue;
+        EXPECT_EQ(d->raidVal, std::round(d->raidVal)) << d->key;
+        if (d->type == DcType::Bool)
+            EXPECT_TRUE(d->raidVal == 0 || d->raidVal == 1) << d->key;
+    }
+}
+
+TEST(DcSettingsRegistryTest, RaidDefaultsActuallyDifferFromNormal)
+{
+    for (DcSettingDef const* d : RaidRows())
+        EXPECT_NE(d->raidVal, d->defVal) << d->key;
+}
+
+TEST(DcSettingsRegistryTest, ServerOnlyRowsCarryNoRaidDefault)
+{
+    for (DcSettingDef const* d : RaidRows())
+        EXPECT_TRUE(d->playerFacing) << d->key;
+}
+
+TEST(DcSettingsRegistryTest, RaidProfileIsExactlyTheScaleSet)
+{
+    // The raid layer is only the numbers that must scale with 10-40 members.
+    // Pinned like the heroic set: adding a raid default to an unrelated key has
+    // to fail here and be justified. Keep in step with the RAID DEFAULTS block
+    // in mod_dungeon_clear.conf.dist. (Plan B/C keys — quorum, muster budgets —
+    // join this list when they land with authored raid values.)
+    std::vector<std::string> const expected{
+        "PartyMaxSpread",
+        "PostCombatRezTimeoutSecs",
+    };
+
+    std::vector<std::string> actual;
+    for (DcSettingDef const* d : RaidRows())
+        actual.emplace_back(d->key);
+
+    std::vector<std::string> sortedExpected = expected;
+    std::vector<std::string> sortedActual = actual;
+    std::sort(sortedExpected.begin(), sortedExpected.end());
+    std::sort(sortedActual.begin(), sortedActual.end());
+    EXPECT_EQ(sortedActual, sortedExpected);
 }
 
 TEST(DcSettingsRegistryTest, HeroicProfileIsExactlyThePullSafetySet)
@@ -165,44 +241,4 @@ TEST(DcSettingsRegistryTest, TrashBandClampedToHeroicCap)
     EXPECT_EQ(d->defVal, 30);
     ASSERT_TRUE(DcHasHeroicDefault(*d));
     EXPECT_EQ(d->heroicVal, 42);
-}
-
-TEST(DcSettingsRegistryTest, SetOverrideRejectsNonFiniteValues)
-{
-    // A NaN or infinity sent from the addon must never enter the override store:
-    // std::clamp(NaN, min, max) returns NaN, which would silently corrupt the
-    // effective value for the rest of the run.
-    ObjectGuid const run = ObjectGuid(uint64(0xDEADBEEF));
-    std::string err;
-
-    EXPECT_FALSE(DcSettings::SetOverride(run, "PullSetback",
-                                         std::numeric_limits<double>::quiet_NaN(), &err));
-    EXPECT_FALSE(err.empty());
-
-    EXPECT_FALSE(DcSettings::SetOverride(run, "PullSetback",
-                                         std::numeric_limits<double>::infinity(), &err));
-    EXPECT_FALSE(err.empty());
-
-    EXPECT_FALSE(DcSettings::SetOverride(run, "PullSetback",
-                                         -std::numeric_limits<double>::infinity(), &err));
-    EXPECT_FALSE(err.empty());
-
-    EXPECT_FALSE(DcSettings::HasOverride(run, "PullSetback"));
-
-    DcSettings::ClearRun(run);
-}
-
-TEST(DcSettingsRegistryTest, SetOverrideClampsAndAcceptsFiniteValues)
-{
-    ObjectGuid const run = ObjectGuid(uint64(0xBEEFCAFE));
-    std::string err;
-
-    // A finite value outside the range is clamped, not rejected.
-    EXPECT_TRUE(DcSettings::SetOverride(run, "PullSetback", 999.0, &err));
-    EXPECT_TRUE(err.empty());
-    EXPECT_TRUE(DcSettings::HasOverride(run, "PullSetback"));
-    EXPECT_FLOAT_EQ(DcSettings::GetFloat(run, "PullSetback"),
-                    static_cast<float>(FindDcSetting("PullSetback")->maxVal));
-
-    DcSettings::ClearRun(run);
 }

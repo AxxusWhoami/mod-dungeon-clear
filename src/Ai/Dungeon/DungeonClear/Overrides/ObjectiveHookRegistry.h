@@ -80,4 +80,22 @@ public:
 // The Black Morass (map 269) — the wave driver. See BlackMorassDriver.cpp.
 void RegisterBlackMorassHooks(ObjectiveHookRegistry::HookTable& out);
 
+// The Violet Hold (map 608) — the siege start, the three defend garrisons and
+// the wave driver. See VioletHoldDriver.cpp. Ids 15-19.
+void RegisterVioletHoldHooks(ObjectiveHookRegistry::HookTable& out);
+
+// Blackwing Lair (map 469) — Razorgore's orb and egg run, the one hook that
+// drives INSIDE a raid boss encounter. See BlackwingLairDriver.cpp. Id 20.
+void RegisterBlackwingLairHooks(ObjectiveHookRegistry::HookTable& out);
+
+// Halls of Stone (map 599) — the Tribunal of Ages garrison (and the one recovery
+// path this dungeon needs, for a dead Brann) plus the wave driver. See
+// HallsOfStoneDriver.cpp. Ids 22-23.
+void RegisterHallsOfStoneHooks(ObjectiveHookRegistry::HookTable& out);
+
+// Halls of Lightning (map 602) — the Slag Furnace transit, the Bjarngrim ->
+// Volkhan leg the ordinary clear has no driver for. See
+// HallsOfLightningDriver.cpp. Id 24.
+void RegisterHallsOfLightningHooks(ObjectiveHookRegistry::HookTable& out);
+
 #endif

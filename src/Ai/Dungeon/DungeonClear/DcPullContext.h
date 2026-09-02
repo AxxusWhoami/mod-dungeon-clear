@@ -71,10 +71,24 @@ struct DcPullContext
                                                  // tank during the drag-back; the
                                                  // debounce latch for
                                                  // DungeonClearMath::ShouldPlantEarly.
+    uint32      packPlantedSince = 0;            // getMSTime() the PULLED MOB was
+                                                 // first seen holding
+                                                 // UNIT_STATE_NO_COMBAT_MOVEMENT
+                                                 // during this drag, 0 = not
+                                                 // streaking. A mob in that state has
+                                                 // no chase generator, so the drag
+                                                 // cannot work by construction; the
+                                                 // streak debounces the transient
+                                                 // case (a caster that stops moving
+                                                 // only while it casts) from the
+                                                 // permanent one. See
+                                                 // DC_PULL_PLANT_CONFIRM_MS.
     bool        bossPullback = false;           // this pull is a BossPullbackRegistry
-                                                 // boss drag (Ghaz'an out of the
-                                                 // Underbog lake), not an ordinary
-                                                 // trash pull. Set at commit, cleared
+                                                 // boss drag, not an ordinary trash
+                                                 // pull. (No row uses it today — the
+                                                 // table is empty since S1593; see
+                                                 // BossPullbackRegistry.cpp.) Set at
+                                                 // commit, cleared
                                                  // by Reset(). Two things key on it:
                                                  // the drag legs get a distance-sized
                                                  // watchdog (the haul is ~150yd, far
@@ -198,6 +212,19 @@ struct DcPullContext
                                                  // schedule however long the run has
                                                  // otherwise been going.
                                                  // 0 = no recall in flight.
+    uint32      scriptedMusterSince = 0;         // ms the MUSTER for the next stage
+                                                 // began — the party was short of
+                                                 // DC_SCRIPTED_PULL_MUSTER_HP/_MP
+                                                 // while a stage was due and not yet
+                                                 // armed. 0 = not mustering. Latched
+                                                 // rather than recomputed so the wait
+                                                 // is bounded (see
+                                                 // DC_SCRIPTED_PULL_MUSTER_MS) and so
+                                                 // one stage cannot muster twice: the
+                                                 // latch stays armed past the timeout
+                                                 // and is cleared only by the party
+                                                 // topping up or the stage going away.
+                                                 // Same contract as the patrol wait.
     bool        scriptedForced = false;          // the scripted stage RAISED the
                                                  // pull-mode bool (a plan runs at
                                                  // any pull setting, exactly like a
@@ -206,6 +233,24 @@ struct DcPullContext
                                                  // immunity are handed back to the
                                                  // player's setting when the plan
                                                  // ends, and only then.
+    bool        eventForced = false;             // the mirror image: a pull-owning
+                                                 // event — or a NO_STOP route leg
+                                                 // (DcNoStopZone), which wants the
+                                                 // identical stand-down and shares
+                                                 // this latch — LOWERED the
+                                                 // pull-mode bool.
+                                                 // Clearing the effective value is
+                                                 // not enough on its own — the
+                                                 // follower camp-hold and party
+                                                 // state read the LATCHED bool
+                                                 // (DcLeaderSignal::GetLeaderPullInfo
+                                                 // / GetLeaderCampHold), so a bool
+                                                 // latched true when the event armed
+                                                 // would keep the party pinned at a
+                                                 // camp for the event's whole
+                                                 // duration while the tank fights
+                                                 // alone. Remembered so the setting
+                                                 // is handed back when it ends.
     bool        losPull    = false;              // this pull targets a RANGED pack
                                                  // and the camp was placed to break
                                                  // line of sight to it (rangers must
@@ -341,6 +386,31 @@ struct DcPullContext
     uint32      predictedCeiling   = 0;  // DcPullClassification::ceiling
 
     void Reset() { *this = DcPullContext{}; }
+
+    // Tear down the standing Dynamic verdict and every latch that feeds it.
+    //
+    // The governor (DcPullPlanner::UpdateDynamicPullMode) is the ONLY writer of
+    // these fields, so anything that stops the governor from running FREEZES the
+    // verdict — it does not clear it. That is exactly how tr-20260817-100413-43/44/45
+    // wedged: DungeonClearPullModeCurrentValue stands the pull system down while a
+    // persistent anchored event drives, and it early-returned BEFORE the governor
+    // call, leaving `decision == PatrolHold` latched from the tick before. The pull
+    // trigger keeps its rung live on that code by design ("off-but-held"), so the
+    // pull action re-planted the tank every tick at DcRel::Pull (35) — above
+    // DcRel::AtObjective (30) — and the event's own steps never got another tick.
+    // The patrol-wait timeout could not save it either: ShouldWaitForPatrol is only
+    // ever evaluated inside the governor.
+    //
+    // So a stand-down must clear the verdict, not merely stop reporting it. Cheap
+    // and idempotent: safe to call on every tick the stand-down holds.
+    void ClearDynamicVerdict()
+    {
+        decision        = DcPullDecisionCode::None;
+        decisionTarget  = ObjectGuid::Empty;
+        decisionSince   = 0;
+        patrolWaitSince = 0;
+        targetLostSince = 0;
+    }
 
     // The ONLY way to transition into Engage (used by DcSetPullPhase and
     // DcLeaderSignal::AbortLeaderPull, which live in different TUs). Entering

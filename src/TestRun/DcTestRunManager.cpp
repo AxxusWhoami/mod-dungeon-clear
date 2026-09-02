@@ -47,7 +47,8 @@ DcTestRunManager& DcTestRunManager::Instance()
 bool DcTestRunManager::Start(Player* gm, std::string const& dungeonToken,
                              uint32 levelOverride, uint32 seed, bool heroic,
                              DcTestGearTiers::Spec const& gear, std::string* msg,
-                             std::string const& planId, StartErr* errOut, std::string* runIdOut)
+                             std::string const& planId, StartErr* errOut, std::string* runIdOut,
+                             uint32 size)
 {
     if (errOut)
         *errOut = StartErr::None;
@@ -66,12 +67,11 @@ bool DcTestRunManager::Start(Player* gm, std::string const& dungeonToken,
         return fail(StartErr::UnknownDungeon,
                     "unknown dungeon '" + dungeonToken + "' — see .dc test list");
 
-    // heroicLevel 0 = heroic not offered: classic dungeons have no heroic mode,
-    // and WotLK rows are deliberately 0 until their heroic content pass (the
-    // registry column is the TBC-only scope gate).
+    // heroicLevel 0 = heroic not offered: only classic dungeons, which have no
+    // heroic difficulty at all (TBC rows run at 70, WotLK at 80).
     if (heroic && row->heroicLevel == 0)
         return fail(StartErr::UnknownDungeon,
-                    "'" + std::string(row->token) + "' has no heroic mode (TBC heroics only for now)");
+                    "'" + std::string(row->token) + "' has no heroic mode (classic dungeons have none)");
 
     if (!gm || !GET_PLAYERBOT_MGR(gm))
         return fail(StartErr::NoMgr, "no playerbot manager on this account");
@@ -87,19 +87,21 @@ bool DcTestRunManager::Start(Player* gm, std::string const& dungeonToken,
     // AddPlayerBot, so without the pre-check a party over the cap surfaces only
     // as a 60s spawn timeout. Name the knob instead.
     uint32 const currentBots = GET_PLAYERBOT_MGR(gm)->GetPlayerbotsCount();
+    uint32 const runSize = size ? size : static_cast<uint32>(DcTestComp::kPartySize);
     if (sPlayerbotAIConfig.maxAddedBots > 0 &&
-        currentBots + DcTestComp::kPartySize > static_cast<uint32>(sPlayerbotAIConfig.maxAddedBots))
+        currentBots + runSize > static_cast<uint32>(sPlayerbotAIConfig.maxAddedBots))
         return fail(StartErr::BotBudget,
                     "would exceed AiPlayerbot.MaxAddedBots (" +
                     std::to_string(sPlayerbotAIConfig.maxAddedBots) + "; " +
                     std::to_string(currentBots) + " bots already added, this run needs " +
-                    std::to_string(DcTestComp::kPartySize) + ") — raise it or stop a run");
+                    std::to_string(runSize) + ") — raise it or stop a run");
 
     // Create picks slot guids skipping _reservedGuids (all synchronous on the
     // world thread — no TOCTOU with other runs).
     std::string err;
     std::unique_ptr<DcTestRunJob> job =
-        DcTestRunJob::Create(gm, *row, levelOverride, seed, heroic, gear, _reservedGuids, planId, &err);
+        DcTestRunJob::Create(gm, *row, levelOverride, seed, size, heroic, gear, _reservedGuids,
+                             planId, &err);
     if (!job)
         return fail(StartErr::PoolExhausted, err);
 
@@ -145,7 +147,7 @@ bool DcTestRunManager::StartRoster(Player* gm, std::string const& dungeonToken,
 
     if (heroic && row->heroicLevel == 0)
         return fail(StartErr::UnknownDungeon,
-                    "'" + std::string(row->token) + "' has no heroic mode (TBC heroics only for now)");
+                    "'" + std::string(row->token) + "' has no heroic mode (classic dungeons have none)");
 
     if (!gm || !GET_PLAYERBOT_MGR(gm))
         return fail(StartErr::NoMgr, "no playerbot manager on this account");

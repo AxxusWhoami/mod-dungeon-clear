@@ -11,7 +11,9 @@
 #include "DungeonClearMath.h"
 #include "DungeonClearTuning.h"
 #include "Ai/Dungeon/DungeonClear/Data/BossPullbackRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/DcEventDoorRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/RoomAggroRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/RouteSweepRegistry.h"
 #include "Ai/Dungeon/DungeonClear/DcApproachState.h"
 #include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
@@ -29,79 +31,6 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
-#include "Timer.h"
-
-namespace
-{
-    // Short-TTL reachability memo for the per-tick PathGenerator probes.
-    // IsNavReachable and IsEngageReachable are called per-candidate per-tick
-    // during corridor/cone trash scans; within a single scan pass the same
-    // bot->target pair is probed multiple times (PickBlockingTrash then
-    // FindBlockingTrash, then the engage target resolver). Each probe builds
-    // a full PathGenerator (Detour A* + string-pull), so a dozen candidates
-    // cost a dozen synchronous path builds per tick. The memo collapses
-    // those to one build per unique pair per TTL window.
-    //
-    // The position is quantized to 2yd cells so a mob drifting a few inches
-    // doesn't invalidate the entry, and the TTL (800ms) is short enough that
-    // a door opening or a mob moving meaningfully invalidates it naturally.
-    struct ReachKey
-    {
-        ObjectGuid guid;
-        int32 qx, qy, qz;
-        bool operator==(ReachKey const& o) const
-        { return guid == o.guid && qx == o.qx && qy == o.qy && qz == o.qz; }
-    };
-    struct ReachKeyHash
-    {
-        size_t operator()(ReachKey const& k) const
-        {
-            size_t h = std::hash<uint64>()(k.guid.GetRawValue());
-            h ^= std::hash<int32>()(k.qx) + 0x9e3779b9u + (h << 6) + (h >> 2);
-            h ^= std::hash<int32>()(k.qy) + 0x9e3779b9u + (h << 6) + (h >> 2);
-            h ^= std::hash<int32>()(k.qz) + 0x9e3779b9u + (h << 6) + (h >> 2);
-            return h;
-        }
-    };
-    struct ReachEntry { bool result; uint32 expireMs; };
-
-    std::unordered_map<ReachKey, ReachEntry, ReachKeyHash> g_reachCache;
-    std::mutex g_reachCacheMutex;
-    constexpr uint32 REACH_CACHE_TTL_MS = 800;
-    constexpr float REACH_CACHE_Q = 2.0f;
-
-    bool QueryReachCache(ObjectGuid guid, float x, float y, float z, uint32 nowMs)
-    {
-        ReachKey key{guid,
-                     static_cast<int32>(std::round(x / REACH_CACHE_Q)),
-                     static_cast<int32>(std::round(y / REACH_CACHE_Q)),
-                     static_cast<int32>(std::round(z / REACH_CACHE_Q))};
-        std::lock_guard<std::mutex> lock(g_reachCacheMutex);
-        auto it = g_reachCache.find(key);
-        if (it == g_reachCache.end())
-            return false;
-        if (it->second.expireMs < nowMs)
-        {
-            g_reachCache.erase(it);
-            return false;
-        }
-        return it->second.result;
-    }
-
-    void StoreReachCache(ObjectGuid guid, float x, float y, float z, bool result, uint32 nowMs)
-    {
-        ReachKey key{guid,
-                     static_cast<int32>(std::round(x / REACH_CACHE_Q)),
-                     static_cast<int32>(std::round(y / REACH_CACHE_Q)),
-                     static_cast<int32>(std::round(z / REACH_CACHE_Q))};
-        std::lock_guard<std::mutex> lock(g_reachCacheMutex);
-        if (g_reachCache.size() > 256)
-            g_reachCache.clear();
-        g_reachCache[key] = {result, nowMs + REACH_CACHE_TTL_MS};
-    }
-
-    uint32 NowMs() { return getMSTime(); }
-}
 #include "AttackersValue.h"
 #include "CellImpl.h"
 #include "Creature.h"
@@ -132,6 +61,7 @@ namespace
 #include "PlayerbotAI.h"
 #include "Chat.h"
 #include "ServerFacade.h"
+#include "Timer.h"
 #include "World.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 #include "Ai/Dungeon/DungeonClear/Util/ChunkedPathfinder.h"
@@ -325,8 +255,14 @@ namespace
         // CORNER points, not a densified line — an open-room skirt leg is often
         // just {start, end}, so a per-vertex scan would only ever check the
         // destination and wave through a leg that walks clean across an emitter.
+        //
+        // Sampled once for the whole polyline: the unsampled entry point resolves
+        // three AiObjectContext values and every emitter guid PER SEGMENT, and a
+        // corridor skirt can be a dozen corners. Nothing in this loop moves an
+        // emitter.
+        DcHazard::LiveSet const live = DcHazard::Sample(bot);
         for (size_t i = 1; i < path.size(); ++i)
-            if (DcHazard::SegmentIsHot(bot,
+            if (DcHazard::SegmentIsHot(live,
                                        path[i - 1].x, path[i - 1].y, path[i - 1].z,
                                        path[i].x, path[i].y, path[i].z))
                 return false;
@@ -624,11 +560,32 @@ std::optional<Position> DcEngageGeometry::EnRoutePackAvoidPoint(Player* bot,
     return wp;
 }
 
+bool DcEngageGeometry::EnRouteSweepApplies(Player* bot)
+{
+    Map* const map = bot ? bot->GetMap() : nullptr;
+    if (!map || !map->IsDungeon())
+        return false;
+    // Heroic is excluded whatever the map says: there the same spheres already
+    // bend the WALK (PullEnRouteAvoid), its rooms are wide enough for that detour
+    // to exist, and its pull profile is tuned against measured baselines. Checked
+    // before the table so a map that later earns a row cannot arm heroic by
+    // accident. IsHeroic (not a raw difficulty compare) so a 25-man NORMAL
+    // raid — whose raw difficulty is also 1 — is not misread as heroic.
+    if (map->IsHeroic())
+        return false;
+    return RouteSweepRegistry::SweepsRoute(map->GetId());
+}
+
 bool DcEngageGeometry::TargetInsideBystanderPack(Player* bot, Unit* target)
 {
     if (!bot || !target)
         return false;
-    if (!DcSettings::GetBool(bot, "PullEnRouteAvoid"))
+    // Heroic arms this through the avoidance it belongs to; normal arms it through
+    // the en-route SWEEP, which is on there and answers the same question from the
+    // other side (the sweep says "that pack's aggro covers our walk", this says
+    // "another pack's aggro covers our destination"). Either way the predicate is
+    // live on exactly one difficulty's terms and dead on neither.
+    if (!DcSettings::GetBool(bot, "PullEnRouteAvoid") && !EnRouteSweepApplies(bot))
         return false;
 
     float const margin = DcSettings::GetFloat(bot, "PullEnRouteMargin");
@@ -1249,16 +1206,36 @@ bool DcEngageGeometry::IsNavReachable(Player* bot, Position const& p)
 {
     if (!bot)
         return false;
+    PathGenerator gen(bot);
+    gen.CalculatePath(p.GetPositionX(), p.GetPositionY(), p.GetPositionZ());
+    return gen.GetPathType() == PATHFIND_NORMAL;
+}
 
-    uint32 const now = NowMs();
-    if (QueryReachCache(bot->GetGUID(), p.GetPositionX(), p.GetPositionY(), p.GetPositionZ(), now))
-        return true;
+bool DcEngageGeometry::IsNavReachableWithin(Player* bot, Position const& p,
+                                            float ratio, float slack,
+                                            float* pathLen)
+{
+    if (pathLen)
+        *pathLen = 0.0f;
+    if (!bot)
+        return false;
 
     PathGenerator gen(bot);
     gen.CalculatePath(p.GetPositionX(), p.GetPositionY(), p.GetPositionZ());
-    bool const ok = gen.GetPathType() == PATHFIND_NORMAL;
-    StoreReachCache(bot->GetGUID(), p.GetPositionX(), p.GetPositionY(), p.GetPositionZ(), ok, now);
-    return ok;
+    if (gen.GetPathType() != PATHFIND_NORMAL)
+        return false;
+
+    // The wall test. A complete route to a point 5yd away that measures 60yd is
+    // not a route to a nearby point — it is a route out of the room and back, and
+    // the only reason it exists is that something solid sits on the straight line.
+    float const straight = bot->GetExactDist(&p);
+    float const len = gen.getPathLength();
+    if (len > DcDetourBound(straight, ratio, slack))
+        return false;
+
+    if (pathLen)
+        *pathLen = len;
+    return true;
 }
 bool DcEngageGeometry::ClosedDoorBetween(WorldObject* from, float tx, float ty,
                                          float tz, float /*corridorWidth*/)
@@ -1299,6 +1276,49 @@ bool DcEngageGeometry::ClosedDoorBetween(WorldObject* from, float tx, float ty,
         from->GetPositionX(), from->GetPositionY(), from->GetPositionZ() + 2.0f,
         tx, ty, tz + 2.0f, from->GetPhaseMask(),
         LINEOFSIGHT_CHECK_GOBJECT_ALL, VMAP::ModelIgnoreFlags::Nothing);
+}
+bool DcEngageGeometry::OnlyEventGatesBetween(WorldObject* from, float tx, float ty,
+                                            float tz)
+{
+    if (!from)
+        return false;
+    Map* map = from->GetMap();
+    if (!map)
+        return false;
+
+    float const ax = from->GetPositionX();
+    float const ay = from->GetPositionY();
+    float const az = from->GetPositionZ();
+
+    // Same floor test the other door predicates use, taken across the WHOLE
+    // chord: a gate at either end's level counts, one on the deck above or the
+    // corridor below does not.
+    float const loZ = std::min(az, tz) - DC_DOOR_Z_BAND;
+    float const hiZ = std::max(az, tz) + DC_DOOR_Z_BAND;
+    float const bandSq = DC_EVENT_GATE_BAND * DC_EVENT_GATE_BAND;
+
+    bool sawGate = false;
+    for (ObjectGuid const guid : DcDoorIndex::Get(map))
+    {
+        GameObject* go = map->GetGameObject(guid);
+        if (!IsDoorClosed(go))
+            continue;
+
+        float const gz = go->GetPositionZ();
+        if (gz < loZ || gz > hiZ)
+            continue;
+
+        if (DungeonClearMath::DistSqToSegment2D(go->GetPositionX(), go->GetPositionY(),
+                                               ax, ay, tx, ty) > bandSq)
+            continue;
+
+        // One ordinary shut door on the line is enough to keep the veto: the
+        // caller's original answer was right and there is nothing to excuse.
+        if (!DcEventDoorRegistry::IsNavigationIgnored(go->GetEntry()))
+            return false;
+        sawGate = true;
+    }
+    return sawGate;
 }
 bool DcEngageGeometry::ClosedDoorNear(WorldObject* ref, float x, float y, float z,
                                       float radius)
@@ -1470,6 +1490,26 @@ bool DcEngageGeometry::IsLevelReachable(Player* bot, Unit* u)
     return IsEngageReachable(bot, u);
 }
 
+bool DcEngageGeometry::IsPointLevelReachable(Player* bot, float x, float y, float z)
+{
+    if (!bot)
+        return false;
+
+    PathGenerator gen(bot);
+    gen.CalculatePath(x, y, z, /*forceDest*/ false);
+    if (gen.GetPathType() != PATHFIND_NORMAL)
+        return false;
+
+    Movement::PointsArray const& path = gen.GetPath();
+    if (path.empty())
+        return false;
+
+    // See the header: PATHFIND_NORMAL is free for a Player, so the arrival height
+    // is the only thing that separates a real route from a straight line drawn
+    // through a floor.
+    return std::fabs(path.back().z - z) <= DC_Z_LEVEL_TOLERANCE;
+}
+
 bool DcEngageGeometry::IsEngageReachable(Player* bot, Unit* u, bool requireDirect)
 {
     if (!bot || !u)
@@ -1482,25 +1522,12 @@ bool DcEngageGeometry::IsEngageReachable(Player* bot, Unit* u, bool requireDirec
     // would otherwise be trusted and EngageDirected straight into the dividing
     // wall (the Uldaman keeper-hall / Ironaya-seal leak). Always probe the route.
 
-    // Check the reachability cache first — the trash scan probes the same
-    // candidates repeatedly within a single tick. The cache stores only the
-    // final bool; the requireDirect detour-ratio check is folded into the
-    // cached result, so the key encodes requireDirect to avoid a mismatch.
-    uint32 const now = NowMs();
-    ObjectGuid const cacheGuid = bot->GetGUID();
-    ObjectGuid const keyedGuid = requireDirect ? cacheGuid : ObjectGuid(cacheGuid.GetRawValue() ^ 1);
-    if (QueryReachCache(keyedGuid, u->GetPositionX(), u->GetPositionY(), u->GetPositionZ(), now))
-        return true;
-
     // Confirm an actual ground path. A single direct probe suffices — seek trash
     // sits inside the event's radius, comfortably under PathGenerator's range cap.
     PathGenerator gen(bot);
     gen.CalculatePath(u->GetPositionX(), u->GetPositionY(), u->GetPositionZ(), /*forceDest*/ false);
     if (gen.GetPathType() != PATHFIND_NORMAL)
-    {
-        StoreReachCache(keyedGuid, u->GetPositionX(), u->GetPositionY(), u->GetPositionZ(), false, now);
         return false;
-    }
 
     // PathGenerator clamps an off-mesh destination to the nearest walkable
     // poly, which on layered geometry can be the bot's *own* floor directly
@@ -1508,25 +1535,16 @@ bool DcEngageGeometry::IsEngageReachable(Player* bot, Unit* u, bool requireDirec
     // Require the route to actually end on the candidate's level.
     Movement::PointsArray const& path = gen.GetPath();
     if (path.empty())
-    {
-        StoreReachCache(keyedGuid, u->GetPositionX(), u->GetPositionY(), u->GetPositionZ(), false, now);
         return false;
-    }
     G3D::Vector3 const& end = path.back();
     if (std::fabs(end.z - u->GetPositionZ()) > DC_Z_LEVEL_TOLERANCE)
-    {
-        StoreReachCache(keyedGuid, u->GetPositionX(), u->GetPositionY(), u->GetPositionZ(), false, now);
         return false;
-    }
 
     // A complete on-level path already rejects the through-a-wall / wrong-level
     // case. A deliberate seek (requireDirect=false) may legitimately walk a long
     // way to its specific objective creature, so stop here for it.
     if (!requireDirect)
-    {
-        StoreReachCache(keyedGuid, u->GetPositionX(), u->GetPositionY(), u->GetPositionZ(), true, now);
         return true;
-    }
 
     // A path existing is not enough: a mob across a wall (or at the bottom of a
     // ledge) can be 15yd away in a straight line while its real approach is a long
@@ -1539,10 +1557,8 @@ bool DcEngageGeometry::IsEngageReachable(Player* bot, Unit* u, bool requireDirec
     // IsAtBossEngage. The slack term keeps legitimate short around-the-corner
     // detours alive at close range, where the pure ratio is too strict.
     float const straight = bot->GetDistance(u);
-    bool const ok = gen.getPathLength() <=
-           std::max(straight * DC_TRASH_DETOUR_RATIO, straight + DC_TRASH_DETOUR_SLACK);
-    StoreReachCache(keyedGuid, u->GetPositionX(), u->GetPositionY(), u->GetPositionZ(), ok, now);
-    return ok;
+    return gen.getPathLength() <=
+           DcDetourBound(straight, DC_TRASH_DETOUR_RATIO, DC_TRASH_DETOUR_SLACK);
 }
 bool DcEngageGeometry::ComputeCorridor(Player* bot,
                                        float bx, float by, float bz,

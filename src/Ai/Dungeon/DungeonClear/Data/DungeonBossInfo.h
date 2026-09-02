@@ -83,6 +83,14 @@ struct DungeonBossInfo
     // be reached BEFORE the ziggurats (bits 7-9). -1 => order by encounterIndex
     // (every auto-derived boss and every anchor that doesn't opt in).
     int32 orderOverride{-1};
+
+    // Present but SKIPPED BY DESIGN: the roster keeps the row (so the panel can
+    // show why the clear passes it over) but the target picker never selects it
+    // — authored for content bots cannot or must not drive (vehicle-piloted
+    // bosses, externally-controlled set pieces like Karazhan's Chess). Unlike
+    // the per-run `dc skip` set this is data, not player state: it applies to
+    // every run of the map. Stamped by a BossRosterPatch::skipByDesign entry.
+    bool skipByDesign{false};
 };
 
 // The value the clear ORDERS an anchor by: the explicit orderOverride when set,

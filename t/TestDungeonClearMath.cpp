@@ -7,6 +7,8 @@
 #include "DungeonClearMath.h"
 #include "DcProgressWatchdog.h"
 
+#include <limits>
+
 // Test point directly on the segment (midpoint)
 TEST(DungeonClearMathTest, PointOnSegmentMidpoint)
 {
@@ -352,6 +354,61 @@ TEST(DungeonClearCcAssistTest, ZeroNowLatchesToOne)
 }
 
 // ---------------------------------------------------------------------------
+// ShouldAbandonPlantedDrag — the pack-cannot-follow gate. A mob holding
+// UNIT_STATE_NO_COMBAT_MOVEMENT has no chase generator, so a drag-back cannot
+// work at any distance and the tank must turn around and fight it where it
+// stands. Shares the ShouldAbortPullForCc latch contract by delegation; these
+// pin the behaviour at THIS call site so a future re-implementation that stops
+// delegating still has to honour it.
+// ---------------------------------------------------------------------------
+using DungeonClearMath::ShouldAbandonPlantedDrag;
+
+// A mob that is chasing normally never abandons the drag, and clears any latch.
+TEST(DungeonClearPlantedDragTest, ChasingPackKeepsTheDrag)
+{
+    std::uint32_t out = 4321u;
+    EXPECT_FALSE(ShouldAbandonPlantedDrag(false, 3000u, 9000u, 1500u, out));
+    EXPECT_EQ(out, 0u);
+}
+
+// First planted tick arms the streak but keeps dragging — the state may be the
+// transient kind (a caster planting only for the duration of a cast).
+TEST(DungeonClearPlantedDragTest, FirstPlantedTickArmsButKeepsDragging)
+{
+    std::uint32_t out = 0u;
+    EXPECT_FALSE(ShouldAbandonPlantedDrag(true, 0u, 8000u, 1500u, out));
+    EXPECT_EQ(out, 8000u);
+}
+
+// Held for the confirm window: the drag is abandoned. 1500ms is the shipped
+// value and lands well inside the 10s return-leg watchdog it pre-empts.
+TEST(DungeonClearPlantedDragTest, SustainedPlantAbandonsAfterConfirmWindow)
+{
+    std::uint32_t out = 0u;
+    EXPECT_FALSE(ShouldAbandonPlantedDrag(true, 8000u, 9499u, 1500u, out));
+    EXPECT_EQ(out, 8000u);
+    EXPECT_TRUE(ShouldAbandonPlantedDrag(true, 8000u, 9500u, 1500u, out));
+    EXPECT_EQ(out, 8000u);
+}
+
+// A creature that toggles combat movement off only while it casts must NOT lose
+// its drag: each pause re-arms fresh, so brief plants never accumulate.
+TEST(DungeonClearPlantedDragTest, TransientPlantDoesNotAccumulate)
+{
+    std::uint32_t out = 0u;
+    // Plants at 8000, resumes chasing at 8900 (streak cleared), plants again at
+    // 9200 — the window restarts there, not at 8000.
+    EXPECT_FALSE(ShouldAbandonPlantedDrag(true, 0u, 8000u, 1500u, out));
+    EXPECT_FALSE(ShouldAbandonPlantedDrag(false, out, 8900u, 1500u, out));
+    EXPECT_EQ(out, 0u);
+    EXPECT_FALSE(ShouldAbandonPlantedDrag(true, out, 9200u, 1500u, out));
+    EXPECT_EQ(out, 9200u);
+    // Had 8000 counted, this would already have fired; it must not.
+    EXPECT_FALSE(ShouldAbandonPlantedDrag(true, out, 10699u, 1500u, out));
+    EXPECT_TRUE(ShouldAbandonPlantedDrag(true, out, 10700u, 1500u, out));
+}
+
+// ---------------------------------------------------------------------------
 // ShouldTripCampSafety — the camp-safety valve gate (attribution + grace).
 // Mirrors the ShouldAbortPullForCc fixture: same latch/clear contract.
 // ---------------------------------------------------------------------------
@@ -467,7 +524,7 @@ using DungeonClearMath::ShouldReleaseStandingPull;
 TEST(DungeonClearPullReleaseTest, ReleasesAPullLeftStandingWhenTheModeIsForcedOff)
 {
     EXPECT_TRUE(ShouldReleaseStandingPull(/*effectiveOn*/ false, /*standing*/ true,
-                                          /*inCombat*/ false, /*holdingPhase*/ false,
+                                          /*partyInCombat*/ false, /*holdingPhase*/ false,
                                           /*bossPullback*/ false));
 }
 
@@ -476,7 +533,7 @@ TEST(DungeonClearPullReleaseTest, ReleasesAPullLeftStandingWhenTheModeIsForcedOf
 TEST(DungeonClearPullReleaseTest, NeverReleasesWhileThePullModeIsOn)
 {
     EXPECT_FALSE(ShouldReleaseStandingPull(/*effectiveOn*/ true, /*standing*/ true,
-                                           /*inCombat*/ false, /*holdingPhase*/ false,
+                                           /*partyInCombat*/ false, /*holdingPhase*/ false,
                                            /*bossPullback*/ false));
 }
 
@@ -485,20 +542,34 @@ TEST(DungeonClearPullReleaseTest, NeverReleasesWhileThePullModeIsOn)
 TEST(DungeonClearPullReleaseTest, NoOpWhenNothingIsStanding)
 {
     EXPECT_FALSE(ShouldReleaseStandingPull(/*effectiveOn*/ false, /*standing*/ false,
-                                           /*inCombat*/ false, /*holdingPhase*/ false,
+                                           /*partyInCombat*/ false, /*holdingPhase*/ false,
                                            /*bossPullback*/ false));
 }
 
-// A maneuver in flight — in combat, or a holding phase (Forming/Advancing/
-// Returning) — must finish: clearing its camp mid-drag would dump the party out
-// of the hold and into the inbound pack.
+// A maneuver in flight — anyone in the party fighting, or a holding phase
+// (Forming/Advancing/Returning) — must finish: clearing its camp mid-drag would
+// dump the party out of the hold and into the inbound pack.
 TEST(DungeonClearPullReleaseTest, NeverReleasesAManeuverInFlight)
 {
     EXPECT_FALSE(ShouldReleaseStandingPull(/*effectiveOn*/ false, /*standing*/ true,
-                                           /*inCombat*/ true, /*holdingPhase*/ false,
+                                           /*partyInCombat*/ true, /*holdingPhase*/ false,
                                            /*bossPullback*/ false));
     EXPECT_FALSE(ShouldReleaseStandingPull(/*effectiveOn*/ false, /*standing*/ true,
-                                           /*inCombat*/ false, /*holdingPhase*/ true,
+                                           /*partyInCombat*/ false, /*holdingPhase*/ true,
+                                           /*bossPullback*/ false));
+}
+
+// THE CAMP-FIGHT CASE, and the reason the combat input is party-wide rather than
+// the leader's own flag. Phase Engage with a camp marked: the pack has been
+// dragged home and handed to the followers, and the TANK is flag-clear for a
+// stretch of that fight (a scripted stage tags at range, so the pack arrives
+// strung out and threat lands on whoever it reaches first). Releasing there
+// dismantles the camp underneath a live fight and frees the tank to go form the
+// next pull with the last pack still up — the rotunda's pack-stacking collapse.
+TEST(DungeonClearPullReleaseTest, NeverReleasesACampTheFollowersAreStillFightingAt)
+{
+    EXPECT_FALSE(ShouldReleaseStandingPull(/*effectiveOn*/ false, /*standing*/ true,
+                                           /*partyInCombat*/ true, /*holdingPhase*/ false,
                                            /*bossPullback*/ false));
 }
 
@@ -507,7 +578,7 @@ TEST(DungeonClearPullReleaseTest, NeverReleasesAManeuverInFlight)
 TEST(DungeonClearPullReleaseTest, NeverReleasesABossPullback)
 {
     EXPECT_FALSE(ShouldReleaseStandingPull(/*effectiveOn*/ false, /*standing*/ true,
-                                           /*inCombat*/ false, /*holdingPhase*/ false,
+                                           /*partyInCombat*/ false, /*holdingPhase*/ false,
                                            /*bossPullback*/ true));
 }
 
@@ -1000,6 +1071,95 @@ TEST(DungeonClearPatrolWaitTest, FormationPatrollerStaysInReducedPass)
     };
     EXPECT_EQ(Count(mobs, 0), 6u);
     EXPECT_EQ(CountReduced(mobs, 0), 6u);  // linked patroller survives
+}
+
+// --- ShouldMusterForScriptedStage (the scripted-stage muster latch) -------
+
+using DungeonClearMath::ShouldMusterForScriptedStage;
+
+// No stage due: never hold, latch cleared. This is every tick of every dungeon
+// without a plan, so it must be the cheap, quiet answer.
+TEST(DungeonClearMusterGateTest, NoStagePendingProceeds)
+{
+    uint32 since = 12345;  // stale latch from a previous stage
+    EXPECT_FALSE(ShouldMusterForScriptedStage(/*stagePending*/ false, /*toppedUp*/ false,
+                                              since, /*now*/ 20000, /*waitMs*/ 40000,
+                                              /*minMs*/ 8000, since));
+    EXPECT_EQ(since, 0u);
+}
+
+// Stage due and the party is already topped up: arm nothing, pull now. The
+// substance floor binds only once ARMED — a party that never fell below the
+// floors pays nothing.
+TEST(DungeonClearMusterGateTest, AToppedUpPartyProceedsImmediately)
+{
+    uint32 since = 0;
+    EXPECT_FALSE(ShouldMusterForScriptedStage(true, /*toppedUp*/ true, since, 20000, 40000,
+                                              8000, since));
+    EXPECT_EQ(since, 0u);
+}
+
+// Stage due, party short: hold, and latch the moment the muster began.
+TEST(DungeonClearMusterGateTest, AShortPartyHoldsAndLatches)
+{
+    uint32 since = 0;
+    EXPECT_TRUE(ShouldMusterForScriptedStage(true, /*toppedUp*/ false, since, 20000, 40000,
+                                             8000, since));
+    EXPECT_EQ(since, 20000u);
+    // Still short 10s later, still inside the budget: keep holding on the ORIGINAL
+    // stamp (a re-arm every tick would make the wait unbounded).
+    EXPECT_TRUE(ShouldMusterForScriptedStage(true, false, since, 30000, 40000, 8000, since));
+    EXPECT_EQ(since, 20000u);
+}
+
+// THE BOUND, and the reason it exists: the muster floors sit above what stock bots
+// eat and drink back up to, so a party that can never reach them must not be able to
+// stall the run forever. Once the budget is spent the stage arms on the ordinary
+// floors — a pull at 70% mana beats a run that never continues.
+TEST(DungeonClearMusterGateTest, TheWaitIsBounded)
+{
+    uint32 since = 0;
+    EXPECT_TRUE(ShouldMusterForScriptedStage(true, false, since, 1000, 40000, 8000, since));
+    EXPECT_FALSE(ShouldMusterForScriptedStage(true, false, since, 41000, 40000, 8000, since));
+    // ...and the latch STAYS armed past the timeout, so the same stage cannot
+    // muster a second time the next tick.
+    EXPECT_EQ(since, 1000u);
+    EXPECT_FALSE(ShouldMusterForScriptedStage(true, false, since, 41100, 40000, 8000, since));
+    EXPECT_EQ(since, 1000u);
+}
+
+// THE SUBSTANCE FLOOR. The release test is an instantaneous percentage over a
+// 5-point band: one AoE heal closed it in 1-5s and stages armed against parties
+// that never sat down (tp-20260806-212646-1, 115/184 musters <=5s the plan
+// before). An ARMED muster therefore holds through minMs even if the floors go
+// green first; only past the floor does topping up release and disarm — so the
+// NEXT stage still gets its own full budget rather than inheriting a spent one.
+TEST(DungeonClearMusterGateTest, AnArmedMusterHoldsTheSubstanceFloor)
+{
+    uint32 since = 0;
+    EXPECT_TRUE(ShouldMusterForScriptedStage(true, false, since, 5000, 40000, 8000, since));
+    EXPECT_EQ(since, 5000u);
+    // Percentages closed 4s in (an AoE heal): still inside the floor — hold.
+    EXPECT_TRUE(ShouldMusterForScriptedStage(true, /*toppedUp*/ true, since, 9000, 40000,
+                                             8000, since));
+    EXPECT_EQ(since, 5000u);
+    // Past the floor and topped up: release and disarm.
+    EXPECT_FALSE(ShouldMusterForScriptedStage(true, /*toppedUp*/ true, since, 14000, 40000,
+                                              8000, since));
+    EXPECT_EQ(since, 0u);
+}
+
+// waitMs == 0 disables the muster outright (proceed on the first tick, whatever
+// minMs says), and the now == 0 corner must not underflow into a colossal elapsed.
+TEST(DungeonClearMusterGateTest, DegenerateInputs)
+{
+    uint32 since = 0;
+    EXPECT_FALSE(ShouldMusterForScriptedStage(true, false, since, 20000, /*waitMs*/ 0,
+                                              /*minMs*/ 8000, since));
+
+    since = 0;
+    EXPECT_TRUE(ShouldMusterForScriptedStage(true, false, since, /*now*/ 0, 40000, 8000, since));
+    EXPECT_EQ(since, 1u);  // never stores 0 — that means "clear"
 }
 
 // --- ShouldWaitForPatrol (the patrol-wait latch gate) ---------------------
@@ -1674,6 +1834,48 @@ TEST(DungeonClearAssistRangeTest, MeleeKeepsItsOwnReachInclusiveThreshold)
     EXPECT_FALSE(DungeonClearMath::IsWithinAssistAttackRange(true, 20.0f, /*meleeRange*/ 4.2f, 28.5f, 3.2f));
 }
 
+TEST(DungeonClearAssistRangeTest, TriggerStandDownUsesTheSameWindowAsTheAction)
+{
+    // Issue #18. S1116 fixed the ACTION but left ShouldAssistCampFight (the trigger
+    // that gates it) on a bare `dist <= GetRange("spell")`, so the dead band moved
+    // into the trigger: the action engaged from <= spell + reachSum while the
+    // stand-down needed <= spell. A ranged follower in between made the trigger fire
+    // forever on a mob the action had already decided was in range.
+    //
+    // Live trace: SpellDistance 28.5, casters pinned at 29.0-31.0yd with the two
+    // biggest clusters at 30.6 and 30.8. reachSum is read off the trace rather than
+    // guessed — the action engaged out to 31.0yd, so spell + reachSum >= 31.0.
+    float const spell = 28.5f;
+    float const reachSum = 2.5f;
+
+    for (float dist : {29.0f, 30.1f, 30.6f, 30.8f})
+    {
+        EXPECT_TRUE(DungeonClearMath::IsWithinAssistAttackRange(
+            /*isMelee*/ false, dist, /*meleeRange*/ 4.0f, spell, reachSum))
+            << "trigger must stand down at " << dist
+            << "yd — the action already engages there and stock will not close";
+        EXPECT_GT(dist, spell) << "the old bare-spell test would have kept firing here";
+    }
+}
+
+TEST(DungeonClearAssistRangeTest, MeleeTriggerArmStaysWiderThanTheActionArm)
+{
+    // The trigger keeps `reach + 5.0` for melee on purpose. It must remain LOOSER
+    // than the action's `reachSum + 1.0` so the two overlap; if this ever inverts,
+    // melee gains the gap that ranged just lost.
+    float const botReach = 1.5f;
+    float const targetReach = 2.1f;
+    float const triggerMeleeRange = botReach + 5.0f;
+    float const actionMeleeRange = botReach + targetReach + 1.0f;
+    EXPECT_GT(triggerMeleeRange, actionMeleeRange);
+
+    // A melee bot between the two thresholds stands down and lets stock reach-melee
+    // (stop point reachSum + 0.75) walk it the rest of the way.
+    float const between = 0.5f * (actionMeleeRange + triggerMeleeRange);
+    EXPECT_TRUE(DungeonClearMath::IsWithinAssistAttackRange(
+        /*isMelee*/ true, between, triggerMeleeRange, 28.5f, botReach + targetReach));
+}
+
 // --- DecideChase (the chase leash) ---------------------------------------
 // A pull/engage target is latched by GUID and re-aimed at its live position every
 // tick, so a mob that WALKS turns the approach into a pursuit across the room —
@@ -1854,6 +2056,116 @@ TEST(DungeonClearPathCursorTest, FlatRouteIsUnaffectedByTheZTerm)
     EXPECT_EQ(DungeonClearMath::PathProgressCursor(flat, 19.0f, -3.0f, 100.5f), 2u);
 }
 
+// ---------------------------------------------------------------------------
+// PathCursorIsJoinable — may the bot -> cursor leg be read as corridor?
+//
+// The cursor answers "which vertex is nearest"; it cannot answer "and is the
+// bot anywhere near this route at all". Consumers that chain a synthesised leg
+// from the bot to that vertex need the second answer too, because the leg is a
+// straight line through whatever the map contains — see the Blackwing Lair
+// regression at the bottom of this block, and CRITICAL #4 in
+// DungeonClearBlockingDoorValue.cpp.
+
+namespace
+{
+    // Resnap's own limit, the bound the door scan passes in. Mirrored here as a
+    // literal so the test still means something if the follower's constant moves
+    // for a movement reason: this block is about the RULE, not the number.
+    float constexpr kResnapRadius = 45.0f;
+}
+
+TEST(DungeonClearPathCursorTest, JoinableWhileTheBotIsOnItsRoute)
+{
+    std::vector<G3D::Vector3> const route{
+        G3D::Vector3(0.0f, 0.0f, 100.0f),
+        G3D::Vector3(20.0f, 0.0f, 100.0f),
+        G3D::Vector3(40.0f, 0.0f, 100.0f),
+    };
+    // Dead on the line, and drifted a few yards off it: both are the ordinary
+    // case the joining leg exists to cover.
+    EXPECT_TRUE(DungeonClearMath::PathCursorIsJoinable(route, 1u, 20.0f, 0.0f, 100.0f,
+                                                       kResnapRadius));
+    EXPECT_TRUE(DungeonClearMath::PathCursorIsJoinable(route, 1u, 18.0f, 5.0f, 100.0f,
+                                                       kResnapRadius));
+    // A sparse authored route's own leg length (the BWL anchors run to ~24yd)
+    // must not read as off-route.
+    EXPECT_TRUE(DungeonClearMath::PathCursorIsJoinable(route, 1u, -4.0f, 0.0f, 100.0f,
+                                                       kResnapRadius));
+}
+
+TEST(DungeonClearPathCursorTest, NotJoinableBeyondTheResnapRadius)
+{
+    std::vector<G3D::Vector3> const route{
+        G3D::Vector3(0.0f, 0.0f, 100.0f),
+        G3D::Vector3(20.0f, 0.0f, 100.0f),
+    };
+    EXPECT_FALSE(DungeonClearMath::PathCursorIsJoinable(route, 0u, -46.0f, 0.0f, 100.0f,
+                                                        kResnapRadius));
+    // Measured in 3D, like the cursor pick itself: a vertex the bot is nearly
+    // under in plan view but a tower's worth of Z away is not one to join to.
+    EXPECT_FALSE(DungeonClearMath::PathCursorIsJoinable(route, 0u, 1.0f, 1.0f, 150.0f,
+                                                        kResnapRadius));
+}
+
+TEST(DungeonClearPathCursorTest, NotJoinableWithNoVertexToJoinTo)
+{
+    std::vector<G3D::Vector3> const route{ G3D::Vector3(0.0f, 0.0f, 100.0f) };
+    EXPECT_FALSE(DungeonClearMath::PathCursorIsJoinable({}, 0u, 0.0f, 0.0f, 0.0f,
+                                                        kResnapRadius));
+    EXPECT_FALSE(DungeonClearMath::PathCursorIsJoinable(route, 1u, 0.0f, 0.0f, 100.0f,
+                                                        kResnapRadius));
+}
+
+// The live case, with the run's real coordinates: Blackwing Lair, the raid
+// standing on Vaelastrasz's floor the moment it turns for Broodlord Lashlayer
+// (run tr-20260828-103056-1).
+//
+// The authored Broodlord route is registered as an ANCHOR route, so the path is
+// its twenty waypoints and nothing between them ("segs=21 firstSegPts=1"). Its
+// FIRST anchor, the staging shelf, is 150yd away — but BWL folds back on itself,
+// so its LAST anchor, the Broodlord standoff, is only 82yd away through solid
+// rock and therefore wins the nearest-vertex pick. Chaining a joining leg to it
+// draws an 82yd line through the mountain that leaves the map's walkable space
+// entirely and passes within half a yard of the Broodlord passage portcullis,
+// 342yd away along the real walk.
+//
+// Both halves of the regression are asserted: the cursor really does land on the
+// route's END (so nothing here depends on a cursor change), and the joinability
+// gate really does refuse that leg.
+TEST(DungeonClearPathCursorTest, BlackwingLairFoldbackIsNotJoinable)
+{
+    // The three anchors that matter, in registry order (see
+    // RegisterBlackwingLairRoute): staging, the Taskmaster ramp, the standoff.
+    std::vector<G3D::Vector3> const bwl{
+        G3D::Vector3(-7630.9f, -915.5f, 437.3f),     // 0  staging
+        G3D::Vector3(-7627.03f, -926.86f, 440.63f),  // 1
+        G3D::Vector3(-7650.86f, -999.24f, 440.61f),  // 6  mid lower room
+        G3D::Vector3(-7707.85f, -1075.17f, 445.96f), // 11 the ramp
+        G3D::Vector3(-7590.51f, -1041.64f, 449.85f), // 18
+        G3D::Vector3(-7573.8f, -1033.5f, 449.3f),    // 19 the Broodlord standoff
+    };
+    // The tank's real position at teardown.
+    float constexpr tankX = -7507.6f;
+    float constexpr tankY = -1003.9f;
+    float constexpr tankZ = 409.9f;
+
+    // The fold-back: the nearest vertex is the LAST one, not the one the raid is
+    // about to walk to.
+    EXPECT_EQ(DungeonClearMath::PathProgressCursor(bwl, tankX, tankY, tankZ),
+              bwl.size() - 1);
+
+    // ...and it is 82yd away through a mountain, so no corridor may be read off
+    // the leg that reaches it. This is what stops GO 179365 being flagged.
+    EXPECT_FALSE(DungeonClearMath::PathCursorIsJoinable(bwl, bwl.size() - 1,
+                                                        tankX, tankY, tankZ,
+                                                        kResnapRadius));
+
+    // The route's own start — where the raid was actually headed — is further
+    // still, which is exactly why the cursor did not pick it.
+    EXPECT_FALSE(DungeonClearMath::PathCursorIsJoinable(bwl, 0u, tankX, tankY, tankZ,
+                                                        kResnapRadius));
+}
+
 // --- PullTagStopDistance (where the tag walk-in stops) ---------------------
 using DungeonClearMath::PullTagStopDistance;
 
@@ -1952,4 +2264,417 @@ TEST(DcPullTagStopTest, ForceTagOnlyWhenClosingCannotCrossTheThreshold)
     EXPECT_FLOAT_EQ(PullTagStopDistance(5.0f, kMelee, 0, kGrace, kRate, 1.0f, force),
                     kMelee);
     EXPECT_TRUE(force);
+}
+
+// ===========================================================================
+// NearestPointOnPolyline2D — the point on a walk a mob comes closest to. Backs
+// the en-route sweep's "would it actually see us" veto (DcTargeting::
+// FindEnRouteAggroPack), which shoots one LOS ray from the mob to this point.
+// ===========================================================================
+
+TEST(DungeonClearMathTest, NearestPointOnPolylineNeedsTwoPoints)
+{
+    G3D::Vector3 out(-1.0f, -1.0f, -1.0f);
+    EXPECT_FALSE(DungeonClearMath::NearestPointOnPolyline2D({}, 0.0f, 0.0f, out));
+    EXPECT_FALSE(DungeonClearMath::NearestPointOnPolyline2D(
+        {G3D::Vector3(1.0f, 2.0f, 3.0f)}, 0.0f, 0.0f, out));
+    // Untouched on failure — a caller must never shoot a ray at a stale point.
+    EXPECT_FLOAT_EQ(out.x, -1.0f);
+}
+
+TEST(DungeonClearMathTest, NearestPointOnPolylineProjectsOntoTheNearestLeg)
+{
+    // An L: out along +X, then up along +Y.
+    std::vector<G3D::Vector3> const route{G3D::Vector3(0.0f, 0.0f, 0.0f),
+                                          G3D::Vector3(20.0f, 0.0f, 0.0f),
+                                          G3D::Vector3(20.0f, 20.0f, 0.0f)};
+    G3D::Vector3 out;
+
+    // Beside the first leg.
+    ASSERT_TRUE(DungeonClearMath::NearestPointOnPolyline2D(route, 8.0f, 5.0f, out));
+    EXPECT_FLOAT_EQ(out.x, 8.0f);
+    EXPECT_FLOAT_EQ(out.y, 0.0f);
+
+    // Beside the second.
+    ASSERT_TRUE(DungeonClearMath::NearestPointOnPolyline2D(route, 26.0f, 12.0f, out));
+    EXPECT_FLOAT_EQ(out.x, 20.0f);
+    EXPECT_FLOAT_EQ(out.y, 12.0f);
+}
+
+TEST(DungeonClearMathTest, NearestPointOnPolylineClampsToTheEnds)
+{
+    std::vector<G3D::Vector3> const route{G3D::Vector3(0.0f, 0.0f, 0.0f),
+                                          G3D::Vector3(20.0f, 0.0f, 0.0f)};
+    G3D::Vector3 out;
+
+    // Behind the start and past the end both clamp to a real endpoint rather
+    // than running off the infinite line.
+    ASSERT_TRUE(DungeonClearMath::NearestPointOnPolyline2D(route, -30.0f, 4.0f, out));
+    EXPECT_FLOAT_EQ(out.x, 0.0f);
+    ASSERT_TRUE(DungeonClearMath::NearestPointOnPolyline2D(route, 55.0f, 4.0f, out));
+    EXPECT_FLOAT_EQ(out.x, 20.0f);
+}
+
+TEST(DungeonClearMathTest, NearestPointOnPolylineInterpolatesZ)
+{
+    // A ramp climbing 10yd over 20yd of run. The Z matters: the LOS ray is shot
+    // from this point + eye height, and snapping to a vertex instead would aim
+    // the ray 5yd under (or over) the floor the walker is actually on.
+    std::vector<G3D::Vector3> const route{G3D::Vector3(0.0f, 0.0f, 0.0f),
+                                          G3D::Vector3(20.0f, 0.0f, 10.0f)};
+    G3D::Vector3 out;
+    ASSERT_TRUE(DungeonClearMath::NearestPointOnPolyline2D(route, 10.0f, 3.0f, out));
+    EXPECT_FLOAT_EQ(out.x, 10.0f);
+    EXPECT_FLOAT_EQ(out.z, 5.0f);
+}
+
+TEST(DungeonClearMathTest, NearestPointOnPolylineToleratesDegenerateLegs)
+{
+    // The route smoother emits coincident points at anchor joins; a zero-length
+    // leg must not divide by zero, it collapses to its own start point.
+    std::vector<G3D::Vector3> const route{G3D::Vector3(0.0f, 0.0f, 0.0f),
+                                          G3D::Vector3(0.0f, 0.0f, 0.0f),
+                                          G3D::Vector3(20.0f, 0.0f, 0.0f)};
+    G3D::Vector3 out;
+    ASSERT_TRUE(DungeonClearMath::NearestPointOnPolyline2D(route, 6.0f, 2.0f, out));
+    EXPECT_FLOAT_EQ(out.x, 6.0f);
+    EXPECT_FLOAT_EQ(out.y, 0.0f);
+}
+
+// --- PointTowardFrom: the transit pack's hold point --------------------------
+//
+// Same defect as HealCloseFallbackPoint (see TestHealReposition.cpp): the hold
+// point is walked back along the bearing from the route anchor, but z used to
+// stay at the ANCHOR's height — the anchor's floor over a point up to a leash
+// away. Flat legs hid it; the Suppression Rooms ramps do not.
+
+TEST(DungeonClearMathTest, PointTowardFromCarriesZAlongTheBearing)
+{
+    Position const anchor(0.0f, 0.0f, 100.0f, 0.0f);
+    Position const toward(0.0f, 40.0f, 140.0f, 0.0f);   // 40yd out, 40yd up
+
+    // Half way out is half way up.
+    Position const p = DungeonClearMath::PointTowardFrom(anchor, toward, 20.0f, 1.0f);
+    EXPECT_NEAR(p.GetPositionY(), 20.0f, 1e-3f);
+    EXPECT_NEAR(p.GetPositionZ(), 120.0f, 1e-3f);
+}
+
+// A flat leg — the common case — must not move at all.
+TEST(DungeonClearMathTest, PointTowardFromFlatLegKeepsItsHeight)
+{
+    Position const anchor(0.0f, 0.0f, 440.0f, 0.0f);
+    Position const toward(0.0f, 25.0f, 440.0f, 0.0f);
+
+    Position const p = DungeonClearMath::PointTowardFrom(anchor, toward, 21.0f, 1.0f);
+    EXPECT_NEAR(p.GetPositionY(), 21.0f, 1e-3f);
+    EXPECT_NEAR(p.GetPositionZ(), 440.0f, 1e-3f);
+}
+
+// THE BUG, on the crossing's steepest authored leg: anchors 30 -> 31 climb
+// 445.96 -> 451.31 over 20.0yd. A follower down at the anchor-30 end gets a hold
+// point three quarters of the way back along that ramp, and the anchor's height
+// there is four yards of solid rock.
+TEST(DungeonClearMathTest, PointTowardFromNeverAuthorsTheAnchorsFloor)
+{
+    Position const anchor(-7695.20f, -1090.66f, 451.31f, 0.0f);
+    Position const bot(-7707.85f, -1075.17f, 445.96f, 0.0f);
+
+    Position const p = DungeonClearMath::PointTowardFrom(anchor, bot, 15.0f, 1.0f);
+
+    // Strictly between the two ends, never ON the anchor's floor.
+    EXPECT_LT(p.GetPositionZ(), 451.31f);
+    EXPECT_GT(p.GetPositionZ(), 445.96f);
+    // 3/4 of the way down: 451.31 - 0.75 * 5.35.
+    EXPECT_NEAR(p.GetPositionZ(), 447.30f, 5e-2f);
+}
+
+// Clamped to the target when it is nearer than the requested distance, so the
+// hold point never overshoots the bot it is pulling in.
+TEST(DungeonClearMathTest, PointTowardFromClampsToTheNearerTarget)
+{
+    Position const anchor(0.0f, 0.0f, 10.0f, 0.0f);
+    Position const toward(0.0f, 5.0f, 15.0f, 0.0f);
+
+    Position const p = DungeonClearMath::PointTowardFrom(anchor, toward, 21.0f, 1.0f);
+    EXPECT_NEAR(p.GetPositionY(), 5.0f, 1e-3f);
+    EXPECT_NEAR(p.GetPositionZ(), 15.0f, 1e-3f);
+}
+
+// Stacked within the bearing floor: the anchor comes back untouched, no NaN.
+TEST(DungeonClearMathTest, PointTowardFromDegenerateBearingReturnsTheAnchor)
+{
+    Position const anchor(12.0f, 34.0f, 56.0f, 1.5f);
+    Position const toward(12.2f, 34.1f, 90.0f, 0.0f);
+
+    Position const p = DungeonClearMath::PointTowardFrom(anchor, toward, 21.0f, 1.0f);
+    EXPECT_FALSE(std::isnan(p.GetPositionX()));
+    EXPECT_NEAR(p.GetPositionX(), 12.0f, 1e-3f);
+    EXPECT_NEAR(p.GetPositionZ(), 56.0f, 1e-3f);
+}
+
+// ==== follow-tank centered breadcrumb trail: engage gate ===================
+//
+// The rung engages on a leash measured to the TANK but aims at a crumb `lag`
+// yards behind it, and the per-bot stagger grows `lag` while the leash stays
+// put. Below, the shipped live numbers: AiPlayerbot.FollowDistance 1.5 gives
+// dist 1.5, leash 3.5, and crumbs at 1.5 / 4.5 / 7.5 / 10.5.
+
+// The slot-0 follower's crumb is inside the leash, so past the leash is always
+// past the slot — the original behaviour, unchanged.
+TEST(DungeonClearMathTest, TrailFollowEngagesForTheNearestStaggerSlot)
+{
+    EXPECT_FALSE(DungeonClearMath::TrailFollowShouldEngage(3.4f, 3.5f, 1.5f));
+    EXPECT_TRUE(DungeonClearMath::TrailFollowShouldEngage(3.6f, 3.5f, 1.5f));
+    EXPECT_TRUE(DungeonClearMath::TrailFollowShouldEngage(19.7f, 3.5f, 1.5f));
+}
+
+// THE REGRESSION. A follower 5.1-7.1yd behind the tank with the lag-10.5 slot is
+// past the leash but INSIDE its own slot: its crumb sits farther from the tank
+// than it does, so trailing to it is a walk backward, out of the leash, straight
+// back into the Follow() fan that walks it forward again. Observed live in
+// DungeonClearPull.log at exactly these distances.
+TEST(DungeonClearMathTest, TrailFollowNeverRetreatsToReachItsStaggerSlot)
+{
+    EXPECT_FALSE(DungeonClearMath::TrailFollowShouldEngage(5.1f, 3.5f, 10.5f));
+    EXPECT_FALSE(DungeonClearMath::TrailFollowShouldEngage(5.9f, 3.5f, 10.5f));
+    EXPECT_FALSE(DungeonClearMath::TrailFollowShouldEngage(7.1f, 3.5f, 10.5f));
+    // Same shape one slot in.
+    EXPECT_FALSE(DungeonClearMath::TrailFollowShouldEngage(5.9f, 3.5f, 7.5f));
+    EXPECT_FALSE(DungeonClearMath::TrailFollowShouldEngage(4.0f, 3.5f, 4.5f));
+}
+
+// Genuinely fallen behind: the crumb is now ahead of us and trailing closes the
+// gap. The rung must still engage, or the party never inherits the tank's
+// corridor-centered line on a long leg.
+TEST(DungeonClearMathTest, TrailFollowStillEngagesOnceTrulyBehind)
+{
+    EXPECT_TRUE(DungeonClearMath::TrailFollowShouldEngage(10.6f, 3.5f, 10.5f));
+    EXPECT_TRUE(DungeonClearMath::TrailFollowShouldEngage(19.0f, 3.5f, 10.5f));
+    EXPECT_TRUE(DungeonClearMath::TrailFollowShouldEngage(19.8f, 3.5f, 7.5f));
+}
+
+// The leash still binds when it is the larger of the two: a follower inside the
+// follow bubble does not trail just because its slot is tighter still.
+TEST(DungeonClearMathTest, TrailFollowLeashStillBindsInsideTheBubble)
+{
+    EXPECT_FALSE(DungeonClearMath::TrailFollowShouldEngage(3.0f, 8.0f, 1.5f));
+    EXPECT_FALSE(DungeonClearMath::TrailFollowShouldEngage(7.9f, 8.0f, 6.0f));
+    EXPECT_TRUE(DungeonClearMath::TrailFollowShouldEngage(8.1f, 8.0f, 6.0f));
+}
+
+// ---- off-line rejoin rung: hysteresis + refusal handling ------------------
+// Root cause of the BWL ping-pong + wall clip, tr-20260830-115416-5. See
+// DungeonClearMath::IsOffLineWithHysteresis / DecideRejoinRefusal.
+
+TEST(DungeonClearMathTest, OffLineEngagesAtTheEngageBarWhenUnlatched)
+{
+    // Unlatched: only the 6yd engage bar counts. The live failure sat at 4.1-6.9yd,
+    // so both sides of that band must be decidable.
+    EXPECT_FALSE(DungeonClearMath::IsOffLineWithHysteresis(4.1f, false, false, 6.0f, 3.0f));
+    EXPECT_FALSE(DungeonClearMath::IsOffLineWithHysteresis(6.0f, false, false, 6.0f, 3.0f));
+    EXPECT_TRUE(DungeonClearMath::IsOffLineWithHysteresis(6.9f, false, false, 6.0f, 3.0f));
+}
+
+TEST(DungeonClearMathTest, OffLineHoldsToTheReleaseBarOnceLatched)
+{
+    // THE FIX. Latched at 6.9yd, the rung must keep the bot through the whole
+    // 3-6yd band instead of handing it back to the escort spline, whose straight
+    // opening leg is what cut the BWL anchor 16->18 bend into a navmesh void.
+    EXPECT_TRUE(DungeonClearMath::IsOffLineWithHysteresis(5.9f, true, false, 6.0f, 3.0f));
+    EXPECT_TRUE(DungeonClearMath::IsOffLineWithHysteresis(4.1f, true, false, 6.0f, 3.0f));
+    EXPECT_TRUE(DungeonClearMath::IsOffLineWithHysteresis(3.1f, true, false, 6.0f, 3.0f));
+    // Genuinely back on the corridor -> released.
+    EXPECT_FALSE(DungeonClearMath::IsOffLineWithHysteresis(3.0f, true, false, 6.0f, 3.0f));
+    EXPECT_FALSE(DungeonClearMath::IsOffLineWithHysteresis(0.4f, true, false, 6.0f, 3.0f));
+}
+
+TEST(DungeonClearMathTest, OffLineVerticalMismatchIsNotHysteretic)
+{
+    // A floor mismatch is binary: it fires from either latch state and does not
+    // linger once the bot is back on its own storey.
+    EXPECT_TRUE(DungeonClearMath::IsOffLineWithHysteresis(0.0f, false, true, 6.0f, 3.0f));
+    EXPECT_TRUE(DungeonClearMath::IsOffLineWithHysteresis(0.0f, true, true, 6.0f, 3.0f));
+    EXPECT_FALSE(DungeonClearMath::IsOffLineWithHysteresis(0.0f, false, false, 6.0f, 3.0f));
+}
+
+TEST(DungeonClearMathTest, OffLineHysteresisCannotFlapInsideTheBand)
+{
+    // Walk a bot back and forth across 6yd the way the live tank did and assert
+    // the latch never toggles twice without a genuine re-entry between.
+    bool latched = false;
+    float const devs[] = {4.1f, 6.9f, 5.6f, 5.8f, 6.9f, 4.1f, 5.7f, 2.9f, 4.5f};
+    int toggles = 0;
+    for (float d : devs)
+    {
+        bool const next = DungeonClearMath::IsOffLineWithHysteresis(d, latched, false, 6.0f, 3.0f);
+        if (next != latched)
+            ++toggles;
+        latched = next;
+    }
+    // Exactly two: off->on at 6.9, on->off at 2.9. Pre-fix this sequence toggled
+    // six times, and every "off" tick launched an unscreened escort leg.
+    EXPECT_EQ(toggles, 2);
+    // Released at 2.9, the bar goes back to the 6yd ENGAGE side, so the trailing
+    // 4.5 stays on-line. That residual 3-6yd band is exactly what the spline
+    // window's opening-leg LOS screen covers (see FillHopObs) — the two halves of
+    // the fix meet here and neither is redundant.
+    EXPECT_FALSE(latched);
+}
+
+TEST(DungeonClearMathTest, RejoinRefusalGivesTheFirstTickGrace)
+{
+    // FLT_MAX seed = no rejoin of ours in flight yet. The first refusal only
+    // establishes the baseline; halting here would stutter the healthy case.
+    DungeonClearMath::RejoinRefusalVerdict const v = DungeonClearMath::DecideRejoinRefusal(
+        6.2f, std::numeric_limits<float>::max(), 3.0f);
+    EXPECT_FALSE(v.haltStaleMove);
+    EXPECT_FLOAT_EQ(v.bestDeviation, 6.2f);
+}
+
+TEST(DungeonClearMathTest, RejoinRefusalRidesAWorkingReEntry)
+{
+    // Deviation holding or shrinking means the in-flight move IS the re-entry.
+    // Cancelling it every refused tick is the stop/re-issue stutter this guards.
+    EXPECT_FALSE(DungeonClearMath::DecideRejoinRefusal(6.2f, 6.2f, 3.0f).haltStaleMove);
+    EXPECT_FALSE(DungeonClearMath::DecideRejoinRefusal(4.0f, 6.2f, 3.0f).haltStaleMove);
+    EXPECT_FALSE(DungeonClearMath::DecideRejoinRefusal(0.5f, 6.2f, 3.0f).haltStaleMove);
+    // The baseline tracks the best seen, so a later drift is measured from 0.5.
+    EXPECT_FLOAT_EQ(DungeonClearMath::DecideRejoinRefusal(0.5f, 6.2f, 3.0f).bestDeviation, 0.5f);
+}
+
+TEST(DungeonClearMathTest, RejoinRefusalIsBlindToABotThatNeverMovesAtAll)
+{
+    // THE BLIND SPOT — and the whole reason DcApproachState::rejoinRefusals had to
+    // be added alongside this verdict. DecideRejoinRefusal only ever asks "is the
+    // move in flight carrying me AWAY?". A bot whose DcMoveTo is refused on
+    // GEOMETRY rather than on contention never moves at all, so its deviation is
+    // perfectly CONSTANT — which reads here, correctly and uselessly, as a re-entry
+    // holding its ground. tr-20260901-223655-10 (Halls of Lightning) sat frozen at
+    // 267.2yd for 3924 consecutive refused ticks and this verdict never once asked
+    // for a halt, while the rung it advises reset stuckCount and cleared the stall
+    // on every one of them.
+    //
+    // The fix is NOT to tighten the slack here — that would break
+    // RejoinRefusalRidesAWorkingReEntry above, which needs a held deviation to mean
+    // "ride it". Liveness is a different question and is counted by the rung.
+    float best = std::numeric_limits<float>::max();
+    for (int tick = 0; tick < 10; ++tick)
+    {
+        DungeonClearMath::RejoinRefusalVerdict const v =
+            DungeonClearMath::DecideRejoinRefusal(267.2f, best, 3.0f);
+        EXPECT_FALSE(v.haltStaleMove) << "tick " << tick;
+        best = v.bestDeviation;
+    }
+    EXPECT_FLOAT_EQ(best, 267.2f);
+}
+
+TEST(DungeonClearMathTest, RejoinRefusalToleratesRoundingWideWithinSlack)
+{
+    // A pathed re-entry rounding a corner may swing a couple of yards wider
+    // before it closes. Inside the slack that must not be read as drift.
+    EXPECT_FALSE(DungeonClearMath::DecideRejoinRefusal(9.2f, 6.2f, 3.0f).haltStaleMove);
+    EXPECT_TRUE(DungeonClearMath::DecideRejoinRefusal(9.3f, 6.2f, 3.0f).haltStaleMove);
+}
+
+TEST(DungeonClearMathTest, RejoinRefusalHaltsTheLiveBwlRunaway)
+{
+    // THE FIX, on the measured deviations from tr-20260830-115416-5. Pre-fix all
+    // 22 of these ticks returned "success" having moved nothing, and the tank
+    // drifted 6.2 -> 31.1yd before Resnap blew its 45yd radius.
+    float const devs[] = {6.2f, 7.6f, 9.0f, 10.5f, 10.6f, 12.6f, 14.1f, 15.7f,
+                          17.2f, 19.9f, 21.2f, 22.6f, 24.0f, 26.2f, 27.2f, 28.3f,
+                          29.4f, 30.0f, 30.6f, 31.1f, 31.1f, 31.0f};
+    float best = std::numeric_limits<float>::max();
+    int halts = 0;
+    float worstBeforeFirstHalt = 0.0f;
+    for (float d : devs)
+    {
+        DungeonClearMath::RejoinRefusalVerdict const v =
+            DungeonClearMath::DecideRejoinRefusal(d, best, 3.0f);
+        if (v.haltStaleMove)
+            ++halts;
+        else if (halts == 0)
+            worstBeforeFirstHalt = d;
+        best = v.bestDeviation;
+    }
+    // It must halt, and it must halt EARLY — the whole point is to stop the
+    // runaway near the corridor, not after it has crossed the map.
+    EXPECT_GT(halts, 0);
+    EXPECT_LT(worstBeforeFirstHalt, 10.0f);
+}
+
+TEST(DungeonClearMathTest, RejoinRefusalRebaselinesAfterAHalt)
+{
+    // After a halt the next tick must not re-halt on the same stale baseline —
+    // otherwise the rung cancels every tick and never lets a re-issue land.
+    DungeonClearMath::RejoinRefusalVerdict const halted =
+        DungeonClearMath::DecideRejoinRefusal(12.0f, 6.2f, 3.0f);
+    ASSERT_TRUE(halted.haltStaleMove);
+    EXPECT_FLOAT_EQ(halted.bestDeviation, 12.0f);
+    EXPECT_FALSE(DungeonClearMath::DecideRejoinRefusal(12.0f, halted.bestDeviation, 3.0f)
+                     .haltStaleMove);
+}
+
+// ===== Loot-roll rung starvation bound (LootRollRungMayFire) =====
+//
+// The rung sits at relevance 95 above the whole driving ladder, and one action
+// runs per tick. tr-20260831-123946-18: a roll whose Loot had been emptied made
+// Group::CountRollVote refuse the vote, so the rung fired and its action
+// reported success on all 3142 ticks of the freeze while `dungeon clear advance`
+// (15) was pushed every tick and executed on none. This bounds that class.
+
+TEST(DungeonClearMathTest, LootRollRungFiresForAHealthyWindow)
+{
+    std::uint64_t sig = 0;
+    std::uint32_t ticks = 0;
+
+    // The action clears its whole backlog in one Execute, so a healthy window is
+    // one firing followed by an empty set.
+    EXPECT_TRUE(DungeonClearMath::LootRollRungMayFire(2, 0xABCD, 5, sig, ticks));
+    EXPECT_FALSE(DungeonClearMath::LootRollRungMayFire(0, 0, 5, sig, ticks));
+    EXPECT_EQ(ticks, 0u);   // empty set restores the full budget
+}
+
+TEST(DungeonClearMathTest, LootRollRungStandsDownOnAnUnchangedSet)
+{
+    std::uint64_t sig = 0;
+    std::uint32_t ticks = 0;
+
+    // Same unresolvable roll every tick: fires for the budget, then yields.
+    for (std::uint32_t i = 0; i < 5; ++i)
+        EXPECT_TRUE(DungeonClearMath::LootRollRungMayFire(1, 0xDEAD, 5, sig, ticks)) << "tick " << i;
+
+    EXPECT_FALSE(DungeonClearMath::LootRollRungMayFire(1, 0xDEAD, 5, sig, ticks));
+    EXPECT_EQ(ticks, 6u);   // == max + 1: the one tick the one-shot log fires on
+
+    // And it STAYS down while nothing changes — without this the freeze resumes.
+    for (int i = 0; i < 50; ++i)
+        EXPECT_FALSE(DungeonClearMath::LootRollRungMayFire(1, 0xDEAD, 5, sig, ticks));
+}
+
+TEST(DungeonClearMathTest, LootRollRungReArmsWhenTheRollSetChanges)
+{
+    std::uint64_t sig = 0;
+    std::uint32_t ticks = 0;
+
+    while (DungeonClearMath::LootRollRungMayFire(1, 0xDEAD, 5, sig, ticks)) {}
+    EXPECT_FALSE(DungeonClearMath::LootRollRungMayFire(1, 0xDEAD, 5, sig, ticks));
+
+    // A new drop lands: the digest changes and the rung must roll on it at once.
+    // A latch that suppressed this would trade one bug for a bot that stops
+    // rolling for the rest of the run.
+    EXPECT_TRUE(DungeonClearMath::LootRollRungMayFire(2, 0xBEEF, 5, sig, ticks));
+    EXPECT_EQ(ticks, 1u);
+}
+
+TEST(DungeonClearMathTest, LootRollRungCountsRollsRatherThanTrustingTheDigest)
+{
+    std::uint64_t sig = 0;
+    std::uint32_t ticks = 0;
+
+    // votable == 0 is the ONLY "nothing pending" signal. A digest that happens
+    // to be zero with rolls still pending must still fire, or a hash collision
+    // would silently disable rolling.
+    EXPECT_TRUE(DungeonClearMath::LootRollRungMayFire(1, 0, 5, sig, ticks));
+    EXPECT_EQ(ticks, 1u);
 }

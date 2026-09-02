@@ -18,6 +18,7 @@ export interface RunSpec {
   heroic: boolean;
   level: number;    // 0 = the dungeon's recommended level
   seed: number;     // 0 = roll a comp
+  size: number;     // 0 = classic 5-man comp; 2..40 = raid size (raid rows)
   ilvl: number;     // 0 = server conf, -1 = no cap, >0 = that item level
   quality: number;  // 0 = server conf, else 1..5
 }
@@ -94,11 +95,16 @@ export function rerunSpec(r: RunRecord, catalogue: Catalogue | null): RunSpec | 
   if (r.gearIlvl === 0) ilvl = -1;
   else if (r.gearIlvl && ladder.some((g) => g.ilvl === r.gearIlvl)) ilvl = r.gearIlvl;
 
+  /* size only means anything on a raid row; a pre-schema-11 record has none
+   * and reruns as the classic 5-man, which is what it was. */
+  const size = d?.raid && r.size && r.size !== 5 ? r.size : 0;
+
   return {
     dungeon: r.dungeon,
     heroic,
     level: r.level ?? 0,
     seed: r.compSeed ?? 0,
+    size,
     ilvl,
     quality: r.gearQuality ?? 0,
   };

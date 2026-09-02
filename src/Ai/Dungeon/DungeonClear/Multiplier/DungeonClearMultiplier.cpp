@@ -11,10 +11,41 @@
 #include "Player.h"
 #include "Playerbots.h"
 #include "Position.h"
+#include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
+#include "Ai/Dungeon/DungeonClear/DcPullContext.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcBossStandDown.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcSmartRest.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearUtil.h"
 #include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
+
+// BLACKWING LAIR, the orb runner, and the hardest guard in the module: while this
+// bot holds Razorgore's possession, NOTHING it could do is worth doing.
+//
+// 19832 is a channel on the runner's own body, and the encounter hangs off it —
+// break it and a boss the raid must not kill is loose, the runner is locked out of
+// the orb for 60s, and the egg run loses a whole window. The orb rung already owns
+// the tick and spends it on nothing, but owning the tick is only as strong as the
+// rung's relevance, and the relevance band it sits in (62) does not cover
+// everything: ACTION_EMERGENCY is 90 and stock `drop target` is 99, so a health
+// potion, a healthstone, a flee, or a target drop outranks it and ends the channel
+// — and those are exactly the actions a rooted bot with adds on it reaches for.
+//
+// Zeroing every OTHER action is the only shape that closes that. It costs the
+// runner its self-preservation for ninety seconds, which is the same price a human
+// raider pays holding the orb: they cannot act either. The raid's job is to keep
+// the adds off the ledge (that is what the camp rung is for); the runner's job is
+// to stand still.
+//
+// Free everywhere else — HoldsThePossession rejects on a map compare, and it reads
+// this bot's own charm field rather than any cross-bot signal, so no stale stamp
+// can drop the guard while the channel is still up.
+static float RazorgorePossessionClamp(Player* bot, std::string const& name)
+{
+    if (!DcBlackwingLair::HoldsThePossession(bot))
+        return 1.0f;
+    return name == "dungeon clear razorgore orb" ? 1.0f : 0.0f;
+}
 
 float DungeonClearMultiplier::GetValue(Action* action)
 {
@@ -22,6 +53,9 @@ float DungeonClearMultiplier::GetValue(Action* action)
         return 1.0f;
 
     std::string const& name = action->getName();
+
+    if (float const clamp = RazorgorePossessionClamp(bot, name); clamp != 1.0f)
+        return clamp;
 
     // Rest-target cap. Applies to EVERY bot in an active DC run — the leader tank
     // AND its followers — so the whole group stops eating/drinking at the group's
@@ -172,10 +206,46 @@ float DungeonClearCombatMultiplier::GetValue(Action* action)
     if (!action || !botAI || !bot)
         return 1.0f;
 
-    // Touch EXACTLY ONE combat action. Fast-path everything else so a fight's full
-    // action list pays only a single string compare per tick — the combat engine
-    // otherwise stays fully stock.
-    if (action->getName() != "drop target")
+    std::string const& name = action->getName();
+
+    // The possession clamp, first and unconditional — see its definition above.
+    // The runner is IN COMBAT for most of its window (the adds are on it), so the
+    // combat engine is where this actually has to bite.
+    if (float const clamp = RazorgorePossessionClamp(bot, name); clamp != 1.0f)
+        return clamp;
+
+    // RAID BOSS STAND-DOWN — the one shared check that makes every DC combat
+    // trigger node inert during a raid encounter, instead of a copy in each of
+    // the ~12 triggers. While DcBossStandDown reads active, a "dungeon clear *"
+    // combat action is zeroed unless it is on the exemption list (the playerbots
+    // raid strategy owns the fight, ACTION_RAID=60+). The list, and the reason
+    // each name is on it, live with the pure classifier in DcBossStandDown.h.
+    // `drop target` classifies as Defer and falls through to the suppressor
+    // below — during an encounter as much as outside one, because the
+    // out-of-LOS assist and that suppression are one mechanism in two halves.
+    // Order of tests: the prefix compare is paid only after the cheap
+    // exact-compare fast path fails, and IsActive itself is raid-gated +
+    // leader-memoised, so dungeon runs pay one Map::IsRaid() at most.
+    bool const isDcAction = name.compare(0, 13, "dungeon clear") == 0;
+    if (!isDcAction && name != "drop target")
+        return 1.0f;
+    if (DcBossStandDown::IsActive(bot))
+    {
+        switch (DcBossStandDown::ClassifyAction(name, isDcAction))
+        {
+            case DcBossStandDown::ActionVerdict::Stock:
+                return 1.0f;
+            case DcBossStandDown::ActionVerdict::Inert:
+                return 0.0f;
+            case DcBossStandDown::ActionVerdict::Defer:
+                break;  // `drop target` -> the suppressor below decides
+        }
+    }
+
+    // Touch EXACTLY ONE other combat action. Fast-path everything else so a
+    // fight's full action list pays only the compares above per tick — the
+    // combat engine otherwise stays fully stock.
+    if (name != "drop target")
         return 1.0f;
 
     // Drop-target ping-pong guard. Engine transitions are action-driven: the stock
@@ -192,7 +262,47 @@ float DungeonClearCombatMultiplier::GetValue(Action* action)
     // same-map and attackable but merely out of LOS (still being closed on). A dead /
     // despawned / truly-invalid target is NOT out-of-LOS-only, so it still drops
     // normally and the bot moves on or leaves combat cleanly.
-    if (PlayerbotAI::IsHeal(bot) || !DcLeaderSignal::IsLeaderFightAssistWanted(bot))
+    // SECOND CASE, same mechanism one role over: the LEADER mid-drag. An LOS-break
+    // pull (ComputeSafeCamp's ranged branch) walks the camp back along the trail
+    // until the tank can no longer SEE the mob it just tagged — that is the entire
+    // point of it. But "can no longer see it" is precisely InvalidTargetValue's
+    // out-of-LOS clause, so the maneuver's own success condition fires drop target
+    // on the tank the moment it rounds the corner, and the tank leaves the combat
+    // engine. `dungeon clear pull maneuver` is a COMBAT-engine trigger, so the pull
+    // FSM stops being ticked at all: it freezes in Returning with its return-leg
+    // watchdog — the thing whose whole job is to fall out to "fight in place" —
+    // unreachable, because that watchdog is evaluated inside the action that no
+    // longer runs. Nothing times out and the run deadlocks until the overall budget.
+    //
+    // Live (tp-20260815-162044-2, Deadmines workshop, 3 of 5 runs): the tank tagged
+    // a Goblin Engineer (622), dragged 21.8yd to an LOS-break camp, and went silent
+    // — no log line of any kind for the remaining 130-215s, phase stuck at Returning
+    // (forMs 130368 / 163495 / 215454), party parked passive at camp, everyone at
+    // 100% HP. The engineers never came either: their SmartAI does
+    // SET_COMBAT_MOVE(0) in the 5-30yd band (smart_scripts 622 id 1), so breaking
+    // LOS does not bring them — UNIT_STATE_NO_COMBAT_MOVEMENT means there is no
+    // chase generator left to notice. Both sides of the fight stood still.
+    //
+    // Deliberately gated THREE ways so this cannot touch an ordinary pull:
+    //   - losPull: stamped at commit only when ComputeSafeCamp took its ranged
+    //     branch and walked the camp back to break LOS on purpose. Every other
+    //     pull keeps the mob glued to the tank and in sight the whole way home, so
+    //     it never reaches the out-of-LOS test below and is bit-for-bit unchanged.
+    //   - leader-only: a follower mid-drag is the OTHER case above, already handled.
+    //   - HOLDING phases only (Forming/Advancing/Returning). At Engage the maneuver
+    //     is over and an out-of-LOS target drops normally, as in any other fight.
+    bool losBreakDrag = false;
+    if (DcLeaderSignal::IsDungeonClearLeader(bot))
+    {
+        DcPullContext const& pull = AI_VALUE(DcPullContext&, DcKey::PullContext);
+        losBreakDrag = pull.losPull &&
+                       (pull.phase == DcPullPhase::Forming ||
+                        pull.phase == DcPullPhase::Advancing ||
+                        pull.phase == DcPullPhase::Returning);
+    }
+
+    if (!losBreakDrag &&
+        (PlayerbotAI::IsHeal(bot) || !DcLeaderSignal::IsLeaderFightAssistWanted(bot)))
         return 1.0f;
 
     Unit* tgt = AI_VALUE(Unit*, DcKey::Stock::CurrentTarget);

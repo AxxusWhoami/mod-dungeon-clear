@@ -409,13 +409,15 @@ def save_rosters(data):
 
 class RosterSaveRequest(BaseModel):
     name: str
-    members: list   # exactly 5, ordered tank, heal, dps, dps, dps
+    members: list   # 2..40, ordered tank, heal, dps... (positional roles)
 
 
 def validate_member_names(members):
-    if len(members) != 5:
-        raise HTTPException(400, "a roster is exactly 5 characters "
-                                 "(tank, heal, dps, dps, dps)")
+    # 2..40 (raid-support Plan D): roles stay positional — first is the tank,
+    # second the healer, the rest DPS. Mirrors the module's own roster bounds.
+    if not 2 <= len(members) <= 40:
+        raise HTTPException(400, "a roster is 2-40 characters "
+                                 "(ordered tank, heal, dps, ...)")
     seen = set()
     for n in members:
         if not NAME_RE.fullmatch(n or ""):

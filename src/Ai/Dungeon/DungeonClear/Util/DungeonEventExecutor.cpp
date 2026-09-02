@@ -7,18 +7,23 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <list>
 #include <optional>
 #include <unordered_set>
+#include <vector>
 
+#include "CombatManager.h"
 #include "Creature.h"
 #include "GameObject.h"
+#include "GameObjectAI.h"
 #include "GameObjectData.h"
 #include "GossipDef.h"
 #include "Group.h"
 #include "InstanceScript.h"
 #include "Map.h"
 #include "ModelIgnoreFlags.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcBossStandDown.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcFormGate.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTargeting.h"
 #include "Log.h"
@@ -36,6 +41,8 @@
 #include "Ai/Dungeon/DungeonClear/DcApproachState.h"
 #include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 #include "Ai/Dungeon/DungeonClear/Util/ChunkedPathfinder.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcCombatFlag.h"
+#include "Ai/Dungeon/DungeonClear/Util/DungeonClearTuning.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonPathFollower.h"
 
 namespace
@@ -58,6 +65,17 @@ namespace
     // legitimately sits for its whole timeout, so this only fires well past the
     // point where the per-step timeout should already have escalated.
     constexpr uint32 DC_EVENT_NO_PROGRESS_FACTOR = 3;
+
+    // How long a TeleportParty will wait for the party to finish a fight before
+    // relocating anyway (see the step). Sized to cover a real trash camp at the
+    // checkpoint with room to spare — Azjol-Nerub's six-plus Skittering Swarmers
+    // die in well under a minute. The gate itself no longer arms on a bare combat
+    // flag (it asks AnyPartyHeldByLiveEnemy), so this bounds the case a flag test
+    // cannot: a fight that is real but unwinnable from the checkpoint, which
+    // would otherwise hold a REQUIRED event until the run's no-progress watchdog.
+    // Past it the relocation fires and DropCombatLeftBehind cleans up, which is a
+    // better outcome than either stalling or teleporting instantly.
+    constexpr uint32 DC_RELOCATION_COMBAT_HOLD_MS = 60000;
 
     // Gap after which a Drive call reads as a FRESH activation rather than a
     // tick-to-tick continuation.
@@ -188,6 +206,106 @@ namespace
                       leader->GetName(), member->GetName());
         }
     }
+
+    // Drop the combat the party is carrying across a one-way relocation.
+    //
+    // A TeleportParty crosses a navmesh break BY DEFINITION — that is the whole
+    // reason the step exists — so anything still swinging at the party when it
+    // fires is left on the far side of geometry nobody can walk back through. The
+    // combat references survive the teleport in both directions: the party stays
+    // flagged, and the bots' own combat engine keeps driving them at attackers it
+    // can never reach. Live on Azjol-Nerub, whose drop checkpoint sits inside a
+    // Skittering Swarmer camp (six spawns within 16yd of it): the party teleported
+    // mid-fight and then ran back up the lower kingdom toward mobs 350yd away and
+    // 360yd up.
+    //
+    // The RunStep gate below means this should normally have nothing to do — the
+    // relocation waits for combat to end. It is the backstop for the cases the
+    // gate cannot cover: a follower flagged by something the leader is not, an
+    // add that aggros on the teleport tick, and the bounded-hold expiry.
+    //
+    // Both directions, or it does not stick: clearing only the party's side leaves
+    // the creature's threat reference to re-flag them on its next update.
+    //
+    // AND THE HOLDERS LIVE IN THE COMBAT MANAGER, NOT IN getAttackers(). That set
+    // holds only units whose CURRENT VICTIM is this member; a mob that tagged a
+    // bot and then picked someone else — or picked nobody, which is every add
+    // whose target just vanished 360yd downward — is not in it at all, while its
+    // CombatReference goes on holding the member flagged. The first cut of this
+    // function walked getAttackers() alone and cleared NOTHING in the case it was
+    // written for: tr-20260818-223003-8's teardown reads
+    //
+    //   Oschue [engine=combat attackers=0 victim=-] held by Skittering Swarmer
+    //   (32593) 346.9yd 100% reachable -> LEGITIMATE
+    //
+    // — `attackers=0` next to a live holder, eleven minutes after the drop. The
+    // PvE combat refs are the authoritative "who has me in combat" list (it is
+    // what DcCombatFlag::ScanCombatHolders and the teardown snapshot both walk),
+    // so walk those, and keep the attacker set as a superset guard for anything
+    // mid-swing that has not registered a reference yet.
+    //
+    // Holders are collected BEFORE anything is cleared: CombatReference::EndCombat
+    // deletes the reference it is iterating and CombatStop mutates the attacker
+    // set, so both containers are unsafe to walk while dropping. GUID-deduped
+    // because the two sources overlap, and re-checked for IsInWorld because a
+    // summon's AI may despawn itself out of JustExitedCombat.
+    void DropCombatLeftBehind(Player* leader)
+    {
+        Group* group = leader->GetGroup();
+        uint32 cleared = 0;
+
+        auto dropFor = [&cleared](Player* member)
+        {
+            if (!member || !member->IsInWorld())
+                return;
+
+            std::vector<Unit*> holders;
+            std::unordered_set<uint64> seen;
+            auto const collect = [&holders, &seen](Unit* u)
+            {
+                if (u && seen.insert(u->GetGUID().GetRawValue()).second)
+                    holders.push_back(u);
+            };
+            for (auto const& kv : member->GetCombatManager().GetPvECombatRefs())
+                if (CombatReference* const ref = kv.second)
+                    collect(ref->GetOther(member));
+            for (Unit* const attacker : member->getAttackers())
+                collect(attacker);
+
+            for (Unit* const holder : holders)
+            {
+                if (!holder->IsInWorld())
+                    continue;
+                holder->GetThreatMgr().ClearAllThreat();
+                holder->CombatStop(true);
+                ++cleared;
+            }
+            member->GetThreatMgr().ClearAllThreat();
+            member->CombatStop(true);
+        };
+
+        dropFor(leader);
+        if (group)
+        {
+            for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+            {
+                Player* member = ref->GetSource();
+                if (!member || member == leader)
+                    continue;
+                if (member->GetMapId() != leader->GetMapId())
+                    continue;
+                if (!GET_PLAYERBOT_AI(member))  // never touch a human's combat
+                    continue;
+                dropFor(member);
+            }
+        }
+
+        if (cleared)
+            LOG_INFO("playerbots.dungeonclear",
+                     "[dungeon-clear] {}: relocation dropped {} combat holder(s) left on "
+                     "the far side of the break",
+                     leader->GetName(), cleared);
+    }
 }
 
 bool DungeonEventExecutor::IsOnDropLanding(Player* bot, EventStep const& step)
@@ -225,6 +343,26 @@ bool DungeonEventExecutor::HasGameObjectLos(Player* bot, GameObject* go)
                                 VMAP::ModelIgnoreFlags::Nothing);
 }
 
+// Translate a POSITIONAL gossip option into the gossipListId the protocol wants —
+// the DB OptionID the menu map is keyed by. See the header for why this exists.
+bool DungeonEventExecutor::ResolveGossipListId(GossipMenu const& menu, int32 option,
+                                               uint32& listId)
+{
+    if (option < 0)
+        return false;
+
+    auto const& items = menu.GetMenuItems();
+    if (static_cast<size_t>(option) >= items.size())
+        return false;
+
+    // std::map iterates in ascending key order, so ordinal 0 is still key 0
+    // wherever the DB uses 0 — every OptionID-0 caller is unaffected.
+    auto it = items.begin();
+    std::advance(it, option);
+    listId = it->first;
+    return true;
+}
+
 bool DungeonEventExecutor::SelectGossip(Player* bot, Creature* npc, int32 option)
 {
     if (!bot || !npc)
@@ -237,9 +375,16 @@ bool DungeonEventExecutor::SelectGossip(Player* bot, Creature* npc, int32 option
     hello << npc->GetGUID();
     bot->GetSession()->HandleGossipHelloOpcode(hello);
 
+    // THE `option` ARGUMENT IS AN ORDINAL AND MUST BE TRANSLATED — GetItem() is a
+    // find() on the DB OptionID, not the n-th option, and so is the gossipListId
+    // the select packet carries (ResolveGossipListId documents the whole trap).
+    // Passing a positional 0 straight through read as correct for a long time
+    // because nearly every gossip NPC here uses OptionID 0; Brann does not, and
+    // that cost a whole Halls of Stone run (tr-20260831-225609-1) to a gossip that
+    // refused silently on every tick.
     GossipMenu& menu = bot->PlayerTalkClass->GetGossipMenu();
-    if (menu.GetMenuItems().empty() ||
-        !menu.GetItem(static_cast<uint32>(option)))
+    uint32 gossipListId = 0;
+    if (!ResolveGossipListId(menu, option, gossipListId))
         return false;  // menu/option not ready yet — caller retries
 
     // Send the NPC's OWN guid: HandleGossipSelectOptionOpcode rejects the select
@@ -257,7 +402,7 @@ bool DungeonEventExecutor::SelectGossip(Player* bot, Creature* npc, int32 option
     // in place (opening a submenu), so `menu.GetMenuId()` would already read the
     // submenu's id afterward.
     uint32 lastMenuId = menu.GetMenuId();
-    sendSelect(lastMenuId, static_cast<uint32>(option));
+    sendSelect(lastMenuId, gossipListId);
 
     // DRILL DOWN through submenus: some scripted NPCs put the option that fires
     // their action behind one or more nested gossip menus (Old Hillsbrad's Thrall,
@@ -271,12 +416,13 @@ bool DungeonEventExecutor::SelectGossip(Player* bot, Creature* npc, int32 option
     for (int guard = 0; guard < 6; ++guard)
     {
         GossipMenu& sub = bot->PlayerTalkClass->GetGossipMenu();
-        if (sub.GetMenuItems().empty() || !sub.GetItem(0))
+        uint32 subListId = 0;
+        if (!ResolveGossipListId(sub, 0, subListId))
             break;  // menu closed -> the terminal option fired
         if (sub.GetMenuId() == lastMenuId)
             break;  // no new submenu opened -> nothing more to drill
         lastMenuId = sub.GetMenuId();
-        sendSelect(sub.GetMenuId(), 0);
+        sendSelect(sub.GetMenuId(), subListId);
     }
     return true;
 }
@@ -303,6 +449,16 @@ StepResult DungeonEventExecutor::RunStep(Player* bot, AiObjectContext* context,
             // tick, a later tick that finds the bot displaced (combat pushed the
             // tank off the spot, e.g. chasing a wave down the ramp) re-moves it back.
             //
+            // A garrison may also carry a hook to run WHILE it holds (see
+            // EventBuilder::WhileHolding), for a gate that can go BACKWARDS behind
+            // the party's back. The hook's result is deliberately ignored: the gate
+            // below is still the only thing that ends the step.
+            if (step.hookId != 0)
+            {
+                DungeonBossInfo dummy;  // hooks key off bot/context, not info
+                ObjectiveHookRegistry::Run(step.hookId, bot, context, dummy);
+            }
+            //
             // Instance-data gate (preferred for a value killed mid-combat): hold
             // until the map's scripted phase counter reaches the threshold. This is
             // MONOTONIC, so unlike "boss alive" it can't be missed while the event
@@ -314,6 +470,20 @@ StepResult DungeonEventExecutor::RunStep(Player* bot, AiObjectContext* context,
                 InstanceScript* inst = DcTargeting::GetInstanceScript(bot);
                 uint32 const v = inst ? inst->GetData(static_cast<uint32>(step.instanceDataId)) : 0;
                 return (v >= step.instanceDataMin) ? StepResult::Done : StepResult::Running;
+            }
+            // Persistent-data gate: identical contract, different store. Scripts
+            // that keep a wave counter in the InstanceScript persistent vector
+            // (SetPersistentDataCount/StorePersistentData) usually never override
+            // GetData, so the instance-data gate above would read a permanent 0
+            // there. The Mechanar bridge gauntlet is exactly that shape — every
+            // far-wave death bumps DATA_BRIDGE_MOB_DEATH_COUNT, and 4 is what makes
+            // Pathaleon attackable. See EventStep::persistentDataId.
+            if (step.persistentDataId >= 0)
+            {
+                InstanceScript* inst = DcTargeting::GetInstanceScript(bot);
+                uint32 const v =
+                    inst ? inst->GetPersistentData(static_cast<uint32>(step.persistentDataId)) : 0;
+                return (v >= step.persistentDataMin) ? StepResult::Done : StepResult::Running;
             }
             // Creature gate: hold until the gate creature matches wantAlive.
             if (step.creatureEntry != 0)
@@ -385,6 +555,21 @@ StepResult DungeonEventExecutor::RunStep(Player* bot, AiObjectContext* context,
                           "— click would be swallowed, holding",
                           bot->GetName(), go->GetGUID().ToString(), go->GetName());
                 return StepResult::Running;
+            }
+            // REPORT-USE variant: hand the click to the GO's script the way the
+            // report-use opcode does, and do NOT also call Use(). GameObject::Use()
+            // passes reportUse=false, which for a script that keys its work off the
+            // flag is at best a no-op and at worst destructive — BWL's Chromaggus
+            // lever marks itself spent outside the `if (reportUse)` block, so a
+            // Use() would burn the lever without opening the cage. See
+            // EventStep::reportUse.
+            if (step.reportUse)
+            {
+                LOG_DEBUG("playerbots.dungeonclear",
+                          "[dungeon-clear] {} event-step ReportUse GO {} '{}'",
+                          bot->GetName(), go->GetGUID().ToString(), go->GetName());
+                go->AI()->GossipHello(bot, /*reportUse*/ true);
+                return StepResult::Done;
             }
             LOG_DEBUG("playerbots.dungeonclear",
                       "[dungeon-clear] {} event-step Use GO {} '{}'",
@@ -662,6 +847,63 @@ StepResult DungeonEventExecutor::RunStep(Player* bot, AiObjectContext* context,
                 PullStrandedFollowersAcross(bot, step.landX, step.landY, step.landZ);
                 return StepResult::Done;
             }
+
+            // NOT MID-FIGHT. The relocation crosses a navmesh break, so every
+            // attacker the party is holding when it fires is stranded on the far
+            // side — still in each other's combat, with the bots' combat engine
+            // driving them back at mobs they cannot reach. Azjol-Nerub made this
+            // unmissable: its checkpoint sits inside a Skittering Swarmer camp
+            // (six spawns within 16yd), so the party arrived in combat almost
+            // every run, teleported anyway, and then ran back toward the swarmers
+            // 350yd behind and 360yd above them.
+            //
+            // ASK THE PARTY, NOT THE LEADER, AND ASK FOR A FIGHT RATHER THAN A
+            // FLAG. This step only ever runs from the NON-combat engine
+            // (DungeonClearStrategy is STRATEGY_TYPE_NONCOMBAT and owns the
+            // at-objective rung), so a leader swinging at something never reaches
+            // here at all. The Azjol-Nerub shape is a swarmer chewing on a
+            // FOLLOWER while the leader — no victim, and often not even flagged,
+            // since the core flag is per-unit and does not propagate to the group
+            // — walks up and fires the teleport. A leader-only `IsInCombat()`
+            // gate is blind to exactly the case it was written for, and that is
+            // how tr-20260818-223003-8 relocated with follower Oschue mid-fight:
+            // the hold never armed and the step logged no wait at all.
+            //
+            // The other half is WHICH combat may hold a required event. A bare
+            // flag must not: a phantom flag (an area aura, a stale reference, a
+            // holder on the far side of a gate) would park this for the full
+            // bound every single run, and the whole point of the bound is that
+            // parking is the bad outcome. AnyPartyHeldByLiveEnemy asks the
+            // question that matters — is a live, reachable enemy within
+            // DC_FIGHT_HOLDER_RADIUS of any member — so a real camp fight holds
+            // the relocation and a phantom one goes straight through to the
+            // teleport and the scrub below, which is where it gets fixed.
+            //
+            // Waiting is nearly always right when it does arm — the camp is on
+            // the route and the pull pipeline is already killing it — so hold,
+            // and DON'T let the wait burn the step's timeout: a fight is not a
+            // wedged step, and letting it escalate to Failed would stall a
+            // REQUIRED event and end the run. Still bounded, because a fight that
+            // genuinely cannot be finished at the checkpoint must not hold the
+            // run to the no-progress watchdog: past the bound, relocate anyway
+            // and let DropCombatLeftBehind clean up.
+            if (DcCombatFlag::AnyPartyHeldByLiveEnemy(bot, DC_FIGHT_HOLDER_RADIUS))
+            {
+                if (!prog.relocationCombatHoldMs)
+                    prog.relocationCombatHoldMs = nowMs;
+                if (getMSTimeDiff(prog.relocationCombatHoldMs, nowMs) < DC_RELOCATION_COMBAT_HOLD_MS)
+                {
+                    prog.stepStartMs = nowMs;
+                    prog.progressMs = nowMs;
+                    return StepResult::Running;
+                }
+                LOG_INFO("playerbots.dungeonclear",
+                         "[dungeon-clear] {}: party still fighting after {} ms at the "
+                         "relocation checkpoint -> teleporting anyway and dropping the "
+                         "leftover combat",
+                         bot->GetName(), getMSTimeDiff(prog.relocationCombatHoldMs, nowMs));
+            }
+            prog.relocationCombatHoldMs = 0;
             // The at-objective Hold keeps the leader on the checkpoint; with a
             // generous gate radius the objective's own arrival always satisfies this,
             // so the teleport never fires from mid-ramp. (Reached only if combat
@@ -679,6 +921,11 @@ StepResult DungeonEventExecutor::RunStep(Player* bot, AiObjectContext* context,
             bot->GetMotionMaster()->Clear();
             bot->NearTeleportTo(step.landX, step.landY, step.landZ, bot->GetOrientation());
             PullStrandedFollowersAcross(bot, step.landX, step.landY, step.landZ);
+            // Backstop for whatever combat survived the gate above (a follower
+            // flagged by something the leader was not, an add that landed on the
+            // teleport tick, or the bounded hold expiring). Everything the party
+            // was fighting is now on the far side of the break.
+            DropCombatLeftBehind(bot);
             // The leader just moved a long way in zero ticks: every cached route
             // artifact — the long-path polyline, its follower cursor, and any
             // in-flight async build (submitted from the PRE-teleport position) —
@@ -700,6 +947,18 @@ StepResult DungeonEventExecutor::RunStep(Player* bot, AiObjectContext* context,
                 context->GetValue<DungeonFollowerState&>(DcKey::FollowerState)->Get() =
                     DungeonFollowerState{};
                 context->GetValue<uint32>(DcKey::CurrentHop)->Set(0u);
+                // AND THE TARGET ITSELF. The objective latches cleared the moment
+                // this returns Done, but NextDungeonBossValue is a CACHED value: for
+                // the rest of its interval it keeps naming the objective we just
+                // completed, whose anchor is the checkpoint — now 360yd overhead and
+                // on the far side of the break. Advance duly builds a route to it,
+                // gets an unreachable partial that wanders off across the landing
+                // chamber, and glides it. Live on Azjol-Nerub: one second after the
+                // teleport the tank issued a 110yd spline from the landing back
+                // NORTH to (565.9, 572.3, 300.8) and ran it. Dropping the cache here
+                // makes the next tick re-derive with the latch already in place.
+                context->GetValue<std::optional<DungeonBossInfo>>(DcKey::NextDungeonBoss)
+                    ->Reset();
             }
             LOG_DEBUG("playerbots.dungeonclear",
                       "[dungeon-clear] {} TeleportParty: ({:.1f},{:.1f},{:.1f}) -> "
@@ -952,7 +1211,7 @@ EventDriveOutcome DungeonEventExecutor::Drive(Player* bot, AiObjectContext* cont
     // primary gate is upstream (a gated roster anchor / the Conditional
     // difficulty overload), so reaching here means an authoring slip — skip the
     // event so the clear advances rather than stalling on inert content.
-    if (bot && bot->GetMap() && !DcGateMatches(ev.gate, bot->GetMap()->GetDifficulty()))
+    if (bot && bot->GetMap() && !DcGateMatches(ev.gate, DcDifficulty::Of(bot->GetMap())))
         return EventDriveOutcome::Skipped;
 
     uint32 const now = getMSTime();
@@ -1044,6 +1303,33 @@ EventDriveOutcome DungeonEventExecutor::Drive(Player* bot, AiObjectContext* cont
                       bot->GetName(), ev.name, prog.stepIndex,
                       static_cast<uint32>(active.kind), static_cast<uint32>(result),
                       static_cast<uint32>(now - prog.stepStartMs), timeout);
+            // An instance-data gate is the one gate whose reason for not clearing
+            // is invisible from the line above — "result 0" for ten minutes reads
+            // the same whether the encounter is running or was silently reset under
+            // the party. Print what the step is actually reading.
+            if (active.instanceDataId >= 0 && result != StepResult::Done)
+            {
+                InstanceScript* inst = DcTargeting::GetInstanceScript(bot);
+                LOG_DEBUG("playerbots.dungeonclear",
+                          "[DC:{}] event '{}' step {} instance gate: data({})={} (need >= {})",
+                          bot->GetName(), ev.name, prog.stepIndex, active.instanceDataId,
+                          inst ? inst->GetData(static_cast<uint32>(active.instanceDataId)) : 0u,
+                          active.instanceDataMin);
+            }
+            // Same for the persistent-data gate — "result 0" for five minutes on
+            // the Mechanar bridge camp reads the same whether the waves are still
+            // walking down or the gauntlet never tripped at all.
+            if (active.persistentDataId >= 0 && result != StepResult::Done)
+            {
+                InstanceScript* inst = DcTargeting::GetInstanceScript(bot);
+                LOG_DEBUG("playerbots.dungeonclear",
+                          "[DC:{}] event '{}' step {} persistent gate: data({})={} (need >= {})",
+                          bot->GetName(), ev.name, prog.stepIndex, active.persistentDataId,
+                          inst ? inst->GetPersistentData(
+                                     static_cast<uint32>(active.persistentDataId))
+                               : 0u,
+                          active.persistentDataMin);
+            }
             prog.lastLoggedStep = static_cast<int32>(prog.stepIndex);
             prog.lastLoggedResult = static_cast<int32>(result);
             prog.lastLogMs = now;
@@ -1061,15 +1347,20 @@ DungeonEvent const* DungeonEventExecutor::FindDueConditionalEvent(Player* bot,
     if (!bot || !context)
         return nullptr;
 
-    Difficulty const difficulty =
-        bot->GetMap() ? bot->GetMap()->GetDifficulty() : DUNGEON_DIFFICULTY_NORMAL;
     std::vector<DungeonEvent const*> const conditional =
-        DungeonEventRegistry::Conditional(mapId, difficulty);
+        DungeonEventRegistry::Conditional(mapId, DcDifficulty::Of(bot->GetMap()));
     if (conditional.empty())
         return nullptr;
 
     auto const& cleared =
         context->GetValue<std::unordered_set<uint32>&>(DcKey::ClearedAnchors)->Get();
+
+    // Raid boss stand-down: while an encounter is live, the ONLY events allowed
+    // to drive are the ones registered as part of the encounter itself
+    // (DungeonEvent::encounterActive — the Razorgore-orb seam). Evaluated once
+    // out here, not per event: IsActive is raid-gated and leader-memoised, so
+    // dungeon runs pay a single Map::IsRaid().
+    bool const standDown = DcBossStandDown::IsActive(bot);
 
     for (DungeonEvent const* ev : conditional)
     {
@@ -1078,6 +1369,8 @@ DungeonEvent const* DungeonEventExecutor::FindDueConditionalEvent(Player* bot,
         // on every map: on a map with no wave event it rejects here, before any
         // activation predicate is evaluated.
         if (requireDrivesInCombat && !ev->drivesInCombat)
+            continue;
+        if (standDown && !ev->encounterActive)
             continue;
         // Already done this run — its synthetic latch key is set.
         if (cleared.count(ConditionalLatchKey(ev->id)))
@@ -1095,10 +1388,8 @@ void DungeonEventExecutor::SweepCompletedConditionalEvents(Player* bot,
     if (!bot || !context)
         return;
 
-    Difficulty const difficulty =
-        bot->GetMap() ? bot->GetMap()->GetDifficulty() : DUNGEON_DIFFICULTY_NORMAL;
     std::vector<DungeonEvent const*> const conditional =
-        DungeonEventRegistry::Conditional(mapId, difficulty);
+        DungeonEventRegistry::Conditional(mapId, DcDifficulty::Of(bot->GetMap()));
     if (conditional.empty())
         return;
 
@@ -1178,8 +1469,64 @@ bool DungeonEventExecutor::IsPersistentAnchoredEventActive(AiObjectContext* cont
 
     // stepIndex >= 1 means the event has advanced past its first step, so this is
     // false until the tank has actually arrived and the event has begun running.
-    return prog.eventId == ev->id && prog.stepIndex >= 1 &&
-           prog.stepIndex < ev->steps.size();
+    //
+    // ...with one exception, because otherwise the FIRST step is unprotected and a
+    // leading MoveTo is the one step kind that walks the tank out of its own
+    // objective's arriveRadius by design. When its destination lies outside that
+    // radius the event can never finish it: the executor HopTo's the tank out, the
+    // at-objective trigger goes false on distance, the event stops being driven,
+    // Advance hauls the tank back to the anchor, repeat. A MoveTo cannot
+    // false-complete the way a KillCreature gate can when its creature is merely
+    // out of scan range (it is a plain distance test against fixed coordinates), so
+    // counting it as "started" cannot pin the run on a half-started event — which
+    // is the failure the stepIndex >= 1 rule exists to prevent.
+    //
+    // Live: tp-20260830-185318-1, Gundrak's Drakkari Colossus altar, 3 of 10 runs.
+    // Its anchor->click step is 7.01yd against arriveRadius 6, and the log carries
+    //   objective 'Altar of the Drakkari Colossus': dist=7.0 > arriveRadius=6.0
+    //       (NOT arrived; event not started)
+    // in the same second as the executor driving that event's step 0. The tank sits
+    // ~7yd from its anchor making no net progress: posStuck and the stuck ladder
+    // churn, the party drops into rest cycles, and DC yields those ticks — so the
+    // tank spends long stretches not being driven by this module at all. In run 5 it
+    // then travelled 115yd away under stock playerbots control and walked back, at
+    // running speed and on the mesh the whole way (the monotonic off-route trace
+    // 13.7 -> 114.6yd over 16s is a RUN, not a fall — bots do not walk into holes),
+    // only to re-enter the deadlock. The run burns its entire budget this way.
+    //
+    // Retuning the radii is not the fix here: arriveRadius is ALSO the ring the
+    // followers gather in, so it is capped by the anchor's measured walkable pad
+    // (8.50 at this altar) and floored by the MoveTo's reach (8.26) — a 0.24yd
+    // window whose only solutions park the party within centimetres of the drop.
+    bool const started =
+        prog.stepIndex >= 1 ||
+        (!ev->steps.empty() && ev->steps.front().kind == EventStepKind::MoveTo);
+    return prog.eventId == ev->id && started && prog.stepIndex < ev->steps.size();
+}
+
+bool DungeonEventExecutor::IsPullOwningEventDriving(Player* bot, AiObjectContext* context)
+{
+    if (!bot || !context)
+        return false;
+
+    // The anchored half, unchanged: a persistent objective anchor that has started.
+    if (IsPersistentAnchoredEventActive(context))
+        return true;
+
+    // The conditional half. There is no progress/anchor state to consult here —
+    // a conditional event IS its activation predicate, and FindDueConditionalEvent
+    // is the same read the event's own driving rungs make, so asking it is asking
+    // "is this event driving right now" directly.
+    //
+    // requireDrivesInCombat is deliberately left false: the pull system must stand
+    // down on BOTH engines. A crossing whose driver only opts into the combat
+    // engine still must not have the non-combat pull trigger committing packs
+    // behind its back between fights.
+    Map* map = bot->GetMap();
+    if (!map)
+        return false;
+    DungeonEvent const* ev = FindDueConditionalEvent(bot, context, map->GetId());
+    return ev && ev->ownsThePull;
 }
 
 bool DungeonEventExecutor::ActiveEngageStep(AiObjectContext* context, uint32& outEntry,
@@ -1222,9 +1569,16 @@ bool DungeonEventExecutor::ActiveEngageStep(AiObjectContext* context, uint32& ou
     // tank reaches the anchor and the non-combat driver advances stepIndex to the
     // engage step. Without this, the combat rung stands down for exactly that
     // window and the run wedges "in combat, no detectable victim".
+    //
+    // Steps flagged engageOnlyWhenActive opt OUT of this fallback: their target is
+    // undetectable BY DESIGN until the earlier steps have run, which is the same
+    // signature the stealth-breaker keys on but the opposite situation — engaging
+    // is wrong, not overdue. See EventStep::engageOnlyWhenActive (the Mechanar
+    // bridge, where it sent the tank sprinting the length of the bridge at an
+    // invisible Pathaleon the moment the party took a scratch anywhere on floor 2).
     if (anyStep)
         for (EventStep const& step : ev->steps)
-            if (reportEngage(step))
+            if (!step.engageOnlyWhenActive && reportEngage(step))
                 return true;
 
     return false;

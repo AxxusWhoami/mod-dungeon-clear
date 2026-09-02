@@ -7,6 +7,8 @@
 #define _PLAYERBOT_DCREZRECOVERY_H
 
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "ObjectGuid.h"
 
@@ -46,7 +48,16 @@ namespace DcRezRecovery
         std::string rezzerName;
         std::string targetName;
         std::string deadName = "Someone";
+        // Parallel pairing, resolved to GUIDs (see DcRezDecision::Result::pairs).
+        // Consumed on RAID runs only — each paired rezzer walks to its own
+        // corpse; 5-mans keep the single rezzer/target above.
+        std::vector<std::pair<ObjectGuid, ObjectGuid>> pairs;
     };
+
+    // The corpse `bot` is assigned to raise under `plan`, or Empty when it is
+    // not an elected rezzer. Honors the map scoping above: the single election
+    // everywhere, plus the parallel pairs on a raid map.
+    ObjectGuid PairedTargetFor(Plan const& plan, Player* bot);
 
     // Evaluate recovery for `bot`'s run. Callable by ANY member every tick
     // (leader and followers compute the same deterministic answer); maintains
@@ -69,6 +80,32 @@ namespace DcRezRecovery
     // feature is on and at least one LIVING same-map member's class can rez —
     // enabling is allowed and the recovery flow takes it from there.
     bool CanRecover(Player* bot);
+
+    // "Is THIS bot the one that has to walk to a corpse right now" — the
+    // stand-down gate for every follower rung that moves (follow-tank /
+    // scout-lag, hold-at-camp, heal-reposition). Tracks
+    // DungeonClearRezPartyTrigger::IsActive — same alive / out-of-combat /
+    // in-a-dungeon preconditions, same Hold+Recovering+this-bot verdict — so a
+    // rung stands down on the ticks the rez rung is armed and not on others.
+    //
+    // One deliberate narrowing on top of the trigger: false while ANY same-map
+    // member is engaged. Handing the bot's movement to the rez rung is a bigger
+    // claim than arming that rung, and it must not strand a healer that happens
+    // to be unflagged in the middle of a live fight. Costs the recovery nothing
+    // — its budget clock is stopped for as long as anyone is engaged.
+    //
+    // READ-ONLY, unlike Evaluate: a rung asking "is this me" must not stamp the
+    // recovery clock or fire an announcement. Cheap-early-outs on class before
+    // it evaluates anything, because only a living rez class is ever elected.
+    bool IsElectedRezzer(Player* bot);
+
+    // RAID full-wipe recovery: revive every same-map BOT member at the
+    // instance entrance (dungeon-catalogue coords), drop the lost fight's
+    // combat/threat/targets, reset the owner's approach cursors, and leave the
+    // run ENABLED to continue from the entrance. Humans are never revived or
+    // relocated. False when no entrance row exists for the map (the caller
+    // falls back to the classic disable).
+    bool RegroupAtEntrance(Player* bot);
 
     // "Neko is coming to resurrect Bib." / "Waiting for you to resurrect
     // Bib." — one status-panel sentence for the current recovery, empty when

@@ -105,11 +105,89 @@ TEST(RoomAggroRegistryTest, MechanarCapacitusHasNoRoomAggroEntry)
     EXPECT_EQ(RoomAggroRegistry::Find(554, 19219), nullptr);
 }
 
+// Gilnid (Deadmines, 36) is flagged NOT because he force-pulls his room — his whole
+// script is a Molten Metal cast, a yell and a door — but because the goblin foundry
+// cannot be decomposed into packs: 19 level-18 ELITES standing 7.1-57.6yd from him,
+// 17 of which chain together at a same-level elite's ~20yd aggro radius. The pull
+// governor's 6yd-spread / 10yd-assist windows read that as "estimated 2" and Leeroy
+// the room, then Gilnid joins the pile (tp-20260815-171416-1: 5 of 20 runs wiped
+// there, status alternating boss/trash every 1-2s). radius 60 covers all 19; 50
+// would strand the three western-most at 52.0 / 55.3 / 57.6yd.
+TEST(RoomAggroRegistryTest, DeadminesGilnidPreClearsTheFoundry)
+{
+    RoomAggroBoss const* gilnid = RoomAggroRegistry::Find(36, 1763);
+    ASSERT_NE(gilnid, nullptr);
+    EXPECT_FLOAT_EQ(gilnid->radius, 60.0f);
+    // Any hostile in the room — the foundry is a mixed Craftsman/Engineer floor and
+    // the safe over-approximation is the documented default for a row like this.
+    EXPECT_TRUE(gilnid->memberEntries.empty());
+    EXPECT_FALSE(gilnid->hasYBand);
+    // No overrides: the computed boss sphere already excludes the two Craftsmen at
+    // 7.1/9.2yd (they come with the boss) and admits everything past it as trash.
+    EXPECT_FLOAT_EQ(gilnid->pullOutRadius, 0.0f);
+    EXPECT_FLOAT_EQ(gilnid->skirtRadius, 0.0f);
+    EXPECT_FLOAT_EQ(RoomAggroRegistry::SkirtOverride(36, 1763), 0.0f);
+    // The room members are room, not bosses.
+    EXPECT_EQ(RoomAggroRegistry::Find(36, 1731), nullptr);  // Goblin Craftsman
+    EXPECT_EQ(RoomAggroRegistry::Find(36, 622), nullptr);   // Goblin Engineer
+}
+
 // Nethermancer Sepethrea (Mechanar, 554) IS a room-aggro boss: her chamber holds
 // three elite trash groups pre-cleared and dragged back toward the entrance before
 // the pull. radius 70 covers the farthest (Pack A ~67yd); pullOutRadius 14 shrinks
 // the room-trash exclusion so Pack B — parked ~17yd out, inside her ~28yd real
 // aggro sphere — is KEPT as clearable trash instead of coming with the boss.
+// Gundrak Slad'ran. Every entry in this room reads hostile, so the whitelist is
+// not about the neutral-member bypass here -- it exists to keep two non-threats
+// OUT: the 86 level-1 Fanged Pit Vipers (neutral faction 7, they never aggro on
+// proximity, and sweeping them went badly live) and the Drakkari Frenzy that sit
+// inside the radius but ~20yd DOWN in the moat, which the party cannot walk to.
+TEST(RoomAggroRegistryTest, GundrakSladranClearsTheSnakePit)
+{
+    RoomAggroBoss const* sladran = RoomAggroRegistry::Find(604, 29304);
+    ASSERT_NE(sladran, nullptr);
+    EXPECT_FLOAT_EQ(sladran->radius, 75.0f);
+
+    // The room is the nine elites, and nothing else.
+    EXPECT_EQ(sladran->memberEntries, (std::vector<uint32>{29774, 29768}));
+    EXPECT_TRUE(RoomAggroRegistry::IsMemberEntry(*sladran, 29774));   // Spitting Cobra
+    EXPECT_TRUE(RoomAggroRegistry::IsMemberEntry(*sladran, 29768));   // Unyielding Constrictor
+    EXPECT_FALSE(RoomAggroRegistry::IsMemberEntry(*sladran, 29630));  // Fanged Pit Viper — ignored
+    EXPECT_FALSE(RoomAggroRegistry::IsMemberEntry(*sladran, 29834));  // Drakkari Frenzy — in the moat
+    EXPECT_FALSE(RoomAggroRegistry::IsMemberEntry(*sladran, 29682));  // Slad'ran Summon Target
+    EXPECT_FALSE(RoomAggroRegistry::IsMemberEntry(*sladran, 13321));  // Frog
+
+    // No Y band and no overrides — the room is a plain radius sphere.
+    EXPECT_FALSE(sladran->hasYBand);
+    EXPECT_FLOAT_EQ(sladran->pullOutRadius, 0.0f);
+    EXPECT_FLOAT_EQ(sladran->skirtRadius, 0.0f);
+    EXPECT_FLOAT_EQ(RoomAggroRegistry::SkirtOverride(604, 29304), 0.0f);
+
+    float const sphere = 28.0f;  // ~aggro + reaches + margin + padding
+
+    // The radius is sized off the PATROL envelope, not the spawn rows: constrictor
+    // guid 127014 walks path 1270140 out to 69.9yd. A radius cut to the 62.0yd
+    // farthest SPAWN would drop it at the far end of its path and call the room
+    // clear while it was still walking back.
+    EXPECT_TRUE(RoomAggroRegistry::IsRoomTrash(*sladran, 29768, 69.9f, sphere));
+
+    // ...and still stops short of the next room's mobs of the same two entries.
+    EXPECT_FALSE(RoomAggroRegistry::IsRoomTrash(*sladran, 29774, 79.5f, sphere));
+    EXPECT_FALSE(RoomAggroRegistry::IsRoomTrash(*sladran, 29768, 88.9f, sphere));
+
+    // A pit viper is not room trash at any distance, even well inside the radius.
+    EXPECT_FALSE(RoomAggroRegistry::IsRoomTrash(*sladran, 29630, 40.0f, sphere));
+
+    // The closest Spitting Cobra (26.9yd) falls inside the boss sphere and comes
+    // with the pull; the closest Constrictor (29.9yd) is clearable room trash.
+    EXPECT_FALSE(RoomAggroRegistry::IsRoomTrash(*sladran, 29774, 26.9f, sphere));
+    EXPECT_TRUE(RoomAggroRegistry::IsRoomTrash(*sladran, 29768, 29.9f, sphere));
+
+    // Only Slad'ran is flagged on 604; the room entries are room, not bosses.
+    EXPECT_EQ(RoomAggroRegistry::Find(604, 29630), nullptr);
+    EXPECT_EQ(RoomAggroRegistry::Find(604, 29774), nullptr);
+}
+
 TEST(RoomAggroRegistryTest, MechanarSepethreaHasPullOutRoom)
 {
     RoomAggroBoss const* sep = RoomAggroRegistry::Find(554, 19221);

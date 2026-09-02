@@ -134,3 +134,116 @@ TEST(DungeonClearHealRepositionTest, StandoffDegenerate)
     EXPECT_NEAR(pts[0].GetPositionX(), 110.0f, 1e-2f);
     EXPECT_NEAR(pts[0].GetPositionY(), 100.0f, 1e-2f);
 }
+
+// --- the close-on-target fallback, and the ceiling clip it used to author ----
+//
+// Regression cover for tp-20260828-171530-1 (Blackwing Lair, 5 of 5 runs): the
+// fallback interpolated x and y toward the heal target but left z at the
+// TARGET's height, naming a point on the target's floor over the bot's own x/y.
+// DcMoveTo's ground-snap declines corrections past 3yd (NavmeshSnap's vertical
+// extent spans a storey), stock's z-search refused the move, and the
+// exact-waypoint retry overrode the refusal — so healers walked up through a
+// solid ceiling into a 14-mob formation 24.8yd overhead.
+
+// The fallback point stays ON the bot->target line: z interpolates with x and y.
+TEST(DungeonClearHealRepositionTest, FallbackInterpolatesZWithXY)
+{
+    Position bot(0.0f, 0.0f, 100.0f, 0.0f);
+    Position target(0.0f, 20.0f, 120.0f, 0.0f);  // 20yd out, 20yd up
+    Position const p = DungeonClearMath::HealCloseFallbackPoint(bot, target, 5.0f);
+
+    // Stops 5yd short of 20 -> 3/4 of the way along, in EVERY coordinate.
+    EXPECT_NEAR(p.GetPositionY(), 15.0f, 1e-3f);
+    EXPECT_NEAR(p.GetPositionZ(), 115.0f, 1e-3f);
+}
+
+// A same-floor target is unaffected: flat ground in, flat ground out. This is
+// the overwhelmingly common case and it must not move.
+TEST(DungeonClearHealRepositionTest, FallbackFlatGroundUnchanged)
+{
+    Position bot(0.0f, 0.0f, 100.0f, 0.0f);
+    Position target(0.0f, 20.0f, 100.0f, 0.0f);
+    Position const p = DungeonClearMath::HealCloseFallbackPoint(bot, target, 5.0f);
+
+    EXPECT_NEAR(p.GetPositionY(), 15.0f, 1e-3f);
+    EXPECT_NEAR(p.GetPositionZ(), 100.0f, 1e-3f);
+}
+
+// THE BUG. Real geometry from tr-20260828-171538-5: a healer standing in the
+// Broodlord approach hall at z 424.5 whose heal target has already reached the
+// drake hall at z 449.3, 20yd away in plan view (Simino's own reposition logged
+// 12.5yd, the tank's 23.0yd). The old code handed back z 449.3 for a point only
+// three quarters of the way there — the target's floor over the hall's x/y.
+TEST(DungeonClearHealRepositionTest, FallbackNeverAuthorsTheTargetsFloor)
+{
+    Position bot(-7523.8f, -975.0f, 424.5f, 0.0f);
+    Position target(-7523.8f, -955.0f, 449.3f, 0.0f);  // 20yd out, 24.8yd up
+    Position const p = DungeonClearMath::HealCloseFallbackPoint(bot, target, 5.0f);
+
+    // Strictly between the two floors, never ON the target's.
+    EXPECT_GT(p.GetPositionZ(), 424.5f);
+    EXPECT_LT(p.GetPositionZ(), 449.3f);
+    // 3/4 of the way along the line: 424.5 + 0.75 * 24.8.
+    EXPECT_NEAR(p.GetPositionZ(), 443.1f, 1e-1f);
+
+    // And the movement layer will not force it on the fast path — this
+    // destination is a storey off the bot, so it has to be probed for a route
+    // before the exact-waypoint retry may override stock's refusal.
+    EXPECT_FALSE(DungeonClearMath::MayRetryExactWaypoint(
+        p.GetPositionZ(), bot.GetPositionZ(), 5.0f));
+}
+
+// Inside minGap the target itself is returned, untouched.
+TEST(DungeonClearHealRepositionTest, FallbackInsideGapReturnsTarget)
+{
+    Position bot(0.0f, 0.0f, 100.0f, 0.0f);
+    Position target(0.0f, 3.0f, 101.0f, 0.0f);
+    Position const p = DungeonClearMath::HealCloseFallbackPoint(bot, target, 5.0f);
+
+    EXPECT_NEAR(p.GetPositionY(), 3.0f, 1e-3f);
+    EXPECT_NEAR(p.GetPositionZ(), 101.0f, 1e-3f);
+}
+
+// Degenerate bot-on-target input is the target, with no NaN from the divide.
+TEST(DungeonClearHealRepositionTest, FallbackDegenerateNoNaN)
+{
+    Position bot(50.0f, 50.0f, 10.0f, 0.0f);
+    Position target(50.0f, 50.0f, 10.0f, 0.0f);
+    Position const p = DungeonClearMath::HealCloseFallbackPoint(bot, target, 5.0f);
+
+    EXPECT_FALSE(std::isnan(p.GetPositionX()));
+    EXPECT_FALSE(std::isnan(p.GetPositionZ()));
+    EXPECT_NEAR(p.GetPositionZ(), 10.0f, 1e-3f);
+}
+
+// --- the exact-waypoint retry's level gate ----------------------------------
+//
+// This is the CHEAP HALF of the gate: true means "safe, no probe needed". False
+// is not a refusal — DcMoveTo then asks DcEngageGeometry::IsPointLevelReachable
+// whether a route actually arrives at the destination, which is what keeps ramps
+// and stair flights (legitimately off-level, legitimately routable) on the retry.
+// That half needs a navmesh and is covered by the fixture-gated nav probes.
+
+// The cases the retry exists for — a legitimate destination a few yards away on
+// the bot's own floor — take the fast path with no probe at all.
+TEST(DungeonClearHealRepositionTest, RetryAllowedOnOwnLevel)
+{
+    // Xomja, refused 45x on a destination 1.7yd away.
+    EXPECT_TRUE(DungeonClearMath::MayRetryExactWaypoint(100.0f, 100.0f, 5.0f));
+    EXPECT_TRUE(DungeonClearMath::MayRetryExactWaypoint(101.7f, 100.0f, 5.0f));
+    // A ramp or stair step, either direction, right up to the tolerance.
+    EXPECT_TRUE(DungeonClearMath::MayRetryExactWaypoint(104.9f, 100.0f, 5.0f));
+    EXPECT_TRUE(DungeonClearMath::MayRetryExactWaypoint(95.1f, 100.0f, 5.0f));
+}
+
+// A destination on another storey does not take the fast path — in either
+// direction — so it reaches the reachability probe rather than being forced.
+// Up is the BWL ceiling; down is the same trick over a ledge.
+TEST(DungeonClearHealRepositionTest, RetryNeedsAProbeAcrossLevels)
+{
+    // The drake hall over the Broodlord approach: z 449.3 asked from z 424.5.
+    EXPECT_FALSE(DungeonClearMath::MayRetryExactWaypoint(449.3f, 424.5f, 5.0f));
+    EXPECT_FALSE(DungeonClearMath::MayRetryExactWaypoint(424.5f, 449.3f, 5.0f));
+    // And just past the tolerance, so the boundary is pinned.
+    EXPECT_FALSE(DungeonClearMath::MayRetryExactWaypoint(105.1f, 100.0f, 5.0f));
+}

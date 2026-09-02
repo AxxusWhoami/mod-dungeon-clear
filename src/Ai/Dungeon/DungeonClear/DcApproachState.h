@@ -9,7 +9,9 @@
 #include "Define.h"
 #include "ObjectGuid.h"
 #include "Position.h"
+#include "Timer.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcProgressWatchdog.h"
+#include <limits>
 
 // All transient per-approach state for one boss-approach run, owned as a single
 // value (DungeonClearApproachStateValue, "dungeon clear approach state") so the
@@ -72,6 +74,15 @@ struct DcApproachState
     uint32 stuckCount          = 0;  // MoveTo-returned-false backup (was "stuck count")
     uint32 rebuildAttempts     = 0;  // consecutive rebuilds w/o progress ("stride rebuild attempts")
     uint32 resnapAttempts      = 0;  // consecutive Resnap recoveries w/o progress (rung-1 give-up)
+    // Consecutive navmesh-nudges (the ladder's TOP rung) that failed to buy net
+    // progress. The rung had no give-up of its own, and TryFarFromPolyRecovery
+    // succeeds trivially whenever the bot is ON the mesh — a 5yd axis probe from
+    // a walkable poly always paths — so it reset rebuildAttempts and returned
+    // "recovered" forever, making the stall below it dead code. Nine such resets
+    // in nine minutes on the Blackrock Spire ramp (tr-20260818-073620-14) with
+    // zero nudge or stall reaching the player. Same failure shape as the
+    // recoveryProgressWatch comment above, one rung higher up.
+    uint32 nudgeAttempts       = 0;
     uint32 partyNotReadyTicks  = 0;  // consecutive between-pulls not-ready ticks (yield debounce)
 
     // --- approach bookkeeping ---------------------------------------------
@@ -106,6 +117,56 @@ struct DcApproachState
     // changes, and by the approach reset below.
     int8 avoidOrbitDir         = 0;  // 0 = unlatched, +/-1 = committed rotation
     ObjectGuid avoidOrbitSphere;     // pack GUID the current avoid orbit is for
+
+    // --- off-line rejoin latches ------------------------------------------
+    // HYSTERESIS on the off-line rung. The rung engages at OFF_PATH_THRESHOLD
+    // (6yd of perpendicular deviation) and used to release at the same 6yd, so a
+    // bot parked in the band around it flickered between "rejoin via a generated
+    // path" and "launch the escort spline" tick by tick. That matters because the
+    // spline's OPENING leg is a straight line from the bot to its cursor: on the
+    // line it is harmless, in the 3-6yd band it cuts the inside of a bend. Live
+    // (tr-20260830-115416-5, BWL) the tank sat at 4.1-6.9yd across the anchor
+    // 16->18 hairpin, the rejoin went silent under 6, and the sub-6 spline leg
+    // walked it into a navmesh void — the "tank ran through the wall" report.
+    // Once latched the rung holds until the bot is properly back on the corridor
+    // (DC_OFF_LINE_RELEASE), so re-entry has to actually finish.
+    bool offLineLatched = false;
+
+    // Best (smallest) route deviation seen while the off-line rung has owned the
+    // tick, or FLT_MAX when it has not run since the last reset. The rung's
+    // DcMoveTo is refused whenever a move is already queued, and DcMoveTo's
+    // ResolveEscortConflict only cancels an ESCORT generator — so when DC's own
+    // per-point move is what is in flight (gen=POINT) a refusal handed the tick
+    // straight back to the move that was carrying the bot OFF the line, while the
+    // rung logged success and returned ReturnTrue. Measured on the same run: 48 of
+    // 53 rejoins refused, deviation grew 6.2 -> 31.1yd across 22 consecutive
+    // refused ticks. Tracking the best deviation lets the rung tell a re-entry
+    // that is working (ride it — cancelling every refusal would stutter the
+    // healthy case into a stop/re-issue loop) from one that is not (halt it).
+    float rejoinBestDev = std::numeric_limits<float>::max();
+
+    // Consecutive off-line rejoin ticks that issued NO movement. rejoinBestDev
+    // above only measures DRIFT, and drift is the wrong question when the answer
+    // is zero: a bot whose DcMoveTo is refused every tick never moves at all, so
+    // its deviation is CONSTANT, `deviation > best + slack` is false forever, and
+    // the rung rides a move that does not exist. Measured on tr-20260901-223655-10
+    // (Halls of Lightning): 3924 consecutive refusals over 10m30s at a fixed
+    // 267.2yd, zero halts logged, every watchdog reading clear, the run ending
+    // only on the 600s no-progress timer. Counting the refusals themselves is the
+    // liveness signal the deviation cannot carry.
+    uint32 rejoinRefusals = 0;
+
+    // Deadline (getMSTime) while a LONG re-entry glide owns the bot; 0 = none.
+    // A deliberate re-entry from far off the route reads, to every rung that
+    // measures against the route, exactly like the wedge it is curing: IsOffPath
+    // is true for its whole length, so DoOffPathRebuild would fire on the third
+    // tick and ResolveEscortConflict would cancel the glide DC just launched —
+    // two ticks of travel per attempt, forever. This latch says "the distance is
+    // known and being walked off", and the off-path rebuild stands down while it
+    // holds. A DEADLINE rather than a bool, sized to the glide's own travel time
+    // (the module's longPathExpiresMs idiom), so a glide that dies silently can
+    // never wedge the rung that is meant to notice.
+    uint32 rejoinGlideUntilMs = 0;
 
     // --- chase leash (approach to a MOVING trash target) ------------------
     // A trash target is latched by GUID and read live, so a walking mob turns
@@ -174,6 +235,14 @@ struct DcApproachState
     // takes the same auto-pause path as a door it knows it can't open.
     // doorStallLastMs re-arms the window: a gap in observations means the stall
     // ended (door opened, run moved on) and a later stall starts fresh.
+    //
+    // "Parked AT the door" is load-bearing, not shorthand: the action's park is
+    // also the fall-through for every walk-in failure, and the door is flagged
+    // up to 80yd ahead along the corridor, so those parks land anywhere on the
+    // approach. Only the arrival park feeds this watchdog. When it fed all of
+    // them the (5s default) budget went on travel time and runs auto-paused at
+    // doors they had never touched — see the atDoor gate in
+    // DungeonClearDoorBlockedAction.
     ObjectGuid doorStallGuid;        // door the current Blocked stall is on
     uint32 doorStallSinceMs    = 0;  // when that stall began (getMSTime)
     uint32 doorStallLastMs     = 0;  // last tick the stall was observed
@@ -226,9 +295,14 @@ struct DcApproachState
         longRouteDeferBlown = false;
         rebuildAttempts     = 0;
         resnapAttempts      = 0;
+        nudgeAttempts       = 0;
         partyNotReadyTicks  = 0;
         lastPos             = Position();
         skirtOrbitDir       = 0;
+        offLineLatched      = false;
+        rejoinBestDev       = std::numeric_limits<float>::max();
+        rejoinRefusals      = 0;
+        rejoinGlideUntilMs  = 0;
         skirtOrbitTarget.Clear();
         avoidOrbitDir       = 0;
         avoidOrbitSphere.Clear();
@@ -250,6 +324,43 @@ struct DcApproachState
     {
         finalApproachWatch.Reset();
         pursuitWatch.Reset();
+    }
+
+    // One observation of the blocked-state watchdog, from the door-blocked
+    // action's ARRIVAL park only (see the doorStall* field comments for why the
+    // approach parks must not call this). Arms the window on a new door or after
+    // a rearmMs observation gap, records the observation, and returns whether the
+    // bot has now been working this door past timeoutMs without it opening.
+    bool ObserveDoorStall(ObjectGuid door, uint32 now, uint32 rearmMs, uint32 timeoutMs)
+    {
+        if (doorStallGuid != door || getMSTimeDiff(doorStallLastMs, now) >= rearmMs)
+        {
+            doorStallGuid    = door;
+            doorStallSinceMs = now;
+        }
+        doorStallLastMs = now;
+        return getMSTimeDiff(doorStallSinceMs, now) >= timeoutMs;
+    }
+
+    // The stall is OVER: the door has been seen open, or the corridor flag moved
+    // to a different door / cleared entirely. The next arrival park arms a fresh
+    // window instead of resuming the old one.
+    //
+    // Load-bearing for auto-closing gates. Stratholme's two King's Square Gates
+    // carry door.autoCloseTime 3000, so the cycle is: click, gate opens, tank
+    // walks through, gate re-shuts 3s later, click again. The observation-gap
+    // re-arm inside ObserveDoorStall cannot see that — DC_DOOR_STALL_REARM_MS is
+    // 10s and the gap between two arrival parks on a 3s gate is only ~3s — so
+    // three successful opens accumulated into one 7s "stall" and tripped the
+    // (5s default) watchdog on a gate the bot was opening every single time.
+    // Run tr-20260816-151006-14 died exactly there, 27.9yd from Hearthsinger
+    // Forresten with 8/13 bosses down. "The door opened" is the signal; a gap in
+    // observations is only a proxy for it.
+    void ClearDoorStall()
+    {
+        doorStallGuid.Clear();
+        doorStallSinceMs = 0;
+        doorStallLastMs  = 0;
     }
 };
 

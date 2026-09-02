@@ -208,6 +208,100 @@ constexpr float DC_PULL_AVOID_PROGRESS_YD = 1.0f;
 // fight is ever abandoned mid-pack, this is the number to raise.
 constexpr uint32 DC_FLAGGED_NO_ENGAGE_GRACE_MS = 5000;
 
+// --- the NoRezzer floor ----------------------------------------------------
+// How long the silence after the last rezzer died has to last before "no one can
+// resurrect" is allowed to END THE RUN, and how long a bare combat flag may hold
+// that decision off on its own. Sized off the thing that broke: Magisters'
+// Terrace's Kael'thas is immune, passive and summonless at 1 HP for 11 seconds
+// before he kills himself, and for all 11 the party reads unengaged while still
+// carrying his flag. 12s clears that with margin.
+//
+// The ceiling is what keeps the flag hold from becoming a hang: a flag with
+// nothing behind it is the phantom-combat case, which has its own hatch
+// (DungeonClearBreakStuckCombatTrigger, 15s) and its own force-clear. Past 60s
+// neither has resolved it and holding a run open on it buys nothing — fall back
+// to the verdict the branch always gave.
+constexpr uint32 DC_NO_REZZER_QUIET_GRACE_MS = 12000;
+constexpr uint32 DC_NO_REZZER_HOLD_MAX_MS    = 60000;
+
+// --- the instance refuses the spell ----------------------------------------
+// How long the run holds over a corpse the instance will not let anyone raise
+// before it gives up waiting and clears short-handed (DcRezDecision's rezBlocked
+// branch). Sized for the case worth waiting out — a boss encounter mid-reset,
+// where IsEncounterInProgress clears within a few seconds of the last survivor
+// dropping combat — and deliberately short of anything longer, because the other
+// shape this input takes is a whole-dungeon event (Violet Hold, the Black Morass)
+// where it will never lift and every second of holding is spent under fire.
+constexpr uint32 DC_REZ_BLOCKED_HOLD_MAX_MS = 20000;
+
+// Raid recovery budget scaling: extra out-of-combat clock granted per corpse
+// beyond the first (capped at twice the configured budget in the glue). Even
+// with parallel rezzers, a 15-corpse pile is raised in waves — each wave's
+// raises add rezzers back for the next — with drinking in between.
+constexpr uint32 DC_REZ_RAID_PER_CORPSE_MS = 30000;
+
+// How close a live combat holder has to be to count as "still fighting us" for
+// the rez release. A hostile AREA AURA holds the flag from 45yd with nothing on
+// the party — the freeze DcCombatFlag exists for — so any radius used to decide
+// "the fight is not over" has to sit clear underneath that reach while still
+// covering a camp fight the party is strung out across.
+constexpr float DC_FIGHT_HOLDER_RADIUS = 40.0f;
+
+// How far from a member an attacker (or that member's own victim) may be and
+// still count as a FIGHT for DcCombatFlag::IsEngaged.
+//
+// `getAttackers()` holds anything that ever called Attack() on the member and
+// keeps holding it until that creature dies or evades — at ANY range. Cross a
+// navmesh break (a TeleportParty, a one-way drop) and the attackers left behind
+// stay in the set forever, hundreds of yards away and unable to arrive. The bare
+// `victim || attackers` predicate then reads "this party is fighting" for the
+// rest of the run, which is a hard deadlock: the stranded member's follow-tank
+// rung stands down (MayDrive), the tank's spread gate waits on it as out of
+// range, and DcStrandedRecovery — the failsafe built for exactly this — both
+// re-arms its clock every tick and early-outs. All three at once, from one
+// member. Live on Azjol-Nerub, tr-20260818-214742-2: a healer parked 94yd from
+// the tank for 12m37s, held by four Skittering Swarmers 445yd away and 366yd
+// overhead, stranded recovery firing zero times while it happened.
+//
+// DISTANCE ONLY, deliberately. This predicate is asked every tick by every
+// follower rung, party-wide; DcEngageGeometry::IsReachable costs a pathfind per
+// reference, which is fine in ScanCombatHolders (behind cheaper reads, on the
+// phantom-combat hatch) and not fine here.
+//
+// ScanCombatHolders now bounds its own walk by this same radius, and needs to:
+// its reachability test delegates to the CHUNKED pathfinder, which accepts any
+// path with forward progress (that is how a boss route longer than
+// PathGenerator's ~296yd cap gets walked at all) and so calls a holder 350yd
+// overhead "reachable". One radius, asked the same way on both sides, or the
+// hatch built to clear exactly this stays inert while the flag test clears.
+//
+// Generous on purpose — it is a sanity bound, not a fight radius. Nothing that
+// is genuinely swinging at, casting on, or being chased by a member sits past
+// 100yd of it (mob spell reach tops out around 40yd, and DC_FIGHT_HOLDER_RADIUS
+// is the 40yd question); anything that does has been left behind by geometry.
+// Set it wide so a real fight is never mistaken for a stranding, since that
+// error walks the tank away mid-pull, whereas the error in the other direction
+// costs one stranded-recovery teleport.
+constexpr float DC_ENGAGEMENT_RADIUS = 100.0f;
+
+// How close a flagged groupmate has to be before the leader-assist rung's
+// walk-at-the-groupmate fallback stops being a movement at all
+// (DungeonClearLeaderAssistAction). That fallback exists to round a corner back
+// into sight of a fight the tank never saw; inside this band there is no corner,
+// the destination is where the tank already stands, and claiming the tick starves
+// the driving ladder underneath. Deliberately small — a genuine round-the-corner
+// assist is tens of yards, and the failure this bounds was measured at 0.0yd.
+constexpr float DC_LEADER_ASSIST_COLOCATED_RANGE = 5.0f;
+
+// Half-width of the capsule around a NO_STOP route leg within which the pull
+// system stands down (DcNoStopZone). Wide enough to cover a raid's natural
+// spread across the corridor and the wobble of a party that has just fought,
+// deliberately not wide enough to leak into the rooms either end of a span —
+// on the case this was authored for (BWL's approach hall) the corridor is
+// ~20yd across and the nearest place a pull is legitimate is 40yd past the
+// last flagged anchor.
+constexpr float DC_NO_STOP_CORRIDOR = 18.0f;
+
 // The max party-spread default lives in DcSettingsRegistry ("PartyMaxSpread");
 // the trigger, the advance gate, and the status publisher all read it through
 // DcSettings so per-run addon overrides apply. The HP/mana recovery thresholds
@@ -237,6 +331,19 @@ constexpr float DC_DOOR_BAND = 8.0f;
 // floors apart.
 constexpr float DC_DOOR_Z_BAND = 6.0f;
 
+// 2D half-width band used ONLY to attribute a blocked door-LOS ray to the door
+// that blocked it (DcEngageGeometry::OnlyEventGatesBetween). Wider than
+// DC_DOOR_BAND on purpose: that band asks "is this door on the corridor the bot
+// walks", this one asks "which shut door did that ray hit", and the ray runs
+// straight from the bot to the target rather than along the walked route, so a
+// wide gate's origin sits further off it. Measured: Blackwing Lair's Chromaggus
+// cage Portcullis (179116) is 6.9yd off the tank->boss chord from the standoff,
+// and the standoff itself moves with BossEngageRange. Widening is the SAFE
+// direction — the same band decides both halves of the attribution, so a wider
+// one finds MORE real doors and refuses more often; the caller's fallback is the
+// unmodified veto it already had.
+constexpr float DC_EVENT_GATE_BAND = 12.0f;
+
 // Below this vertical offset a candidate is treated as on the bot's own level:
 // slopes, stairs and ramps stay under it within a corridor lookahead. WotLK
 // inter-floor gaps are larger, so a genuine other-level mob always exceeds it.
@@ -264,6 +371,39 @@ constexpr float DC_CORRIDOR_Z_BAND = 8.0f;
 // detours alive at close range, where a pure ratio test is too strict.
 constexpr float DC_TRASH_DETOUR_RATIO = 2.0f;
 constexpr float DC_TRASH_DETOUR_SLACK = 20.0f;
+
+// The same guard, far tighter, for the hazard-vacate retreat
+// (DungeonClearHazardVacateAction). A retreat point is only ever ~14yd from the
+// emitter, and its whole job is to open a few yards NOW — so a candidate whose
+// real walk is a long way round is not a retreat at all, it is an evacuation of
+// the room. "A path exists" was the only test, and tr-20260815-154816-5 is what
+// that allowed: a point a few yards away through a wall, reachable the long way,
+// committed to and then walked for 47 SECONDS, carrying the tank ~60yd across
+// the cavern with twelve Creeping Sludges in tow. The party wiped strung out
+// over 100yd.
+//
+// Ratio alone is too strict at these distances (a bot 3yd from its aim point
+// rounding a corner trivially exceeds any ratio), hence the slack term — sized
+// to a doorway or a pillar, not to a wall.
+constexpr float DC_VACATE_DETOUR_RATIO = 1.5f;
+constexpr float DC_VACATE_DETOUR_SLACK = 8.0f;
+
+// How long the retreat may ride one committed destination before re-looking.
+// Bounded by the detour gate above, a valid retreat walk is a few seconds at
+// most; anything longer means the world moved out from under the commitment
+// (the emitter drifted, the bot wedged) and re-deciding beats riding it out.
+constexpr uint32 DC_VACATE_COMMIT_MAX_MS = 4000;
+
+// The bound both detour gates apply: a route may be `ratio` times the straight
+// line, or `slack` yards longer than it, whichever is more generous. Shared so
+// the two call sites cannot drift, and so the numbers above can be pinned by a
+// test without needing a live bot to path with.
+constexpr float DcDetourBound(float straight, float ratio, float slack)
+{
+    float const byRatio = straight * ratio;
+    float const bySlack = straight + slack;
+    return byRatio > bySlack ? byRatio : bySlack;
+}
 
 // Smart Rest failsafes (DcSmartRest::UpdateLatch). A latched rest normally
 // releases when every bot reaches full hp/mana — but a member that CANNOT get
@@ -319,5 +459,21 @@ constexpr uint32 DC_PARTY_YIELD_DEBOUNCE_TICKS = 3;
 // drift resolve cheaply while a real geometric wedge reaches the rebuild in a
 // few seconds.
 constexpr uint32 DC_MAX_RESNAP_ATTEMPTS = 2;
+
+// Consecutive navmesh-nudges the stuck ladder may spend before it gives up and
+// stalls for real. The nudge is the ladder's TOP rung, so without a budget it is
+// not an escalation at all — it is an infinite escape valve that resets
+// rebuildAttempts and hides the wedge from the player forever. Two is enough for
+// the case the nudge is actually for (a bot a few yards off a walkable poly);
+// past that the geometry, not the position, is the problem.
+constexpr uint32 DC_MAX_NUDGE_ATTEMPTS = 2;
+
+// A nudge is a SIDESTEP, so its generated path must be commensurate with its
+// straight-line offset. On a ramp a blind 5yd axis probe routinely resolves to a
+// path that leaves the incline, doubles back along the corridor and returns —
+// tens of yards of travel sold as a nudge. That is the "long walk" half of the
+// ramp ping-pong (33yd, four times, in tr-20260818-073620-14). Reject any probe
+// whose path exceeds this multiple of the offset; a real sidestep is ~1x.
+constexpr float DC_NUDGE_MAX_DETOUR_RATIO = 2.5f;
 
 #endif  // _DUNGEON_CLEAR_TUNING_H

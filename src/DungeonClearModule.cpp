@@ -1,6 +1,12 @@
 /*
  * mod-dungeon-clear — DungeonClearModule.cpp
  *
+ * MASTER SWITCH: everything below is gated on `DungeonClear.Enable` (conf,
+ * default 1), latched once on the first world tick — see DcModuleEnable.h. With
+ * it off the module is compiled in but completely inert: the registrar returns
+ * before appending a single context, so NO strategy, action, trigger or value
+ * ever reaches a bot's engine, and every hook in this file returns immediately.
+ *
  * Drop-in glue against STOCK mod-playerbots. Two scripts:
  *
  *  1. WorldScript — on the first world-update tick (guaranteed after
@@ -60,6 +66,7 @@
 #include "PlayerbotAI.h"
 
 #include "AiObjectContextAccess.h"
+#include "DcModuleEnable.h"
 #include "DcStrategyGate.h"
 
 // Per-class context registries — each owns its own shared static lists.
@@ -80,7 +87,9 @@
 #include "Ai/Dungeon/DungeonClear/DungeonClearStrategyContext.h"
 #include "Ai/Dungeon/DungeonClear/DungeonClearTriggerContext.h"
 #include "Ai/Dungeon/DungeonClear/DungeonClearValueContext.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcCombatPurge.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcPathWorker.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcFirstContact.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcPullBrake.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearUtil.h"
 #include "TestRun/DcTestDriver.h"
@@ -152,6 +161,8 @@ public:
 
     void OnPlayerAfterUpdate(Player* player, uint32 /*p_time*/) override
     {
+        if (!DcModule::IsEnabled())
+            return;
         DcSpectator::BeginBotAiMoverWindow(player);
     }
 };
@@ -174,6 +185,9 @@ public:
 
     void OnPlayerAfterUpdate(Player* player, uint32 p_time) override
     {
+        // Registered only while the module is enabled (the registrar returns
+        // before instantiating this script otherwise), so no gate is needed —
+        // and the window must never be left half-open by one.
         DcSpectator::EndBotAiMoverWindow(player);
         DcSpectator::Tick(player, p_time);
     }
@@ -190,6 +204,16 @@ public:
         if (_registered)
             return;
         _registered = true;
+
+        // Master switch, resolved and latched here — the first world tick is
+        // the earliest point at which the module config is certainly loaded,
+        // and it is still before any bot exists. Everything below (and every
+        // hook in this file) is downstream of the latched answer, so a disabled
+        // module registers nothing at all rather than registering and then
+        // refusing to act. See DcModuleEnable.h.
+        DcModule::LatchFromConf();
+        if (!DcModule::IsEnabled())
+            return;
 
         // All ten class registries — these are what real bots actually use.
         RegisterClassContexts<WarriorAiObjectContext>();
@@ -255,6 +279,9 @@ public:
     void OnAfterConfigLoad(bool /*reload*/) override
     {
         DcSettings::InvalidateConfCache();
+        // The one tunable a reload CANNOT apply: say so rather than leaving an
+        // admin to wonder why the module is still running (or still absent).
+        DcModule::WarnIfConfDiffersFromLatch();
     }
 
 private:
@@ -283,6 +310,8 @@ public:
             PLAYERHOOK_ON_MAP_CHANGED
         }) {}
 
+    // Both drivers go through DcStrategyGate::Reconcile, which is itself gated
+    // on the master switch — a disabled module installs nothing on any bot.
     void OnPlayerLogin(Player* player) override
     {
         DcStrategyGate::Reconcile(player);
@@ -311,9 +340,16 @@ public:
             PLAYERHOOK_ON_PLAYER_ENTER_COMBAT
         }) {}
 
-    void OnPlayerEnterCombat(Player* player, Unit* /*enemy*/) override
+    void OnPlayerEnterCombat(Player* player, Unit* enemy) override
     {
+        if (!DcModule::IsEnabled())
+            return;
+
         DcPullBrake::OnEnterCombat(player);
+        // Same hook, second reader: `enemy` was discarded here for as long as this
+        // script has existed, and it is the only record anywhere of what STARTED a
+        // fight. See DcFirstContact.h for what that cost.
+        DcFirstContact::OnEnterCombat(player, enemy);
     }
 };
 
@@ -341,6 +377,8 @@ public:
                                 float /*y*/, float /*z*/, float /*orientation*/,
                                 uint32 /*options*/, Unit* /*target*/) override
     {
+        if (!DcModule::IsEnabled())
+            return true;
         DcSpectator::Stop(player);
         return true;
     }
@@ -350,6 +388,8 @@ public:
     // idempotent either way.
     void OnPlayerJustDied(Player* player) override
     {
+        if (!DcModule::IsEnabled())
+            return;
         DcSpectator::Stop(player);
     }
 
@@ -364,6 +404,8 @@ public:
     // DcSpectator::NotifyWatchedLoggingOut.
     void OnPlayerBeforeLogout(Player* player) override
     {
+        if (!DcModule::IsEnabled())
+            return;
         DcSpectator::Stop(player);
         DcSpectator::NotifyWatchedLoggingOut(player);
     }
@@ -398,6 +440,8 @@ public:
 
     void OnDamage(Unit* /*attacker*/, Unit* victim, uint32& damage) override
     {
+        if (!DcModule::IsEnabled())
+            return;
         if (!victim || !victim->IsPlayer())
             return;
         // Only a lethal blow matters — a survivable hit must not eject the human
@@ -429,6 +473,9 @@ public:
 
     void OnPlayerbotUpdate(uint32 diff) override
     {
+        if (!DcModule::IsEnabled())
+            return;
+
         DcFollowerLifecycle::ReapOrphanedFollows();
         // Authoritative advanced-pull passive teardown: release any follower DC
         // put passive once its leader is no longer mid-pull (released / dc off /
@@ -446,6 +493,15 @@ public:
         // the global tick (not a per-bot one) so it keeps firing through boss
         // fights, when the bot's non-combat strategy engine is dormant.
         DcStatusPublisher::TickStatusPushes(diff);
+
+        // Unreachable-holder combat purge: break a run out of a fight that can
+        // never end — a registered mob stranded off the navmesh holding the party
+        // flagged with nothing killable. Global tick, not a trigger, for the same
+        // reason as the ZF stray-summon despawner below: the deadlock parks the
+        // bots on the COMBAT engine, where the clear's non-combat triggers never
+        // get one. Internally throttled and gated on the map having a row, so it
+        // is a handful of integer compares on every other map.
+        DcCombatPurge::Tick(diff);
 
         // `.dc test` harness state machine (spawn -> gear -> group -> teleport
         // -> dc on -> watchdogs -> record). Cheap no-op while no test run is
@@ -502,6 +558,8 @@ public:
 
     void OnCreatureAddWorld(Creature* creature) override
     {
+        if (!DcModule::IsEnabled())
+            return;
         if (!creature || creature->GetMapId() != 209 /*Zul'Farrak*/)
             return;
         uint32 const entry = creature->GetEntry();
@@ -543,6 +601,9 @@ public:
 
     void OnUnitDeath(Unit* unit, Unit* /*killer*/) override
     {
+        if (!DcModule::IsEnabled())
+            return;
+
         constexpr uint32 NPC_SHADE_OF_ERANIKUS = 5709;
         constexpr uint32 MAP_SUNKEN_TEMPLE = 109;
         if (!unit || !unit->IsCreature() || unit->GetEntry() != NPC_SHADE_OF_ERANIKUS)

@@ -103,22 +103,178 @@ namespace
     // a legitimate lane and strand the party. costMult 40 matches the other 556
     // shortcut row (a spot a real player can't be, not a survivable hazard).
     //
-    // Hellfire Ramparts (map 543) — a wall of a narrow corridor. The measured wall
-    // runs the diagonal (-1367.45, 1645.24, 68.46) -> (-1335.65, 1668.71, 68.47)
-    // (≈39.5yd long), so an axis-aligned box hugging it would be a ~32x23yd blob
-    // spilling across the whole corner and swallowing the walkable corridor floor.
-    // A polygon lets the footprint be a THIN strip laid along the wall instead: the
-    // quad is that line inflated ±2yd on its perpendicular (≈4yd thick), so a route
-    // that clips into / along the wall is fenced while the corridor centre stays
-    // clear. Z band 62..76 straddles the ~z68 floor. costMult 40 (a spot a real
-    // player can't be, same class as the shortcut rows above).
-    constexpr std::array<DcNavPenaltyPolygon, 2> kPolygons = {{
+    // Hellfire Ramparts (map 543) — the drop-off edge along the south-west side of
+    // the zone-in room. The measured line runs the diagonal
+    // (-1367.45, 1645.24, 68.46) -> (-1335.65, 1668.71, 68.47) (≈39.5yd), so an
+    // axis-aligned box hugging it would be a ~32x23yd blob spilling across the
+    // whole corner and swallowing the walkable floor. A polygon lets the footprint
+    // be a strip laid along the edge instead, keeping routes off it while the room
+    // centre stays clear. Z band 62..76 straddles the ~z68 floor. costMult 40.
+    //
+    // THE STRIP IS ASYMMETRIC ABOUT THE MEASURED LINE, AND THAT IS THE WHOLE POINT.
+    // It was first authored as that line inflated ±2yd (a ~4yd-thick strip centred
+    // on it) and that stranded people. The measured line is a straight chord, but
+    // the navmesh edge it is supposed to trace BOWS: sampled perpendicular to the
+    // chord, walkable floor runs out anywhere from 0 to 5.5yd on the far side of
+    // it, bulging furthest around the middle. Only the two ENDS of the chord are
+    // over the void; its middle is 2-3yd inboard of the real edge. So the ±2yd
+    // strip sliced a ribbon out of the room and left ≈29 sq yd of ordinary floor
+    // marooned between the strip and the drop — reachable only by crossing the
+    // strip, which is a hard reject in the StridedPathfinder screen. A party that
+    // zoned in and drifted onto it (the zone-in point is ~11yd away) could not be
+    // routed out, and the tank set off round the far side of the room instead:
+    // the reported "starts on the wrong side of the invisible wall" symptom.
+    //
+    // The fix is to stop centring the strip on the chord and push its far side out
+    // into the void: the footprint now runs from 10yd BEYOND the chord (past the
+    // furthest the floor ever reaches, so that boundary is over the drop along the
+    // entire length) to 2yd inboard of it — where the room floor is untouched, as
+    // before. Nothing can be marooned behind a boundary that is over a cliff.
+    // Verified against the map's mmtiles: 0.0 sq yd of walkable floor now lies on
+    // the far side, down from ≈29. The inboard edge has NOT moved, so routes are
+    // steered exactly as they were; only the far side changed.
+    // Ragefire Chasm (map 389) — a funnel wall, authored from four measured
+    // points rather than a single straight run. The route producer cuts across a
+    // stretch of cave floor the party should not take; fencing the crossing sends
+    // it round the intended way. The measured polyline is
+    //     (-283.38, -37.05, -58.46) -> (-277.23, -22.82, -58.18)
+    //  -> (-265.03, -17.26, -56.65) -> (-238.73, -22.41, -58.18)
+    // (three legs, ≈15.5 / 13.4 / 26.8yd, bending ~40° at each joint). No single
+    // quad follows a bent line, so it is authored as one thin quad PER LEG — each
+    // leg inflated ±2yd on its perpendicular (≈4yd thick), same recipe as the
+    // Hellfire Ramparts wall above. Every leg is extended 2yd past each of its
+    // ends: at the two interior joints that makes consecutive quads overlap so
+    // the bend leaves no gap to squeeze through, and at the two outer ends it
+    // puts the measured endpoints strictly inside the footprint rather than on
+    // its boundary edge (where the even-odd test is ill-defined) and seals the
+    // wall against whatever geometry it abuts. Z band -64..-50 straddles the
+    // ≈-58 floor. costMult 40 (a line the party must not cross, same class as
+    // the shortcut rows above).
+    // Wailing Caverns (map 43) — the WALL between the lower east floor (z~-63)
+    // and the upper west plateau (z~-56/-54) that carries the Pythas -> Skum leg.
+    // Recast stitches walkable faces up that wall, so Detour's A* climbs it
+    // instead of taking the tunnel loop a player has to walk. Reported traversal:
+    // the tank leaves the lower floor at (-76.78, -259.83, -64.64) and climbs
+    //     (-78.1, -259.7, -62.6)  ->  (-85.3, -263.5, -53.3)
+    // (9.3yd rise over 8.1yd ground = ~49 degrees).
+    //
+    // THE FENCE COVERS THE WHOLE WALL, NOT JUST THE REPORTED RAMP. There is a
+    // SECOND stitched face 12yd north — (-89.1, -248.0, -60.5) -> (-92.3, -250.7,
+    // -54.4), 6.1yd over 4.2yd = ~55 degrees, steeper still — onto the same
+    // plateau. Fencing only the reported ramp moves the climb there and nothing
+    // else changes: measured against the real mmtiles, the corridor goes from
+    // 30yd (up the ramp) to 50yd (up the north face) instead of to the 240yd way
+    // round. Both faces have to be priced for the party to walk the tunnels.
+    //
+    // Authored as a 6yd-wide strip laid ALONG the wall — three quads, one per leg
+    // of the (-92.5,-246.5) -> (-88.5,-252.5) -> (-80.5,-261.5) -> (-73.5,-266.5)
+    // polyline, each inflated +-3yd on its perpendicular and extended 2yd past
+    // both ends (consecutive quads overlap at the bends; the outer ends seal
+    // against the geometry either side). Same recipe as the Ragefire funnel wall
+    // above. A box cannot do this job: the wall is diagonal, and any axis-aligned
+    // box hugging it also swallows either the plateau or the lower floor.
+    //
+    // Z band -63.5..-52.0 straddles the climbs (which run -63.2 up to -53.3). The
+    // plateau's own floor is at -56.4/-54.6, i.e. INSIDE that band — Z alone
+    // cannot separate the plateau from the shelves on the wall, so the XY strip is
+    // what keeps it clear, and the strip is drawn to stop short of it.
+    //
+    // Validated against the map's mmtiles (tools/probe_navmesh.py + a poly-
+    // adjacency walk over 043*.mmtile), per the no-cage rule above:
+    //   - six polys fall inside the strip, all of them wall faces or the shelves
+    //     between them; the plateau, the lower floor and the -60.5 rock spine the
+    //     legitimate route crosses are all outside it;
+    //   - hard-removing every one of those six leaves ZERO walkable polys cut off
+    //     from the instance entrance (marooned = 0), so nothing is caged even
+    //     under the StridedPathfinder's hard reject;
+    //   - the shortcut is priced out: lower floor -> plateau goes 30yd -> 240yd,
+    //     and the leg that actually matters, Pythas -> Skum, goes 414yd -> 459yd
+    //     (+45yd, round the north tunnels). Entrance -> Pythas and Entrance ->
+    //     Skum are unchanged.
+    // costMult 40, the shortcut class (a line a real player cannot walk).
+    // Halls of Lightning (map 602) — the two NAV_SLIME moats that flank the Slag
+    // Furnace walkway, and the ONLY rows on this list that are not about a
+    // navmesh shortcut.
+    //
+    // The moats are navigable mesh: the mmap generator meshes the liquid SURFACE
+    // and stamps those polys NAV_SLIME (flags 0x04), so a route can sit perfectly
+    // on the navmesh and still have the party wading the length of the pit. That
+    // is what these rows price — exactly as Azjol-Nerub's lake had to be priced
+    // ([[dc-an-lower-kingdom-is-flooded]]), except there the answer was to move
+    // the authored anchors and here it is to tell the ROUTER, because the pit is
+    // also where the transit's stragglers and its recovery paths get re-routed.
+    //
+    // MEASURED, NOT EYEBALLED. t/TestHallsOfLightningRouteProbe scans the pit on a
+    // 4yd grid and asks each column whether the surface a bot would stand on is a
+    // NAV_SLIME poly — asked of the POLY, because both indirect tests tried first
+    // were wrong: "is there a NAV_GROUND poly nearby" calls a shoreline column dry
+    // (it carries both the slime and the walkway shelf 3.7yd above it), and the
+    // Azjol-Nerub ground-drop test disagrees with itself at the channel mouths,
+    // where the floor really is walkable at the slime's own height.
+    //
+    // The answer is an HOURGLASS rather than a pair of rectangles. Each channel
+    // runs y -200 .. -124 (the two mouths, y -204 and y -120, are dry across the
+    // whole pit), reaches x 1310 (west) / x 1350 (east) through most of its
+    // length, and pinches back to x 1294 / x 1370 at the waist, y -168 .. -160.
+    // A single box around either one would have to swallow 16yd of walkable
+    // walkway at the waist to cover the bulges. Hence polygons, which is what the
+    // DcNavPenaltyPolygon form is for.
+    //
+    // THE WALKWAY IS UNTAXED, and that is the property the probe asserts rather
+    // than "no dry column is ever inside a row". The dry span is at its narrowest
+    // x 1314..1346 (y -124, -140, -144, -188), the authored route hugs x
+    // 1330..1341 — dead centre — and NEITHER polygon's inner edge ever crosses
+    // x 1312 (west) or x 1348 (east), so the band the party actually walks can
+    // never be taxed. A handful of columns at the ragged channel edges fall on
+    // the wrong side of a straight polygon edge in both directions; on a 4yd grid
+    // against an 8-vertex ring that is unavoidable, and a costMult is survivable
+    // there in a way a rejection would not be.
+    //
+    // Nothing is caged: both channels are dead ends against the pit walls, so no
+    // pocket of floor is cut off on the far side of a row, and both consumers
+    // exempt a route that BEGINS inside one — which is what a bot knocked into
+    // the slime needs.
+    //
+    // Z BAND 16..22.5, DELIBERATELY BELOW THE FLOOR. The slime surface probes at
+    // z 20.18 and the walkway at z 23.88, so a ceiling under the floor means the
+    // rows can only ever tax an edge whose midpoint is ON the liquid. Widening
+    // this to cover the floor would tax the walkway's own edges at the pit walls
+    // for nothing.
+    //
+    // costMult 6 rather than the shortcut rows' 40: wading is slow and it hurts,
+    // but it is not a place a real player cannot be, and the pit is a corridor the
+    // party must cross either way. Same reasoning as the Arcatraz hazard rows.
+    constexpr std::array<DcNavPenaltyPolygon, 10> kPolygons = {{
         { 556, 15.0f, 38.0f, 40.0f, 5,
           { -233.29f, -230.34f, -209.82f, -192.94f, -192.04f },
           {  275.04f,  309.39f,  326.92f,  305.38f,  271.93f } },
-        { 543, 62.0f, 76.0f, 40.0f, 4,
-          { -1368.64f, -1336.84f, -1334.46f, -1366.26f },
-          {  1646.85f,  1670.32f,  1667.10f,  1643.63f } },
+        { 543, 62.0f, 76.0f, 40.0f, 4,   // far side over the drop | inboard side unchanged
+          { -1373.39f, -1341.59f, -1334.46f, -1366.26f },
+          {  1653.29f,  1676.76f,  1667.10f,  1643.63f } },
+        { 389, -64.0f, -50.0f, 40.0f, 4,   // leg 1
+          { -282.34f, -274.60f, -278.27f, -286.01f },
+          {  -39.68f,  -21.78f,  -20.19f,  -38.09f } },
+        { 389, -64.0f, -50.0f, 40.0f, 4,   // leg 2
+          { -278.22f, -262.38f, -264.04f, -279.88f },
+          {  -25.47f,  -18.25f,  -14.61f,  -21.83f } },
+        { 389, -64.0f, -50.0f, 40.0f, 4,   // leg 3
+          { -267.38f, -237.15f, -236.38f, -266.61f },
+          {  -18.84f,  -24.76f,  -20.83f,  -14.91f } },
+        { 43, -63.5f, -52.0f, 40.0f, 4,   // wall leg 1 (north face)
+          { -91.11f, -84.89f, -89.89f, -96.11f },
+          { -243.17f, -252.50f, -255.83f, -246.50f } },
+        { 43, -63.5f, -52.0f, 40.0f, 4,   // wall leg 2
+          { -87.59f, -76.93f, -81.41f, -92.07f },
+          { -249.01f, -261.00f, -264.99f, -253.00f } },
+        { 43, -63.5f, -52.0f, 40.0f, 4,   // wall leg 3 (the reported ramp)
+          { -80.38f, -70.13f, -73.62f, -83.87f },
+          { -257.90f, -265.22f, -270.10f, -262.78f } },
+        { 602, 16.0f, 22.5f, 6.0f, 8,   // Slag Furnace, WEST moat
+          { 1274.0f, 1274.0f, 1308.0f, 1312.0f, 1296.0f, 1296.0f, 1312.0f, 1312.0f },
+          { -122.0f, -202.0f, -202.0f, -174.0f, -170.0f, -158.0f, -154.0f, -122.0f } },
+        { 602, 16.0f, 22.5f, 6.0f, 8,   // Slag Furnace, EAST moat
+          { 1386.0f, 1386.0f, 1358.0f, 1348.0f, 1368.0f, 1368.0f, 1348.0f, 1348.0f },
+          { -122.0f, -202.0f, -202.0f, -174.0f, -170.0f, -158.0f, -154.0f, -122.0f } },
     }};
 
     // Even-odd ray cast — true iff (x,y) is inside the polygon's XY footprint.
@@ -147,6 +303,11 @@ bool DcNavPenaltyRegistry::HasVolumes(uint32 mapId)
         if (p.mapId == mapId)
             return true;
     return false;
+}
+
+bool DcNavPenaltyRegistry::IsInsideRegion(uint32 mapId, float x, float y, float z)
+{
+    return PenaltyAt(mapId, x, y, z) > 1.0f;
 }
 
 float DcNavPenaltyRegistry::PenaltyAt(uint32 mapId, float x, float y, float z)

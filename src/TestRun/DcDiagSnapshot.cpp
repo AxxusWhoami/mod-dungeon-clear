@@ -32,6 +32,7 @@
 #include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcStatusPublisher.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTargeting.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcTickMemo.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearMath.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonPathFollower.h"
 #include "TestRun/DcTestRunRecord.h"
@@ -151,6 +152,12 @@ namespace
             // whole time printing the answer next to a LEGITIMATE verdict
             // (tr-20260803-211838-7, 334s wedged) before it was wired into one.
             h.canAttackMe = canAttackMe;
+            // Scripted-out-of-the-fight state. See the header: a boss playing a
+            // defeat sequence is alive, reachable and attack-permitted, and the
+            // row said exactly that for eleven seconds while a run was thrown away.
+            h.immune = other->IsImmuneToAll();
+            h.passive = asCreature && asCreature->GetReactState() == REACT_PASSIVE;
+            h.atOneHp = other->GetHealth() == 1;
             h.legitimate = legitimate;
             m.combatHolders.push_back(std::move(h));
         };
@@ -271,6 +278,13 @@ namespace DcDiag
         snap.clearedAnchors = static_cast<std::uint32_t>(cleared.size());
         snap.skippedCount = static_cast<std::uint32_t>(skipped.size());
 
+        // --- heartbeat ----------------------------------------------------
+        // Taken here rather than mirrored out of the member loop below, which a
+        // solo tank (no group) never enters.
+        std::uint32_t const tankTickStamp = DcTickHeartbeat::LastMs(context);
+        snap.dcTickSeen = tankTickStamp != 0;
+        snap.dcTickAgeMs = SinceMs(tankTickStamp);
+
         // --- target -------------------------------------------------------
         snap.stickyBoss = AI_VALUE(uint32, DcKey::StickyBoss);
         std::optional<DungeonBossInfo> const next =
@@ -383,6 +397,18 @@ namespace DcDiag
                     m.dcStrategy = memberAI->HasStrategy(kDcNonCombatStrategy, BOT_STATE_NON_COMBAT);
                     m.dcCombatStrategy = memberAI->HasStrategy(kDcCombatStrategy, BOT_STATE_COMBAT);
                     m.botState = memberAI->GetState() == BOT_STATE_COMBAT ? "combat" : "noncombat";
+
+                    // Only ask a bot that actually carries a DC ladder. Reading
+                    // the value lazily creates it, and creating DC values on a
+                    // bot that has never run DC would be both meaningless and a
+                    // write this read-only capture has no business making.
+                    if (m.dcStrategy || m.dcCombatStrategy)
+                    {
+                        std::uint32_t const stamp =
+                            DcTickHeartbeat::LastMs(memberAI->GetAiObjectContext());
+                        m.dcTickSeen = stamp != 0;
+                        m.dcTickAgeMs = SinceMs(stamp);
+                    }
                 }
 
                 // Only for members actually flagged: each holder row costs a
@@ -563,7 +589,11 @@ namespace DcDiag
         AppendEscaped(s, snap.tankVictim);
         s << ",\"completedEncounterMask\":" << snap.completedEncounterMask
           << ",\"clearedAnchors\":" << snap.clearedAnchors
-          << ",\"skipped\":" << snap.skippedCount << '}';
+          << ",\"skipped\":" << snap.skippedCount
+          // -1 == the DC ladder has never run for this bot; otherwise ms since.
+          << ",\"dcTickAgeMs\":"
+          << (snap.dcTickSeen ? static_cast<std::int64_t>(snap.dcTickAgeMs) : -1)
+          << '}';
 
         s << ",\"party\":{\"size\":" << snap.partySize
           << ",\"alive\":" << snap.aliveCount
@@ -592,6 +622,8 @@ namespace DcDiag
             AppendEscaped(s, m.victim);
             s << ",\"dcStrategy\":" << (m.dcStrategy ? "true" : "false")
               << ",\"dcCombatStrategy\":" << (m.dcCombatStrategy ? "true" : "false")
+              << ",\"dcTickAgeMs\":"
+              << (m.dcTickSeen ? static_cast<std::int64_t>(m.dcTickAgeMs) : -1)
               << ",\"botState\":";
             AppendEscaped(s, m.botState);
             // Emitted only for a flagged member, so an absent block means "was
@@ -624,6 +656,9 @@ namespace DcDiag
                     AppendBool(s, "reachable", c.reachable);
                     AppendBool(s, "reachChecked", c.reachChecked);
                     AppendBool(s, "canAttackMe", c.canAttackMe);
+                    AppendBool(s, "immune", c.immune);
+                    AppendBool(s, "passive", c.passive);
+                    AppendBool(s, "atOneHp", c.atOneHp);
                     AppendBool(s, "legitimate", c.legitimate);
                     s << ",\"victim\":";
                     AppendEscaped(s, c.victim);
@@ -683,6 +718,31 @@ namespace DcDiag
           << " stuck=" << snap.routeGlideStuck << "/" << snap.pursuitStuck
           << "/" << snap.finalApproachStuck
           << " resnaps=" << snap.resnapAttempts;
+        // Only when it is load-bearing. A DC ladder is evaluated every AI tick
+        // (>=100ms apart), so a healthy age is hundreds of milliseconds; the
+        // threshold sits far past any legitimate scheduling hiccup so this line
+        // never fires on a busy world. When it DOES fire, the companion count is
+        // the whole diagnosis: a stale tank beside live followers is a bot that
+        // stopped being updated, while every member stale together is the run
+        // (or the server) having stopped, which is a different bug entirely.
+        constexpr std::uint32_t kTickStaleMs = 5000;
+        if (!snap.dcTickSeen || snap.dcTickAgeMs >= kTickStaleMs)
+        {
+            std::uint32_t live = 0, dcMembers = 0;
+            for (MemberSnapshot const& m : snap.members)
+            {
+                if (!m.dcStrategy && !m.dcCombatStrategy)
+                    continue;
+                ++dcMembers;
+                if (m.dcTickSeen && m.dcTickAgeMs < kTickStaleMs)
+                    ++live;
+            }
+            if (!snap.dcTickSeen)
+                s << " DC-TICK-NEVER";
+            else
+                s << " DC-TICK-STALE " << (snap.dcTickAgeMs / 1000) << "s";
+            s << " (ticking " << live << "/" << dcMembers << ")";
+        }
         if (snap.doorStalled)
             s << " DOOR-STALLED " << (snap.doorStalledForMs / 1000) << "s";
         if (snap.targetMismatch)
@@ -762,6 +822,9 @@ namespace DcDiag
                   << (c.sameMap ? "" : " OTHER-MAP")
                   << (c.evading ? " EVADING" : "")
                   << (c.suppressed ? " SUPPRESSED" : "")
+                  << (c.immune ? " IMMUNE" : "")
+                  << (c.passive ? " PASSIVE" : "")
+                  << (c.atOneHp ? " AT-1-HP" : "")
                   << (!c.reachChecked ? " path-not-tested"
                                       : (c.reachable ? " reachable" : " UNREACHABLE"))
                   << (c.canAttackMe ? "" : " CANNOT-ATTACK-ME")

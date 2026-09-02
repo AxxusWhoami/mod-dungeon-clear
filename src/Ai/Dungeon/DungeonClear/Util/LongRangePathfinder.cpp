@@ -123,14 +123,9 @@ namespace
             return npath;
 
         uint32 req = nvisited - furthestVisited;
-        if (req >= maxPath)
-            return maxPath;
-
         uint32 orig = uint32(furthestPath + 1) < npath ? furthestPath + 1 : npath;
         uint32 size = npath > orig ? npath - orig : 0;
-        if (req >= maxPath)
-            size = 0;
-        else if (size > maxPath - req)
+        if (req + size > maxPath)
             size = maxPath - req;
 
         if (size)
@@ -225,8 +220,6 @@ namespace
             dtVsub(delta, steerPos, iterPos);
             float len = dtMathSqrtf(dtVdot(delta, delta));
             if ((endOfPath || offMeshConnection) && len < LR_SMOOTH_STEP)
-                len = 1.0f;
-            else if (len < 1e-6f)
                 len = 1.0f;
             else
                 len = LR_SMOOTH_STEP / len;
@@ -328,7 +321,10 @@ LongRangePathfinder::RawResult LongRangePathfinder::BuildCoreFromMesh(
     // shortcuts a real player can't follow; it derives from dtQueryFilterExt, so
     // the include/exclude flags and the liquid area costs below apply exactly as
     // before, and on a map with no volume the cost is identical to stock.
-    DcRouteFilter filter(mapId);
+    // The start goes in so a route that BEGINS inside a no-go region can leave it:
+    // the fence exists to keep routes out of a bad spot, not to strand a party
+    // that is already standing in one (see DcRouteFilter's header).
+    DcRouteFilter filter(mapId, sx, sy, sz);
     filter.setIncludeFlags(static_cast<uint16>(NAV_GROUND | NAV_WATER | NAV_MAGMA));
     filter.setExcludeFlags(0);
     // Prefer land: water/magma stay traversable but cost more, so the A* corridor

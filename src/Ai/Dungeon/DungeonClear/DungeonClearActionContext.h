@@ -47,6 +47,10 @@ public:
         creators["dungeon clear regroup combat"] = &DungeonClearActionContext::regroup_combat;
         creators["dungeon clear heal reposition"] = &DungeonClearActionContext::heal_reposition;
         creators["dungeon clear hazard vacate"] = &DungeonClearActionContext::hazard_vacate;
+        creators["dungeon clear razorgore orb"] = &DungeonClearActionContext::razorgore_orb;
+        creators["dungeon clear razorgore camp"] = &DungeonClearActionContext::razorgore_camp;
+        creators["dungeon clear transit pack"] = &DungeonClearActionContext::transit_pack;
+        creators["dungeon clear hold fire"] = &DungeonClearActionContext::hold_fire;
         creators["dungeon clear hakkar suppressor"] = &DungeonClearActionContext::hakkar_suppressor;
         creators["dungeon clear hakkar flame"] = &DungeonClearActionContext::hakkar_flame;
         creators["dungeon clear hakkar loot blood"] = &DungeonClearActionContext::hakkar_loot_blood;
@@ -108,6 +112,10 @@ private:
     static Action* regroup_combat(PlayerbotAI* ai) { return new DungeonClearRegroupCombatAction(ai); }
     static Action* heal_reposition(PlayerbotAI* ai) { return new DungeonClearHealRepositionAction(ai); }
     static Action* hazard_vacate(PlayerbotAI* ai) { return new DungeonClearHazardVacateAction(ai); }
+    static Action* razorgore_orb(PlayerbotAI* ai) { return new DungeonClearRazorgoreOrbAction(ai); }
+    static Action* razorgore_camp(PlayerbotAI* ai) { return new DungeonClearRazorgoreCampAction(ai); }
+    static Action* transit_pack(PlayerbotAI* ai) { return new DungeonClearTransitPackAction(ai); }
+    static Action* hold_fire(PlayerbotAI* ai) { return new DungeonClearHoldFireAction(ai); }
     static Action* hakkar_suppressor(PlayerbotAI* ai) { return new DungeonClearHakkarSuppressorAction(ai); }
     static Action* hakkar_flame(PlayerbotAI* ai) { return new DungeonClearHakkarFlameAction(ai); }
     static Action* hakkar_loot_blood(PlayerbotAI* ai) { return new DungeonClearHakkarLootBloodAction(ai); }

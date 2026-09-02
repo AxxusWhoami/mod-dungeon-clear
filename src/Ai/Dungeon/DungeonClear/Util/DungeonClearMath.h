@@ -6,6 +6,8 @@
 #ifndef _PLAYERBOT_DUNGEONCLEARMATH_H
 #define _PLAYERBOT_DUNGEONCLEARMATH_H
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -71,6 +73,134 @@ namespace DungeonClearMath
                                                         std::uint32_t ringPoints)
     {
         return StandoffCandidates(target, bot, standoffRadius, ringPoints);
+    }
+
+    // The heal-reposition FALLBACK point: where to stand when no ring candidate
+    // validated and the honest answer is "walk at them and let pathing round the
+    // corner". A point on the bot->target line, `minGap` short of the target, or
+    // the target itself when already inside that gap.
+    //
+    // ALL THREE COORDINATES INTERPOLATE. The z used to be left at the target's,
+    // which names a point that exists nowhere: the target's floor above the bot's
+    // own x/y. Within one storey that is slop the caller's ground-snap absorbs;
+    // across two it is a destination through a ceiling, which is the Blackwing
+    // Lair clip (tp-20260828-171530-1). Keeping the point ON the line is both the
+    // thing the fallback means and what holds the residual error inside the snap's
+    // correction window on ramps and stairs.
+    //
+    // Deliberately does NOT reject a cross-level target. That is not this
+    // function's call: it returns the honest point on the line, which for a
+    // target a storey up is itself a storey up, and the movement layer's retry
+    // gate (MayRetryExactWaypoint plus the reachability probe behind it) is what
+    // declines to force it.
+    inline Position HealCloseFallbackPoint(Position const& bot, Position const& target,
+                                           float minGap)
+    {
+        float const dx = target.GetPositionX() - bot.GetPositionX();
+        float const dy = target.GetPositionY() - bot.GetPositionY();
+        float const dist2d = std::sqrt(dx * dx + dy * dy);
+        if (!(dist2d > minGap))
+            return target;
+
+        float const frac = (dist2d - minGap) / dist2d;
+        return Position(bot.GetPositionX() + dx * frac,
+                        bot.GetPositionY() + dy * frac,
+                        bot.GetPositionZ() +
+                            (target.GetPositionZ() - bot.GetPositionZ()) * frac,
+                        target.GetOrientation());
+    }
+
+    // May DcMoveTo override a refused move by re-issuing it as an exact waypoint?
+    //
+    // The override exists for one stock bug: SearchForBestPath seeds `min_length`
+    // from its first attempt even when that attempt FAILED, after which no genuine
+    // route can beat the seed and a perfectly good nearby destination is refused
+    // forever. Every case it was written for is a few yards away on the bot's own
+    // floor.
+    //
+    // It must not be spent on a destination the z-search refused because the
+    // destination is on another LEVEL. exact_waypoint routes to DoMovePoint, and a
+    // Player always gets PATHFIND_NORMAL — with no navmesh poly under the point,
+    // PathGenerator hands back a straight line and still calls it normal, so the
+    // bot walks through whatever is between. Same-level is therefore the whole
+    // precondition, and it costs one fabs.
+    // A point `distFromAnchor` yards out from `anchor` along the 2D bearing to
+    // `toward`, with z carried along the SAME fraction of the way.
+    //
+    // Interpolating z is the whole reason this is a shared helper and not two
+    // lines at the call site: leaving it at the anchor's height describes a point
+    // that exists nowhere — the anchor's floor over the hold point's x/y. That is
+    // flat-leg-only reasoning, and the legs this is used on are not all flat (the
+    // Suppression Rooms ramp climbs 5yd over one 20yd leg). Same defect, same fix,
+    // as HealCloseFallbackPoint above.
+    //
+    // Clamped to `toward` when it is nearer than `distFromAnchor`, and returns
+    // `anchor` unchanged when the two are stacked within `bearingFloor` (no
+    // meaningful bearing to walk out along).
+    inline Position PointTowardFrom(Position const& anchor, Position const& toward,
+                                    float distFromAnchor, float bearingFloor)
+    {
+        float const dx = toward.GetPositionX() - anchor.GetPositionX();
+        float const dy = toward.GetPositionY() - anchor.GetPositionY();
+        float const bearing = std::sqrt(dx * dx + dy * dy);
+        if (!(bearing >= bearingFloor))
+            return anchor;
+
+        float const out = std::min(std::max(distFromAnchor, 0.0f), bearing);
+        float const frac = out / bearing;
+        return Position(anchor.GetPositionX() + dx * frac,
+                        anchor.GetPositionY() + dy * frac,
+                        anchor.GetPositionZ() +
+                            (toward.GetPositionZ() - anchor.GetPositionZ()) * frac,
+                        anchor.GetOrientation());
+    }
+
+    // The CHEAP HALF of DcMoveTo's exact-waypoint retry gate: is the destination
+    // on the bot's own level, so the retry is safe with no probe at all?
+    //
+    // A false answer is not a refusal — it only means "this one needs asking
+    // properly", and DcMoveTo follows it with DcEngageGeometry::IsPointLevel-
+    // Reachable. Gating on the band alone would deny the retry to every ramp,
+    // stair flight and walkway a tier up, which is not the defect: the defect is a
+    // destination with no route, and a Player is handed PATHFIND_NORMAL whether or
+    // not one exists.
+    inline bool MayRetryExactWaypoint(float destZ, float botZ, float zTolerance)
+    {
+        return std::fabs(destZ - botZ) <= zTolerance;
+    }
+
+    // Should follow-tank's centered breadcrumb trail own this follower's tick?
+    //
+    // Two independent conditions, and the second is the one that was missing.
+    //
+    // `toTank > trailEngage` is the ORIGINAL leash: only trail once a real
+    // corridor traversal is involved, not a fan-out shuffle inside the follow
+    // bubble.
+    //
+    // `toTank > lag` is the guard the rung had no equivalent of. The crumb this
+    // branch aims at is `lag` yards behind the tank, and the stagger makes `lag`
+    // grow per slot while `trailEngage` does not — so a follower INSIDE its own
+    // slot but outside the leash was glided BACKWARD, down the trail, away from
+    // the party. That immediately re-armed the stock Follow() fan (radius `dist`)
+    // which walked it forward again, and ownership then flipped on every crossing
+    // between two aim points up to `lag + dist` apart. On a ramp the backward leg
+    // is a walk down the incline and the forward leg climbs it again, so the slope
+    // sets the amplitude: the reported "bots ping-pong on ramps". Live at the
+    // shipped AiPlayerbot.FollowDistance of 1.5 the leash is 3.5 and the crumbs
+    // sit at 1.5 / 4.5 / 7.5 / 10.5 — three of the four slots retreat.
+    //
+    // The invariant, stated generally: a rung must not move the bot AWAY from the
+    // condition that armed it. cf. the scout-lag branch, which has always held
+    // whenever `toTank <= lag` and only trails past it, and the follower cursor's
+    // own HopIsBehind ("a hop behind the bot is never worth walking to at ANY
+    // distance — the route is one-way").
+    //
+    // `toTank` must be a 3D distance: the crumb spacing is walked 3D distance and
+    // the arrival hold is GetExactDist, so a 2D read here shrinks with the cosine
+    // of the slope and arms the leash at a larger true separation on every ramp.
+    inline bool TrailFollowShouldEngage(float toTank, float trailEngage, float lag)
+    {
+        return toTank > trailEngage && toTank > lag;
     }
 
     // One forward hostile for the Dynamic-pull aggro estimate. `chainEligible` is
@@ -172,6 +302,23 @@ namespace DungeonClearMath
                               std::uint32_t now, std::uint32_t graceMs,
                               std::uint32_t& ccSinceOut);
 
+    // Pack-cannot-follow gate (pure). Decides whether a drag-back should be
+    // ABANDONED because the mob being dragged has no combat movement — the caller's
+    // `planted` verdict, read off UNIT_STATE_NO_COMBAT_MOVEMENT at the call site.
+    // Such a mob has had its chase generator removed, so it holds the ground it was
+    // tagged on however far the tank retreats: the drag is not slow, it is
+    // impossible, and the tank should turn around and fight it where it stands.
+    //
+    // Shares the latch/grace contract of ShouldAbortPullForCc exactly (including the
+    // now==0 corner and `confirmMs` == 0 firing on the first tick), and is delegated
+    // to it — kept as a separate name because the QUESTION is different and the two
+    // are tuned independently. The grace is a debounce, not a confidence threshold:
+    // the unit state is exact, but some creatures toggle it transiently (planting
+    // only for the duration of a cast), and those must not lose their drag.
+    bool ShouldAbandonPlantedDrag(bool planted, std::uint32_t plantedSince,
+                                  std::uint32_t now, std::uint32_t confirmMs,
+                                  std::uint32_t& plantedSinceOut);
+
     // Camp-safety valve (pure). A held passive follower should trigger the valve
     // when it is in combat below `safetyHpPct` AND that has persisted for
     // `graceMs`. `attackerIsPullTarget` is the caller's verdict that everything
@@ -221,10 +368,22 @@ namespace DungeonClearMath
     // standing pull (phase -> Idle, camp cleared) so the party reverts to plain
     // follow. `effectiveOn` is the current effective pull mode; `standing` is
     // "there is something to release" (non-Idle phase or a marked camp). Never
-    // releases mid-maneuver: `inCombat`, a holding phase (Forming/Advancing/
+    // releases mid-maneuver: `partyInCombat`, a holding phase (Forming/Advancing/
     // Returning — the drag must finish) and `bossPullback` (a pull-back drag runs
     // with pull mode off BY DESIGN) all hold it off.
-    bool ShouldReleaseStandingPull(bool effectiveOn, bool standing, bool inCombat,
+    //
+    // `partyInCombat` IS PARTY-WIDE, and used to be the leader's own flag. That was
+    // wrong in the one arrangement this release exists inside: a camp fight. The
+    // pack is dragged to the camp and handed to the followers, and the tank in
+    // Engage is routinely flag-clear for stretches of it — a scripted stage tags at
+    // range, so the pack arrives late and strung out, and threat lands on whoever it
+    // reaches first. Reading only the tank there dismantles the camp WHILE the
+    // followers are fighting at it: the hold releases, the party reverts to follow,
+    // and the tank walks off to form the next pull with the last pack still up. In
+    // the MgT rotunda that is the difference between a five-elite fight and a
+    // ten-elite one, and 8 of the 9 rotunda losses in tp-20260805-191829-1 died
+    // within a few yards of an authored camp.
+    bool ShouldReleaseStandingPull(bool effectiveOn, bool standing, bool partyInCombat,
                                    bool holdingPhase, bool bossPullback);
 
     // Dynamic-verdict drop grace gate (pure). A standing Leeroy/Advanced verdict
@@ -275,6 +434,40 @@ namespace DungeonClearMath
                              std::uint32_t ceiling, std::uint32_t waitSince,
                              std::uint32_t now, std::uint32_t waitMs,
                              std::uint32_t& waitSinceOut);
+
+    // Scripted-stage MUSTER gate (pure). A ScriptedPullRegistry stage is a planned
+    // fight against a hand-counted pack, and the party should arrive at it topped
+    // up — the way it arrives at a boss — rather than merely "not resting".
+    //
+    // The ordinary between-pulls floors do not deliver that. They are
+    // min(90, AiPlayerbot.AlmostFullHealth) HP and min(75, AiPlayerbot.HighMana)
+    // mana, which on stock config is 85/65, and 65% healer mana is thin for a
+    // five-elite heroic pack that contains its own healer. Live
+    // (tr-20260805-191834-3): the party reported "Shannon (low mana), Erinerice
+    // (low HP)" at 12:25, the gate released at 12:30, the stage armed, and the tank
+    // was dead 22 seconds into the fight with the whole party following inside 22
+    // more.
+    //
+    // Returns true to KEEP HOLDING (do not arm the stage), false to proceed.
+    // BOUNDED, and that bound is the point: the muster floors sit ABOVE what stock
+    // bots eat/drink back up to, so an unbounded wait on a bot with no water in
+    // its bags is a run that never continues. Arm/keep the `waitSince` latch while
+    // the party is short, proceed once `waitMs` elapses, and leave the latch armed
+    // so the same muster cannot re-fire. `toppedUp` (the caller's party read
+    // against the muster floors) or `!stagePending` clears the latch and proceeds
+    // at once; `waitMs` == 0 proceeds immediately. Same by-reference latch/clear
+    // contract as ShouldWaitForPatrol. The party read stays in DcPartyState.
+    //
+    // `minMs` is the substance floor: once the muster has ARMED (the party was
+    // genuinely below the floors for at least one tick), it holds for at least
+    // min(minMs, waitMs) even if the percentages close sooner. An instantaneous
+    // percentage test releases the tick one AoE heal crosses the line — live
+    // musters ran 1-5s and no one ever drank (tp-20260806-212646-1). A party
+    // already at the floors when the stage comes due still arms nothing.
+    bool ShouldMusterForScriptedStage(bool stagePending, bool toppedUp,
+                                      std::uint32_t waitSince, std::uint32_t now,
+                                      std::uint32_t waitMs, std::uint32_t minMs,
+                                      std::uint32_t& waitSinceOut);
 
     // Turn-and-plant gate (pure). A human tank dragging a pack back to camp turns
     // and fights the moment the pack is glued to it, rather than sprinting the
@@ -501,6 +694,46 @@ namespace DungeonClearMath
         return now >= sinceMs && (now - sinceMs) >= graceMs;
     }
 
+    // Loot-roll rung starvation bound (pure, by-reference latch).
+    //
+    // The rung that answers an open loot roll sits at relevance 95, above the
+    // whole driving ladder, and only one action runs per tick — so while it
+    // fires and its action reports success, nothing else drives the bot. Safe
+    // only while "fires" and "the vote lands" mean the same thing; when they
+    // came apart the run froze for ten minutes with every watchdog reading zero
+    // (tr-20260831-123946-18). The shared votable-roll predicate closes that
+    // case; this bounds the CLASS.
+    //
+    // `signature` digests the rolls the bot could vote on this tick and
+    // `votable` counts them (counted, not inferred from a zero digest). The
+    // action clears its whole backlog in ONE Execute, so a healthy firing needs
+    // a single tick and the next tick sees an empty set. Consecutive ticks on an
+    // UNCHANGED set therefore mean the votes are not landing — yield the tick.
+    // Any real change (a roll resolved, a new drop) re-arms immediately, which
+    // is what keeps the latch from suppressing legitimate rolling.
+    //
+    // Returns TRUE while the rung may fire. After a call, `unchangedTicks ==
+    // maxUnchangedTicks + 1` marks the single tick the bound first bit, for a
+    // one-shot log.
+    inline bool LootRollRungMayFire(std::uint32_t votable, std::uint64_t signature,
+                                    std::uint32_t maxUnchangedTicks,
+                                    std::uint64_t& lastSignature,
+                                    std::uint32_t& unchangedTicks)
+    {
+        if (!votable)
+        {
+            lastSignature = 0;
+            unchangedTicks = 0;
+            return false;       // nothing pending — full budget for the next window
+        }
+        if (signature != lastSignature)
+        {
+            lastSignature = signature;
+            unchangedTicks = 0;
+        }
+        return ++unchangedTicks <= maxUnchangedTicks;
+    }
+
     // Bystander-detour borrow watchdog (pure, by-reference latch).
     //
     // Above commit range the tank's approach belongs to Advance (the long-path
@@ -646,6 +879,22 @@ namespace DungeonClearMath
                             float ax, float ay,
                             float bx, float by);
 
+    // The point on polyline `route` whose XY projection is nearest (px,py), with
+    // Z linearly interpolated along the winning segment. False (and `out`
+    // untouched) when the polyline holds fewer than two points.
+    //
+    // 2D on purpose, unlike PathProgressCursor below: the caller is asking
+    // "where on this walk do I come closest to that mob", and a mob standing in
+    // a side room off a corridor is on the corridor's floor by construction —
+    // the consumer (the en-route sweep in DcTargeting) has already restricted
+    // candidates to the bot's own Z level via BystanderSpheres, so the storey
+    // ambiguity a 3D cursor exists to resolve cannot arise here. Interpolating Z
+    // rather than snapping to a vertex matters for the line-of-sight ray the
+    // caller then shoots from `out`: a ramp leg's endpoints can sit several
+    // yards above and below the point actually nearest the mob.
+    bool NearestPointOnPolyline2D(std::vector<G3D::Vector3> const& route,
+                                  float px, float py, G3D::Vector3& out);
+
     // True if the 2D segment (A,B) intersects the axis-aligned box
     // [minX,maxX] x [minY,maxY]. Liang-Barsky slab clip: returns true even
     // when BOTH endpoints lie outside the box but the segment passes through
@@ -678,6 +927,33 @@ namespace DungeonClearMath
     // Returns 0 for an empty route; callers guard emptiness themselves.
     std::size_t PathProgressCursor(std::vector<G3D::Vector3> const& route,
                                    float botX, float botY, float botZ);
+
+    // True when the straight leg from (px,py,pz) to route[cursor] may be treated
+    // as CORRIDOR rather than as a bee-line through geometry.
+    //
+    // Every consumer that scans "the route ahead of the bot" has to chain from
+    // the bot's own position to the cursor vertex, because the cached route was
+    // built from wherever the last rebuild happened and does not start under the
+    // bot's feet. That joining leg is SYNTHESISED — nothing pathfound it — so it
+    // is only route-like while the bot is actually standing on the route. Once
+    // the bot is far off it, the leg is a straight line through whatever the map
+    // happens to contain, and a consumer that reads geometry off it reads the
+    // wrong rooms.
+    //
+    // The bound is DungeonPathFollower::RESNAP_RADIUS by construction, which is
+    // the module's existing answer to the same question: how far may a bot be
+    // from a route vertex and still be considered ON that route (Resnap will
+    // re-anchor its cursor there) rather than needing a rebuild from where it
+    // stands. Callers pass it in so this stays a leaf header, and add the LOS
+    // half of Resnap's own gate themselves — see DungeonClearBlockingDoorValue,
+    // where the distance half alone would still have let a folded-back dungeon
+    // synthesise a joining leg straight through a mountain.
+    //
+    // False for an empty route or an out-of-range cursor: with no vertex to join
+    // to there is no corridor to read.
+    bool PathCursorIsJoinable(std::vector<G3D::Vector3> const& route,
+                              std::size_t cursor,
+                              float px, float py, float pz, float maxGap);
 
     // Index of the LATEST crumb within `rejoinRadius` (3D) of `cur`, or
     // TrailRejoinNone if none qualifies. Used by the breadcrumb recorder: on a
@@ -768,6 +1044,65 @@ namespace DungeonClearMath
     // in each of the four walk-back clones; hoisted here so the four agree by
     // construction.
     inline constexpr float TrailJumpGuard = 12.0f;
+
+    // ---- off-line rejoin rung (DungeonClearAdvanceAction) -------------------
+
+    // Is the bot off the corridor, WITH HYSTERESIS? The rejoin rung engages at
+    // `engageBar` (OFF_PATH_THRESHOLD) and, once it owns the bot, holds until the
+    // deviation falls under the lower `releaseBar`.
+    //
+    // A single bar released exactly where it engaged, so a bot parked in the band
+    // around it alternated rejoin / escort-spline / rejoin tick by tick. That is
+    // not cosmetic: the spline's opening leg is a straight line from the bot to
+    // its cursor, harmless on the line and a chord across the inside of a bend off
+    // it. Live (tr-20260830-115416-5, BWL) a tank sat at 4.1-6.9yd across the
+    // anchor 16->18 hairpin and the sub-bar spline legs walked it into a navmesh
+    // void for five seconds. Same shape as every other bare threshold this module
+    // has had to give hysteresis (the transit pack leash, the moving-camp rung).
+    //
+    // `vertOff` (a corridor Z-band mismatch) is NOT hysteretic: a floor mismatch
+    // is a binary fact about which storey the bot is on, not a drift to damp.
+    inline bool IsOffLineWithHysteresis(float deviation, bool latched, bool vertOff,
+                                        float engageBar, float releaseBar)
+    {
+        return deviation > (latched ? releaseBar : engageBar) || vertOff;
+    }
+
+    struct RejoinRefusalVerdict
+    {
+        bool  haltStaleMove = false;  // cancel the in-flight move; re-issue next tick
+        float bestDeviation = 0.0f;   // baseline to carry into the next tick
+    };
+
+    // The rejoin rung issued no move this tick because stock MoveTo refused it.
+    // Is the move already in flight doing this rung's job, or undoing it?
+    //
+    // MoveTo refuses whenever ANY move is queued, and DcMoveTo's
+    // ResolveEscortConflict clears only an ESCORT generator — so on DC's own
+    // per-point move (gen=POINT, the norm in this rung) a refusal used to hand the
+    // tick back to whatever was moving the bot, unexamined. On tr-20260830-115416-5
+    // that was the move carrying the tank OFF the line: 48 of 53 rejoins refused,
+    // deviation growing 6.2 -> 31.1yd across 22 consecutive refused ticks.
+    //
+    // Judge it on NET PROGRESS, the yardstick the recovery ladder one rung up
+    // already uses: track the best (smallest) deviation seen since the rung took
+    // ownership and halt only once the current deviation has grown past it by
+    // `slack`. Riding a working re-entry matters as much as halting a bad one —
+    // cancelling on every refusal turns the healthy case into a stop/re-issue
+    // stutter. `slack` absorbs a pathed re-entry legitimately swinging wide to
+    // round a corner.
+    //
+    // Seeding `bestDeviation` with FLT_MAX yields exactly one tick of grace: the
+    // first refusal establishes the baseline and never halts.
+    inline RejoinRefusalVerdict DecideRejoinRefusal(float deviation, float bestDeviation,
+                                                    float slack)
+    {
+        RejoinRefusalVerdict v;
+        float const best = std::min(bestDeviation, deviation);
+        v.haltStaleMove  = deviation > best + slack;
+        v.bestDeviation  = v.haltStaleMove ? deviation : best;
+        return v;
+    }
 }
 
 #endif

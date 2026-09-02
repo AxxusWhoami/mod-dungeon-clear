@@ -231,6 +231,7 @@ namespace DcTestPlanSummary
           << ",\"level\":" << h.level
           << ",\"heroic\":" << (h.heroic ? "true" : "false")
           << ",\"seedBase\":" << h.seedBase
+          << ",\"size\":" << h.size
           << ",\"gearIlvl\":" << h.gearIlvl
           << ",\"gearQuality\":" << h.gearQuality
           << "},\"startedAtMs\":" << h.startedAtMs

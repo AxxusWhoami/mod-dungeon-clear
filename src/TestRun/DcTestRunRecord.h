@@ -127,7 +127,8 @@ namespace DcTestRunRecord
         //     holder list: pre-10 records have neither, and treating an absent
         //     list as an empty one reports "nothing was holding them" about the
         //     freezes this was added to explain.
-        std::uint32_t schema = 10;
+        // 11: added size (requested party size; comp[] length is the actual).
+        std::uint32_t schema = 11;
         std::string runId;
         std::string planId;       // owning `.dc test plan`, "" for ad-hoc runs
         std::string dungeon;      // registry token
@@ -137,6 +138,9 @@ namespace DcTestRunRecord
         std::uint32_t instanceId = 0;
         std::uint32_t level = 0;  // requested level
         bool heroic = false;      // run at DUNGEON_DIFFICULTY_HEROIC
+        // Party size the run fielded (raid-support Plan D). 0 in pre-11
+        // records; read comp[].length there.
+        std::uint32_t size = 0;
         std::uint32_t compSeed = 0;  // seed BuildComp rolled this comp from (for replay)
         // Gear ceiling the bots were rolled to, already resolved against the
         // AutoGear* conf values (0 ilvl = uncapped; quality is 1..5). Both stay

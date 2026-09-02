@@ -133,7 +133,7 @@ std::optional<DungeonBossInfo> NextDungeonBossValue::Calculate()
             if (info.entry == selectedEntry)
             {
                 bool invalid = false;
-                if (cleared.count(info.entry))
+                if (cleared.count(info.entry) || info.skipByDesign)
                     invalid = true;
                 else if (info.kind == DungeonAnchorKind::Boss &&
                          info.encounterIndex < 32 && (completedMask & (1u << info.encounterIndex)))
@@ -191,6 +191,11 @@ std::optional<DungeonBossInfo> NextDungeonBossValue::Calculate()
     for (DungeonBossInfo const& info : bosses)
     {
         if (skipped.count(info.entry))
+            continue;
+
+        // Authored "present but skipped by design" (vehicle bosses, external
+        // set pieces) — same treatment as a player skip, but from data.
+        if (info.skipByDesign)
             continue;
 
         // Travel objective already reached this run (latched on arrival). Its

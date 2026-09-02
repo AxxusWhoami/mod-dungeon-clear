@@ -8,7 +8,13 @@
 
 #include <string>
 
+#include <vector>
+
 #include "ObjectGuid.h"
+#include "Timer.h"
+
+#include "Ai/Dungeon/DungeonClear/Util/DcRunProgress.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcThrottle.h"
 
 // The authoritative, leader-owned state of one dungeon-clear RUN — the run's
 // identity/mode, its current manual-override objective, and the two cross-bot
@@ -51,6 +57,14 @@ struct DcRunState
     // === run session — cleared by Reset() (dc on / dc off / death / all-cleared) ===
     bool        enabled = false;   // the run's master switch (leader-owned)
     bool        paused  = false;   // soft-stop layered on `enabled`; see OnResume
+
+    // This run is on a RAID map — stamped by `dc on` from Map::IsRaid(), read
+    // via DcRun::IsRaid. Raid runs change the non-interference contract: DC
+    // owns everything BETWEEN fights and stands down completely during a boss
+    // encounter (playerbots' raid strategies own the fight — see
+    // Util/DcBossStandDown). Stamped rather than re-derived so the flag is
+    // one honest fact of the run session, cleared with it by Reset().
+    bool        raidRun = false;
 
     // Short human phrase describing WHY the run is paused, for the status panel to
     // tell a manual `dc pause` apart from a door auto-pause. Set at each pause site
@@ -128,21 +142,251 @@ struct DcRunState
                                    // (dedup: one announce per recovery episode; also
                                    // marks the episode so the "party restored" resume
                                    // line fires exactly once when deaths clear)
+    // The NoRezzer floor's two clocks — see the branch in DcRezDecision.h. Stamped
+    // off the PREVIOUS tick's verdict (the kernel is the thing that decides whether
+    // a rezzer is left, so the glue cannot know before calling it); a tick of lag is
+    // immaterial against graces measured in seconds.
+    uint32 noRezzerSinceMs      = 0;  // getMSTime() the party first had no rezzer
+    uint32 noRezzerQuietSinceMs = 0;  // ...and first read unengaged AND unflagged
+    // getMSTime() the instance was first seen refusing every resurrect
+    // (InstanceScript::IsEncounterInProgress — see the rezBlocked branch in
+    // DcRezDecision.h); 0 = the spell is castable. Cleared the moment the block
+    // lifts, so a boss mid-reset gets a fresh wait rather than a stale verdict.
+    uint32 rezBlockedSinceMs    = 0;
 
-    // === stranded-member recovery failsafe (leader-owned) =========================
-    // The no-progress clock + last-seen progress snapshot, ticked live on the
-    // leader by DcStrandedRecovery::Evaluate (the single clock-owner site).
-    // progressMs re-stamps whenever the run shows a sign of life — a boss/objective
-    // completed, or the tank closing on the next anchor — and combat re-arms it too
-    // (a fight is progress), so a legitimately slow pull/rest never trips it. When
-    // it goes stale past StrandedRecoveryNoProgressSecs while a bot member is stuck
-    // out of range (fell under the world / wedged), the leader teleports the strays
-    // to itself. See Util/DcStrandedDecision.h + DcStrandedRecovery.
-    uint32 progressMs        = 0;       // getMSTime() of the last sign of progress (0 = unarmed)
-    uint32 progressMask      = 0;       // completed-encounter mask last seen
-    uint32 progressAnchors   = 0;       // cleared-anchor count last seen
-    float  progressBestDist  = -1.0f;   // closest tank approach to the current anchor (<0 = unset)
-    uint32 progressAnchorEntry = 0;     // anchor entry progressBestDist is keyed to (re-arm on change)
+    // === raid boss stand-down (leader-owned, read cross-bot) ======================
+    // The hysteresis state + per-tick memo behind DcBossStandDown::IsActive: while
+    // a raid encounter is live every DC combat behavior and recovery ladder goes
+    // inert so the playerbots raid strategy owns the fight. Evaluated on the
+    // leader at most once per tick window; members read the verdict cross-bot,
+    // the same access pattern as the latches above. See Util/DcBossStandDown.h.
+    bool   standDownActive   = false;  // the current verdict
+    uint32 standDownSignalMs = 0;      // getMSTime() an encounter signal last read true
+    uint32 standDownEvalMs   = 0;      // memo stamp of the last leader evaluation
+
+    // === raid pre-boss muster (leader-owned) ======================================
+    // Phase machine state for DcRaidMusterDecision (Plan C): the full-stop that
+    // stages, tops off and rebuffs the raid before every boss pull. Keyed to the
+    // boss entry so a kill / skip / boss change re-arms a fresh muster; cleared
+    // wholesale by Reset(). musterArmedMs stamps the whole-muster budget (the
+    // hard ceiling that releases the pull from any phase), while
+    // musterPhaseSinceMs stamps the per-phase ones. musterRestOverride remembers
+    // that the muster itself pushed the RestHealthPct/RestManaPct per-run
+    // overrides to full (so bots actually eat/drink to the bars) and must retract
+    // them on release without clobbering an override the player set by hand.
+    uint8  musterPhase = 0;           // DcRaidMusterDecision::Phase
+    uint32 musterPhaseSinceMs = 0;    // getMSTime() the phase was entered
+    uint32 musterBossEntry = 0;       // boss this muster belongs to (0 = none)
+    uint32 musterArmedMs = 0;         // getMSTime() the muster armed for this boss
+    uint32 musterRebuffIssuedMs = 0;  // getMSTime() the rebuff round was issued
+    bool   musterRestOverride = false;
+
+    // === the run's no-progress clocks (leader-owned) ==============================
+    // Two failsafes ask "has this run stopped moving?" and both read the same
+    // three signals (DcRunProgress: an encounter completed, an anchor cleared,
+    // the tank closing on the next anchor). They get SEPARATE marks because the
+    // detector reports an edge and consumes it — one shared mark and whichever
+    // clock ticked first would eat the other's evidence.
+    //
+    // `progress` is the stranded-member recovery failsafe's, ticked live on the
+    // leader by DcStrandedRecovery::Evaluate (its single clock-owner site). It
+    // additionally re-arms on party ENGAGEMENT — a fight is progress — so a
+    // legitimately slow pull or a long boss fight never trips it. When it goes
+    // stale past StrandedRecoveryNoProgressSecs while a bot member is stuck out of
+    // range (fell under the world / wedged), the leader teleports the strays to
+    // itself. See Util/DcStrandedDecision.h + DcStrandedRecovery.
+    //
+    // `purgeProgress` is DcCombatPurge's, ticked on the global playerbot tick.
+    // It is deliberately COMBAT-BLIND: its subject is a fight that can never end
+    // (a mob stranded off the navmesh holding the party flagged forever), so a
+    // clock that engagement re-armed could never fire in the one state it exists
+    // for. See Util/DcCombatPurge.h.
+    DcRunProgress::Mark progress;
+    DcRunProgress::Mark purgeProgress;
+
+    // === Blackwing Lair — Razorgore's orb and egg run (leader-owned) =============
+    // The one encounter DC orchestrates from INSIDE a raid fight (see
+    // DungeonEvent::encounterActive). All of it is the leader's; the runner GUID is
+    // the only field read cross-bot, through DcLeaderSignal::GetRazorgoreOrbStation,
+    // by the runner's own orb rung.
+    //
+    // Note what is NOT here: any timer for the 90s mind control or the 60s charmer
+    // lockout. Both are auras on live units and are read straight off them, which
+    // stays correct through a wipe, a despawn and the phase flip — a mirrored timer
+    // would not.
+    // getMSTime() of the last tick the Razorgore driver had work to do — which
+    // starts at the tank's pull on Grethok and ends with the thirtieth egg.
+    // Read cross-bot (DcLeaderSignal::IsLeaderRazorgoreDriving / …Runner) by the
+    // raid's camp rung and the elected runner's own rung, so both arm and release
+    // with the encounter and need no latch of their own: the driver simply stops
+    // stamping when phase 1 ends.
+    //
+    // Nothing is stamped BEFORE the pull (Step::WaitPull). Up to then the raid's
+    // position belongs to the ordinary clear — the advance is walking it to
+    // Grethok's boss anchor and the muster is topping it off — and a camp rung
+    // armed underneath that would fight the pipeline for every bot.
+    uint32     razorDrivingMs = 0;
+
+    ObjectGuid razorRunnerGuid;            // elected orb runner (empty = none yet)
+    uint32     razorRunnerPickedMs = 0;    // getMSTime() of the last election (throttle)
+    ObjectGuid razorEggGuid;               // the egg currently being driven at
+    uint32     razorEggElectedMs   = 0;    // getMSTime() it was elected / last got closer
+    uint32     razorMoveIssuedMs   = 0;    // getMSTime() of the last boss spline
+    float      razorEggBestDist    = 0.0f; // closest approach to it (no-progress clock)
+    uint8      razorEggAttempts    = 0;    // polite cast attempts before going triggered
+    // Eggs parked for this pass — unreachable, or refusing every cast. Retried in
+    // full once the reachable field is exhausted, so a wedge costs time, never the
+    // encounter.
+    std::vector<ObjectGuid> razorEggSkipped;
+
+    // === TRANSIT state (leader-owned) ===========================================
+    // Blackwing Lair's Vaelastrasz -> Broodlord crossing and Halls of Lightning's
+    // Bjarngrim -> Volkhan Slag Furnace share this block, because a bot is only
+    // ever on one map and the two crossings can never be live at once (see the
+    // transit blocks in DungeonEventTables.h). All of it belongs to the leader;
+    // the CURSOR is the only part read cross-bot, through
+    // DcLeaderSignal::GetTransitAnchor, by the pack rung on every other member —
+    // and that rung is gated to map 469, so on 602 the publication is telemetry.
+    //
+    // The cursor is a POSITION, not an index into somebody else's copy of the
+    // route: a follower must be able to answer "where is the leader taking us"
+    // with one struct read and no table lookup, and publishing the point rather
+    // than the index means a route edit can never leave the two halves disagreeing
+    // about which anchor index 7 is.
+    //
+    // getMSTime() of the last tick the transit driver had work to do — from the
+    // leader's arrival at the staging point to its arrival at the far end (the
+    // Broodlord standoff / the Slag Furnace's mid ledge). Read cross-bot (DcLeaderSignal::IsLeaderTransitDriving) by the
+    // pack rung, so that rung arms and releases with the crossing and needs no
+    // latch of its own: the driver simply stops stamping when the leg is over.
+    uint32 transitDrivingMs = 0;
+    uint32 transitCursorIndex = 0;   // authored anchor the leader is walking toward
+    float  transitCursorX = 0.0f;    // ...and that anchor's position, published
+    float  transitCursorY = 0.0f;
+    float  transitCursorZ = 0.0f;
+
+    // getMSTime() the crossing armed (the tick the leader first read due inside
+    // the corridor). The gather gate's budget is measured from here, and
+    // `transitGathered` latches it open so a raid that spreads out mid-crossing
+    // is handled by the pack rung rather than by re-gathering at the staging
+    // point behind them.
+    uint32 transitArmedMs = 0;
+    bool   transitGathered = false;
+
+    // The current hold, if any: getMSTime() it began (0 = the driver is advancing)
+    // and which of DcSuppressionTransitDecision::Hold it is. Every hold reason
+    // carries its own watchdog and these are its clock — one wedged straggler must
+    // cost the crossing seconds, never the run.
+    uint32 transitHoldSinceMs = 0;
+    uint8  transitHoldReason = 0;
+
+    // ...and whether that hold's watchdog has already given up on it. The release
+    // LATCHES (the verdict keeps reporting the hold so the leg keeps walking), so
+    // this is what makes the WARN fire once per release instead of once per tick.
+    bool   transitHoldTimedOut = false;
+
+    // The Violet Hold keeper / Black Morass rift a bot has COMMITTED to, held
+    // across the portal-death boundary so a tank two yards from a corpse is not
+    // instantly re-aimed at the next spawn tens of yards away. Empty = nothing
+    // committed; the driver re-validates (alive, still resolvable) on every read
+    // and clears it in place, so there is no staleness for a run teardown to
+    // handle. Here rather than in a file-scope thread_local map for the reason in
+    // Util/DcThrottle.h, and it matters more for a lock than for a log: a lapsed
+    // lock re-selects, which is precisely the behaviour it exists to prevent.
+    ObjectGuid vhKeeperLock;
+    ObjectGuid bmRiftLock;
+
+    // --- per-bot throttles (see Util/DcThrottle.h) --------------------------
+
+    DcThrottleSlot throttles[kDcThrottleCount]{};
+
+    // True while `slot` is still inside its window — the caller SUPPRESSES. One
+    // call both asks and arms: a false return stamps the slot, so there is no way
+    // to ask without recording the answer, which is the slip the
+    // `uint32& prev = map[guid]` idiom made easy.
+    bool Throttled(DcThrottle slot, uint32 windowMs)
+    {
+        DcThrottleSlot& s = throttles[static_cast<std::size_t>(slot)];
+        if (s.ms && GetMSTimeDiffToNow(s.ms) < windowMs)
+            return true;
+        StampThrottle(s);
+        return false;
+    }
+
+    // The movement variant: true while the SAME destination (within `epsilon`)
+    // was issued inside the window. A different destination always passes and
+    // re-stamps, so a bot being re-aimed is never held back by a floor that only
+    // exists to stop it being re-ordered to where it is already going.
+    bool ThrottledIssue(DcThrottle slot, float x, float y, float z,
+                        float epsilon, uint32 windowMs)
+    {
+        DcThrottleSlot& s = throttles[static_cast<std::size_t>(slot)];
+        if (s.ms && GetMSTimeDiffToNow(s.ms) < windowMs)
+        {
+            float const dx = s.x - x, dy = s.y - y, dz = s.z - z;
+            if (dx * dx + dy * dy + dz * dz <= epsilon * epsilon)
+                return true;
+        }
+        s.x = x;
+        s.y = y;
+        s.z = z;
+        StampThrottle(s);
+        return false;
+    }
+
+    void ClearThrottle(DcThrottle slot)
+    {
+        throttles[static_cast<std::size_t>(slot)] = DcThrottleSlot{};
+    }
+
+    // getMSTime() legitimately returns 0 once per wrap, and 0 is this slot's
+    // "never stamped". Bump it by a millisecond rather than let a throttle open
+    // for one tick every 49 days.
+    static void StampThrottle(DcThrottleSlot& s)
+    {
+        s.ms = getMSTime();
+        if (!s.ms)
+            s.ms = 1;
+    }
+
+    // Drop the whole transit block. Called when the crossing ends and from the run
+    // teardown: the leg is Repeatable and a leader shoved back into the gauntlet
+    // re-arms it, so coming back holding a stale cursor — or a gather gate that
+    // latched open two rooms ago — is the one way this state can lie.
+    void ClearTransit()
+    {
+        transitDrivingMs = 0;
+        transitCursorIndex = 0;
+        transitCursorX = 0.0f;
+        transitCursorY = 0.0f;
+        transitCursorZ = 0.0f;
+        transitArmedMs = 0;
+        transitGathered = false;
+        transitHoldSinceMs = 0;
+        transitHoldReason = 0;
+        transitHoldTimedOut = false;
+        ClearThrottle(DcThrottle::TransitIssue);
+        ClearThrottle(DcThrottle::TransitLog);
+    }
+
+    // Drop the whole Razorgore block. Called when phase 1 ends and on the run
+    // teardown below: the encounter soft-resets itself after a phase-1 wipe
+    // (the boss respawns in 30s and the instance clears the field), so coming
+    // back holding a stale runner or skip list is the one way this state can lie.
+    void ClearRazorgore()
+    {
+        razorDrivingMs = 0;
+        ClearThrottle(DcThrottle::RazorgoreOrbIssue);
+        ClearThrottle(DcThrottle::RazorgoreLog);
+        razorRunnerGuid.Clear();
+        razorRunnerPickedMs = 0;
+        razorEggGuid.Clear();
+        razorEggElectedMs = 0;
+        razorMoveIssuedMs = 0;
+        razorEggBestDist = 0.0f;
+        razorEggAttempts = 0;
+        razorEggSkipped.clear();
+    }
 
     // Full run teardown: every session + signal field. Used on dc on / dc off /
     // death / all-cleared. (The pull preference/bool are NOT here — see the header

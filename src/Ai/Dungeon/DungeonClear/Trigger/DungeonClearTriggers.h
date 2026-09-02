@@ -280,6 +280,22 @@ public:
 // cast, so bots roll as soon as the window opens. Gated by
 // DungeonClear.BetterLootRolling; inert for self-bots, where the human owns
 // the roll (improvement #1 — see BetterLootRollAction.h).
+//
+// STARVATION BOUND. This rung sits at DcRel::LootRollPending (95), above the
+// entire driving ladder, and one action runs per tick — so for as long as it
+// fires and its action reports success, NOTHING else drives the bot. That is
+// only safe while "fires" and "the vote lands" mean the same thing, and once
+// they came apart the run died silently for ten minutes (see
+// DcLootRoll::IsVotablePendingRoll). The shared predicate closes the case we
+// found; the counter below bounds the CLASS, so the next predicate that drifts
+// costs one unrolled item instead of a whole run.
+//
+// The action votes on every pending roll in a single Execute, so one healthy
+// firing clears this bot's whole backlog and the rung goes quiet on the very
+// next tick. Several consecutive ticks against an UNCHANGED set of pending
+// rolls therefore means the votes are not landing. The signature is what makes
+// this safe to latch: any real change — a roll resolved, a new item dropped —
+// gives a different value, resets the streak and re-arms the rung immediately.
 class DungeonClearLootRollPendingTrigger : public Trigger
 {
 public:
@@ -288,6 +304,14 @@ public:
     {
     }
     bool IsActive() override;
+
+private:
+    // Consecutive ticks this trigger has fired against the same pending set.
+    // Generous: a healthy roll needs exactly one.
+    static constexpr uint32 MAX_UNCHANGED_TICKS = 5;
+
+    std::uint64_t _pendingSignature = 0;   // 0 == nothing was pending last tick
+    uint32 _unchangedTicks = 0;
 };
 
 // --- Advanced pulls -------------------------------------------------------
@@ -551,20 +575,139 @@ public:
 };
 
 // ANY role, BOTH engines. Fires when the bot is standing inside the pulse of an
-// active-vacate DcHazardRegistry emitter it cannot fight — the Arcatraz
-// "Destroyed Sentinel" (21761) summoned at a Sentinel's corpse, NOT_SELECTABLE,
-// pulsing 15yd/1s until it despawns. Drives DungeonClearHazardVacateAction to
-// clear the pulse; once out, normal driving resumes and the party advances past
-// the corpse (it does NOT hold at the rim for the summon's whole lifetime — see
-// the band note in DcHazard.h). No combat gate (the pulse ticks after the kill,
-// often out of combat) and no role exemption (the summon can't be tanked). Inert
-// on maps with no emitters, while CC'd/rooted (can't move), and when
+// active-vacate DcHazardRegistry row it cannot fight. Two of those exist:
+//
+//   * the Arcatraz "Destroyed Sentinel" (21761) summoned at a Sentinel's corpse,
+//     NOT_SELECTABLE, pulsing 15yd/1s until it despawns;
+//   * Scholomance's "Cloud of Disease" (17742), the persistent area aura a dying
+//     Diseased Ghoul (10495) leaves on the ground — 5yd, 350/s, 20s. There is no
+//     creature at all here, only a DynamicObject, so nothing in the combat AI can
+//     even see it.
+//
+// Drives DungeonClearHazardVacateAction to clear the pulse; once out, normal
+// driving resumes and the party advances past the spot (it does NOT hold at the
+// rim for the emitter's whole lifetime — see the band note in DcHazard.h). No
+// combat gate (both tick after the kill, often out of combat, and the ghoul pool
+// drops mid-pack-fight) and no role exemption (neither can be tanked). Inert on
+// maps with no rows of either kind, while CC'd/rooted (can't move), and when
 // DungeonClear.HazardVacate is off. See DcHazard::NearestVacate.
 class DungeonClearHazardVacateTrigger : public Trigger
 {
 public:
     DungeonClearHazardVacateTrigger(PlayerbotAI* botAI)
         : Trigger(botAI, "dungeon clear hazard vacate", 1)
+    {
+    }
+    bool IsActive() override;
+};
+
+// BLACKWING LAIR ONLY, and only for ONE member of the raid: the bot the leader's
+// Razorgore driver elected to take the Orb of Domination.
+//
+// The rest of the encounter is the raid strategy's and the leader driver's. This
+// exists because the orb has requirements the tank cannot meet — the clicker must
+// own no pet, must not be inside the 60s Mind Exhaustion lockout, and is ROOTED
+// for the 90 seconds the mind control lasts — so a second actor has to walk 78yd
+// to the ledge and stand there while the raid holds the floor.
+//
+// It is deliberately the RUNNER'S OWN trigger rather than something the leader
+// does to it. A leader reaching across to drive a follower's MotionMaster fights
+// that bot's AI and the `bwl` strategy's own repositioning every tick and loses;
+// publishing "you are the runner" and letting the bot act on its own tick is the
+// pattern every other cross-bot decision in this module uses.
+//
+// Free everywhere else: the map compare rejects before anything else is read.
+// See DcLeaderSignal::IsLeaderRazorgoreRunner and DungeonClearRazorgoreOrbAction.
+class DungeonClearRazorgoreOrbTrigger : public Trigger
+{
+public:
+    DungeonClearRazorgoreOrbTrigger(PlayerbotAI* botAI)
+        : Trigger(botAI, "dungeon clear razorgore orb", 1)
+    {
+    }
+    bool IsActive() override;
+};
+
+// The other half of the same encounter: every member EXCEPT the orb runner, while
+// the egg run is being driven and that member is off the camp. Fires only while
+// the leader is stamping "the driver has work" (DcLeaderSignal::
+// IsLeaderRazorgoreDriving), so it arms with phase 1 and releases with it.
+//
+// Free everywhere else — the map compare rejects first. See
+// DungeonClearRazorgoreCampAction for what the camp is for and why it is on the
+// floor rather than the ledge.
+class DungeonClearRazorgoreCampTrigger : public Trigger
+{
+public:
+    DungeonClearRazorgoreCampTrigger(PlayerbotAI* botAI)
+        : Trigger(botAI, "dungeon clear razorgore camp", 1)
+    {
+    }
+    bool IsActive() override;
+};
+
+// BLACKWING LAIR ONLY, and only while the leader is crossing the Suppression
+// Rooms: is this bot outside the pack leash around the leader's route cursor?
+//
+// The Razorgore camp one room over holds the raid at a FIXED point. This one
+// cannot: on the Vaelastrasz -> Broodlord leg there is no place to stand, only a
+// 342yd line to walk, so the anchor MOVES — it is the authored anchor the leader
+// is currently walking toward, published tick by tick
+// (DcLeaderSignal::GetTransitAnchor).
+//
+// WHY A PACK RUNG EXISTS AT ALL ON THIS LEG. A raid strung over 100yd sweeps a
+// far larger cylinder of a room that holds 160 whelps on a 30s respawn, and
+// every straggler independently holds the WHOLE party in combat
+// (AnyPartyEngagement is party-wide) — which is what makes DcCombatFlag::MayDrive
+// false and leaves the clear with no driver. Travelling as one body is not a
+// nicety here, it is the precondition for travelling at all.
+//
+// INERT INSIDE THE LEASH, never "own the tick and return false": a bot already in
+// the pack must not contend with its own rotation for the whole crossing. The
+// leader is exempt — it IS the anchor.
+//
+// Free everywhere else: the map compare rejects before anything is read. See
+// DungeonClearTransitPackAction for where a drifted bot is walked back to.
+class DungeonClearTransitPackTrigger : public Trigger
+{
+public:
+    DungeonClearTransitPackTrigger(PlayerbotAI* botAI)
+        : Trigger(botAI, "dungeon clear transit pack", 1)
+    {
+    }
+    bool IsActive() override;
+};
+
+// IS THIS BOT AIMED AT SOMETHING IT IS FORBIDDEN TO DAMAGE RIGHT NOW?
+//
+// The second half of DcTargetExclusionRegistry, and the half that had to exist.
+// The registry's first half (DungeonClearCombatStrategy::AppendTargetExclusions)
+// takes a barred creature out of the DPS pool, which is enough only if the pool is
+// what points the damage. On Razorgore it is not: `bwl razorgore mark boss` paints
+// the moon raid icon on him so the off-tank picks him up, and both DpsTargetValue
+// and DpsAoeTargetValue return RtiTargetValue's answer BEFORE the exclusion pass
+// ever runs. So every DPS in the raid pointed at a boss whose phase-1 death casts
+// 20038 on all of them. Measured, tr-20260827-233058-1: pull at 23:31:36, Razorgore
+// dead at 23:31:44, seventeen of twenty-five bots dead with him.
+//
+// The marks are deliberate and stay (the off-tank needs them). What changes is that
+// a barred target is TAKEN BACK: the DC-side picker refuses to hand one out
+// (Value/DungeonClearDpsTargetValue), and this rung lets go of one the bot is
+// already holding — the case the picker cannot reach, because a bot that acquired
+// the boss a tick before the bar came up keeps auto-attacking it off GetVictim()
+// with no further target pick involved.
+//
+// TANKS ARE EXEMPT, by the same reasoning as the registry's Tank carve-out: the
+// encounters that bar a creature are the ones where somebody must still HOLD it.
+// A freed Razorgore between mind controls has to be tanked by someone.
+//
+// Free on every map with no rows — HasRowsFor is a scan of a table with one entry
+// in it, keyed on the map.
+class DungeonClearHoldFireTrigger : public Trigger
+{
+public:
+    DungeonClearHoldFireTrigger(PlayerbotAI* botAI)
+        : Trigger(botAI, "dungeon clear hold fire", 1)
     {
     }
     bool IsActive() override;

@@ -33,9 +33,10 @@ void DungeonSpawnGraph::Build()
     store.clear();
 
     // Spawn data is indexed by spawn id, not by map. Walk once, partition by
-    // dungeon mapId. Non-dungeon maps (overworld, BGs, arenas) are skipped —
-    // dungeon clear is dungeon-only and the spawn graph is not consulted
-    // anywhere else.
+    // instance mapId. Non-instanced maps (overworld, BGs, arenas) are skipped;
+    // RAIDS are included — corridor centering serves a raid clear exactly as it
+    // does a dungeon one, and excluding them silently degraded the pathfinder
+    // to an empty graph on raid maps.
     CreatureDataContainer const& spawns = sObjectMgr->GetAllCreatureData();
     for (auto const& kv : spawns)
     {
@@ -45,7 +46,7 @@ void DungeonSpawnGraph::Build()
             continue;
 
         MapEntry const* mapEntry = sMapStore.LookupEntry(data.mapid);
-        if (!mapEntry || !mapEntry->IsNonRaidDungeon())
+        if (!mapEntry || !mapEntry->IsDungeon())
             continue;
 
         SpawnNode node;

@@ -176,9 +176,11 @@ TEST(DcTestRunRecordTest, BossRosterSerializesInProgressionOrder)
               std::string::npos);
 }
 
-TEST(DcTestRunRecordTest, SchemaIsTen)
+TEST(DcTestRunRecordTest, SchemaIsEleven)
 {
-    EXPECT_NE(ToJsonl(SampleRecord()).find("\"schema\":10"), std::string::npos);
+    // 11: added size (party size the run fielded; 0 in older records).
+    EXPECT_NE(ToJsonl(SampleRecord()).find("\"schema\":11"), std::string::npos);
+    EXPECT_NE(ToJsonl(SampleRecord()).find("\"size\":"), std::string::npos);
 }
 
 // The gear ceiling a run was rolled to. Two runs of the same dungeon are only

@@ -189,6 +189,156 @@ TEST(DcRezDecisionTest, NoRezClassAliveDisables)
     EXPECT_EQ(r.reason, Reason::NoRezzer);
 }
 
+// ...but NOT while the survivors are still swinging. The sole healer dying is the
+// normal shape of a hard heroic pull and the remaining four finishing the pack is a
+// normal way for it to end; disabling on the spot ends a run that is being won. Two
+// runs in tp-20260805-005412-1 died exactly this way, with four members alive.
+TEST(DcRezDecisionTest, NoRezClassAliveHoldsWhileThePartyIsStillFighting)
+{
+    auto party = BaseParty();
+    party[0].isDead = true;
+    party[1].isDead = true;
+    auto in = BaseInputs();
+    in.partyEngaged = true;
+    Result const r = Decide(in, party);
+    EXPECT_EQ(r.outcome, Outcome::Hold);
+    EXPECT_EQ(r.reason, Reason::NoRezzerInFight);
+    // A corpse is still named, so the hold can be announced against someone.
+    EXPECT_GE(r.targetIdx, 0);
+    // Nobody is elected to rez — there is nobody who can.
+    EXPECT_EQ(r.rezzerIdx, -1);
+}
+
+// And the hold is only a deferral: the instant the fight ends the verdict is the
+// classic disable again, so the run still terminates rather than idling to the
+// no-progress watchdog.
+TEST(DcRezDecisionTest, NoRezClassDisablesOnceTheFightEnds)
+{
+    auto party = BaseParty();
+    party[0].isDead = true;
+    party[1].isDead = true;
+    auto in = BaseInputs();
+    in.partyEngaged = true;
+    EXPECT_EQ(Decide(in, party).reason, Reason::NoRezzerInFight);
+    in.partyEngaged = false;
+    Result const r = Decide(in, party);
+    EXPECT_EQ(r.outcome, Outcome::Disable);
+    EXPECT_EQ(r.reason, Reason::NoRezzer);
+}
+
+// ---- the NoRezzer floor ---------------------------------------------------------
+//
+// The hold above was still one tick wide, and one tick of quiet is not a fight
+// ending. Three shapes, all from tp-20260808-162331-1, where 8 of 20 failures were
+// this branch and every one had 2-4 members alive.
+
+namespace
+{
+    // The party from the two thrown-away Kael'thas runs: sole rezzer dead, four
+    // alive, nothing swinging, everyone still carrying the boss's combat flag.
+    Inputs FloorInputs()
+    {
+        Inputs in = BaseInputs();
+        in.noRezzerQuietGraceMs = 12000;
+        in.noRezzerHoldMaxMs = 60000;
+        in.noRezzerSinceMs = in.nowMs;
+        return in;
+    }
+
+    std::vector<Member> NoRezzerParty()
+    {
+        auto party = BaseParty();
+        party[0].isDead = true;  // the rez-class tank
+        party[1].isDead = true;  // the rez-class healer
+        return party;
+    }
+}
+
+// Kael'thas spends 11 seconds immune, passive and summonless at 1 HP before he
+// kills himself. For all 11 the party reads unengaged while still flagged by him —
+// and tr-20260808-162337-13 was disabled two seconds after its tank was logged
+// kiting him through gravity lapse, four members alive, three bosses down.
+TEST(DcRezDecisionTest, NoRezClassHoldsWhileSurvivorsAreStillCombatFlagged)
+{
+    auto in = FloorInputs();
+    in.partyEngaged = false;
+    in.anySurvivorCombatFlagged = true;
+    Result const r = Decide(in, NoRezzerParty());
+    EXPECT_EQ(r.outcome, Outcome::Hold);
+    EXPECT_EQ(r.reason, Reason::NoRezzerInFight);
+}
+
+// Unflagged too, but only just: the silence has to LAST before it counts as the
+// fight being over.
+TEST(DcRezDecisionTest, NoRezClassHoldsUntilTheQuietHasHeldItsGrace)
+{
+    auto in = FloorInputs();
+    in.noRezzerQuietSinceMs = in.nowMs - 11999;
+    EXPECT_EQ(Decide(in, NoRezzerParty()).reason, Reason::NoRezzerInFight);
+
+    in.noRezzerQuietSinceMs = in.nowMs - 12000;
+    Result const r = Decide(in, NoRezzerParty());
+    EXPECT_EQ(r.outcome, Outcome::Disable);
+    EXPECT_EQ(r.reason, Reason::NoRezzer);
+}
+
+// A quiet clock that never started (the glue only stamps it once the party reads
+// both unengaged and unflagged) must not read as "quiet for long enough".
+TEST(DcRezDecisionTest, NoRezClassHoldsWhileTheQuietClockIsUnarmed)
+{
+    auto in = FloorInputs();
+    in.noRezzerQuietSinceMs = 0;
+    EXPECT_EQ(Decide(in, NoRezzerParty()).reason, Reason::NoRezzerInFight);
+}
+
+// ...and the flag hold is CAPPED, so a flag nothing ever clears degrades to the
+// old verdict instead of hanging the run open forever.
+TEST(DcRezDecisionTest, NoRezClassDisablesOnceTheFlagHoldHitsItsCeiling)
+{
+    auto in = FloorInputs();
+    in.anySurvivorCombatFlagged = true;
+    in.noRezzerSinceMs = in.nowMs - 59999;
+    EXPECT_EQ(Decide(in, NoRezzerParty()).reason, Reason::NoRezzerInFight);
+
+    in.noRezzerSinceMs = in.nowMs - 60000;
+    Result const r = Decide(in, NoRezzerParty());
+    EXPECT_EQ(r.outcome, Outcome::Disable);
+    EXPECT_EQ(r.reason, Reason::NoRezzer);
+}
+
+// The ceiling outranks an active fight too — otherwise a party permanently pinned
+// by something it cannot kill would hold a dead run open indefinitely.
+TEST(DcRezDecisionTest, TheFlagHoldCeilingOutranksEngagement)
+{
+    auto in = FloorInputs();
+    in.partyEngaged = true;
+    in.noRezzerSinceMs = in.nowMs - 60000;
+    EXPECT_EQ(Decide(in, NoRezzerParty()).reason, Reason::NoRezzer);
+}
+
+// With the floor left at its defaults (both graces 0) the branch behaves exactly
+// as it did before it existed — the property every pre-floor test above relies on.
+TEST(DcRezDecisionTest, TheFloorIsInertAtItsDefaults)
+{
+    auto in = BaseInputs();
+    in.partyEngaged = false;
+    EXPECT_EQ(Decide(in, NoRezzerParty()).reason, Reason::NoRezzer);
+}
+
+// A full wipe outranks the in-fight hold: with nobody alive there is no fight to
+// finish, and Reason::Wipe is reached before the rezzer election either way.
+TEST(DcRezDecisionTest, AFullWipeStillDisablesEvenIfFlaggedEngaged)
+{
+    auto party = BaseParty();
+    for (auto& m : party)
+        m.isDead = true;
+    auto in = BaseInputs();
+    in.partyEngaged = true;
+    Result const r = Decide(in, party);
+    EXPECT_EQ(r.outcome, Outcome::Disable);
+    EXPECT_EQ(r.reason, Reason::Wipe);
+}
+
 // ---- the recovery clock ---------------------------------------------------------
 
 TEST(DcRezDecisionTest, TimeoutExpiryDisables)
@@ -301,4 +451,116 @@ TEST(DcRezDecisionTest, SoloDeadTankIsAWipe)
     Result const r = Decide(BaseInputs(), {solo});
     EXPECT_EQ(r.outcome, Outcome::Disable);
     EXPECT_EQ(r.reason, Reason::Wipe);
+}
+
+// ---- the instance refuses the spell ----------------------------------------------
+//
+// Spell::CheckCast refuses every resurrect cast inside a dungeon reporting an
+// encounter in progress. The Violet Hold holds that state for the entire run, so
+// the elected rezzer stood over a corpse re-casting into the refusal until the 90s
+// budget expired: 18 of the first 72 runs of tp-20260827-065217-2 ended as
+// "Couldn't get X resurrected in time" with the party alive and the hold draining.
+
+TEST(DcRezDecisionTest, BlockedHoldsWhileTheBlockMightStillLift)
+{
+    auto party = BaseParty();
+    party[2].isDead = true;
+    Inputs in = BaseInputs();
+    in.rezBlocked = true;
+    in.blockedSinceMs = in.nowMs - 5000;
+    in.blockedHoldMaxMs = 20000;
+    Result const r = Decide(in, party);
+    EXPECT_EQ(r.outcome, Outcome::Hold);
+    EXPECT_EQ(r.reason, Reason::BlockedWaiting);
+    // A corpse is named so the status panel has someone to name; nobody is elected,
+    // because electing a rezzer is what arms the cast rung that cannot succeed.
+    EXPECT_EQ(r.targetIdx, 2);
+    EXPECT_EQ(r.rezzerIdx, -1);
+}
+
+TEST(DcRezDecisionTest, BlockedStandsDownOnceTheWaitRunsOut)
+{
+    auto party = BaseParty();
+    party[2].isDead = true;
+    Inputs in = BaseInputs();
+    in.rezBlocked = true;
+    in.blockedSinceMs = in.nowMs - 20000;
+    in.blockedHoldMaxMs = 20000;
+    Result const r = Decide(in, party);
+    // Neither hold nor disable: the party is alive and the dungeon is winnable.
+    EXPECT_EQ(r.outcome, Outcome::None);
+    EXPECT_EQ(r.reason, Reason::BlockedStandDown);
+}
+
+TEST(DcRezDecisionTest, BlockedWithNoWaitConfiguredStandsDownImmediately)
+{
+    auto party = BaseParty();
+    party[2].isDead = true;
+    Inputs in = BaseInputs();
+    in.rezBlocked = true;  // blockedHoldMaxMs left at 0
+    Result const r = Decide(in, party);
+    EXPECT_EQ(r.outcome, Outcome::None);
+    EXPECT_EQ(r.reason, Reason::BlockedStandDown);
+}
+
+TEST(DcRezDecisionTest, AnUnstampedBlockClockStillHolds)
+{
+    // The glue stamps the clock a tick behind the first blocked read; until it does,
+    // the block is treated as brand new rather than as already expired.
+    auto party = BaseParty();
+    party[2].isDead = true;
+    Inputs in = BaseInputs();
+    in.rezBlocked = true;
+    in.blockedSinceMs = 0;
+    in.blockedHoldMaxMs = 20000;
+    Result const r = Decide(in, party);
+    EXPECT_EQ(r.outcome, Outcome::Hold);
+    EXPECT_EQ(r.reason, Reason::BlockedWaiting);
+}
+
+TEST(DcRezDecisionTest, BlockedOutranksTheNoRezzerDisable)
+{
+    // Both rez classes are down. Normally that ends the run — but while the instance
+    // forbids the spell, which classes are still standing is not a fact about
+    // anything, and the survivors can still finish the dungeon (99 of 100 heroic runs
+    // of tp-20260826-233949-1 did, having never needed a rez at all).
+    auto party = BaseParty();
+    party[0].isDead = true;
+    party[1].isDead = true;
+    Inputs in = BaseInputs();
+    in.rezBlocked = true;
+    in.blockedSinceMs = in.nowMs - 30000;
+    in.blockedHoldMaxMs = 20000;
+    Result const r = Decide(in, party);
+    EXPECT_EQ(r.outcome, Outcome::None);
+    EXPECT_EQ(r.reason, Reason::BlockedStandDown);
+}
+
+TEST(DcRezDecisionTest, ABlockedFullWipeIsStillAWipe)
+{
+    auto party = BaseParty();
+    for (Member& m : party)
+        m.isDead = true;
+    Inputs in = BaseInputs();
+    in.rezBlocked = true;
+    in.blockedSinceMs = in.nowMs - 30000;
+    in.blockedHoldMaxMs = 20000;
+    Result const r = Decide(in, party);
+    EXPECT_EQ(r.outcome, Outcome::Disable);
+    EXPECT_EQ(r.reason, Reason::Wipe);
+}
+
+TEST(DcRezDecisionTest, TheBlockedBranchIsInertWhenNothingIsBlocked)
+{
+    // Nothing latches: the ordinary election is unchanged the moment the block lifts.
+    auto party = BaseParty();
+    party[2].isDead = true;
+    Inputs in = BaseInputs();
+    in.rezBlocked = false;
+    in.blockedSinceMs = in.nowMs - 30000;  // stale stamp the glue has yet to clear
+    in.blockedHoldMaxMs = 20000;
+    Result const r = Decide(in, party);
+    EXPECT_EQ(r.outcome, Outcome::Hold);
+    EXPECT_EQ(r.reason, Reason::Recovering);
+    EXPECT_EQ(r.rezzerIdx, 1);
 }

@@ -35,6 +35,25 @@ public:
     uint32 GetType() const override { return STRATEGY_TYPE_COMBAT; }
     void InitTriggers(std::vector<TriggerNode*>& triggers) override;
     void InitMultipliers(std::vector<Multiplier*>& multipliers) override;
+
+    // TARGET SELECTION, and the one place DC reaches into it.
+    //
+    // GatherStrategyTargetExclusions walks EVERY strategy on the bot's combat
+    // engine — not a hardcoded list of raid strategies — so overriding this pair
+    // here gives dungeon-clear the same authority over what the raid shoots that
+    // `moltencore` and `karazhan` have, without a line of mod-playerbots. That is
+    // what lets an encounter DC drives keep its combat guard next to the driver
+    // that needs it (Razorgore: killing him before the eggs are gone instakills
+    // the raid). The rows live in Data/DcTargetExclusionRegistry.
+    //
+    // HasTargetExclusions is the cheap gate mod-playerbots caches per engine, and
+    // it is deliberately MAP-KEYED rather than a flat `true`: a flat true makes
+    // every DC bot on every map rebuild its combat strategy-name list on every
+    // target pick. It stays fresh because the cache is recomputed on every
+    // strategy add/remove and ApplyInstanceStrategies does both on every map
+    // change.
+    void AppendTargetExclusions(GuidSet& exclusions, TargetValueExclusionType type) override;
+    bool HasTargetExclusions() const override;
 };
 
 #endif

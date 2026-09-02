@@ -58,6 +58,12 @@ EventBuilder& EventBuilder::Persistent()
     return *this;
 }
 
+EventBuilder& EventBuilder::OwnsThePull()
+{
+    _ev.ownsThePull = true;
+    return *this;
+}
+
 EventBuilder& EventBuilder::DrivesInCombat()
 {
     _ev.drivesInCombat = true;
@@ -67,6 +73,12 @@ EventBuilder& EventBuilder::DrivesInCombat()
 EventBuilder& EventBuilder::StepsOwnMovement()
 {
     _ev.stepsOwnMovement = true;
+    return *this;
+}
+
+EventBuilder& EventBuilder::EncounterActive()
+{
+    _ev.encounterActive = true;
     return *this;
 }
 
@@ -121,6 +133,13 @@ EventBuilder& EventBuilder::WaitTargetStill()
     return *this;
 }
 
+EventBuilder& EventBuilder::ReportUse()
+{
+    if (!_ev.steps.empty())
+        _ev.steps.back().reportUse = true;
+    return *this;
+}
+
 EventBuilder& EventBuilder::MoveTo(float x, float y, float z, float radius)
 {
     EventStep& s = Add(EventStepKind::MoveTo);
@@ -164,6 +183,26 @@ EventBuilder& EventBuilder::MoveToHoldUntilInstanceData(float x, float y, float 
     s.radius = radius;
     s.instanceDataId = static_cast<int32>(dataId);  // >= 0 => instance-data gate
     s.instanceDataMin = minValue;
+    return *this;
+}
+
+EventBuilder& EventBuilder::MoveToHoldUntilPersistentData(float x, float y, float z, float radius,
+                                                          uint32 dataId, uint32 minValue)
+{
+    EventStep& s = Add(EventStepKind::MoveTo);
+    s.x = x;
+    s.y = y;
+    s.z = z;
+    s.radius = radius;
+    s.persistentDataId = static_cast<int32>(dataId);  // >= 0 => persistent-data gate
+    s.persistentDataMin = minValue;
+    return *this;
+}
+
+EventBuilder& EventBuilder::WhileHolding(uint32 hookId)
+{
+    if (!_ev.steps.empty())
+        _ev.steps.back().hookId = hookId;
     return *this;
 }
 
@@ -239,6 +278,13 @@ EventBuilder& EventBuilder::KillCreatureEngage(uint32 creatureEntry, uint32 coun
     s.count = count;
     s.radius = searchRadius;
     s.engage = true;
+    return *this;
+}
+
+EventBuilder& EventBuilder::EngageOnlyWhenActive()
+{
+    if (!_ev.steps.empty())
+        _ev.steps.back().engageOnlyWhenActive = true;
     return *this;
 }
 
@@ -382,6 +428,17 @@ namespace
             RegisterArcatrazEvents(t);
             RegisterSethekkHallsEvents(t);
             RegisterBlackMorassEvents(t);
+            RegisterUtgardeKeepEvents(t);
+            RegisterNexusEvents(t);
+            RegisterAzjolNerubEvents(t);
+            RegisterAhnkahetEvents(t);
+            RegisterDrakTharonKeepEvents(t);
+            RegisterGundrakEvents(t);
+            RegisterMoltenCoreEvents(t);
+            RegisterVioletHoldEvents(t);
+            RegisterBlackwingLairEvents(t);
+            RegisterHallsOfStoneEvents(t);
+            RegisterHallsOfLightningEvents(t);
             return t;
         }();
         return kEvents;
@@ -420,12 +477,12 @@ std::vector<DungeonEvent const*> DungeonEventRegistry::Conditional(uint32 mapId)
     return out;
 }
 
-std::vector<DungeonEvent const*> DungeonEventRegistry::Conditional(uint32 mapId, Difficulty difficulty)
+std::vector<DungeonEvent const*> DungeonEventRegistry::Conditional(uint32 mapId, DcDiffKey key)
 {
     std::vector<DungeonEvent const*> out;
     for (DungeonEvent const& e : EventTable())
         if (e.mapId == mapId && e.activation == EventActivation::Conditional &&
-            DcGateMatches(e.gate, difficulty))
+            DcGateMatches(e.gate, key))
             out.push_back(&e);
     return out;
 }

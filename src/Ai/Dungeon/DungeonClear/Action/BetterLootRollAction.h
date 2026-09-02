@@ -34,9 +34,17 @@
  * AFTER playerbots builds its own, this creator wins for every bot of every
  * class.
  *
- * Gated by the config flag DungeonClear.BetterLootRolling (default off). When
- * the flag is off — or the bot is not a self-bot (it has a separate human
- * master) — this behaves exactly like the stock LootRollAction.
+ * Gated by the config flag DungeonClear.BetterLootRolling (default off), which
+ * leaves this behaving exactly like the stock LootRollAction. With the flag on
+ * there are two cases and they do not overlap: a self-bot casts no vote at all
+ * (improvement #1), and every other bot gets improvement #2 on the over-level
+ * items and stock's own answer on everything else.
+ *
+ * Execute votes on every pending roll it is given, matching stock since
+ * mod-playerbots #2496 — which replaced "one item per Execute" with all of
+ * them. Matching matters here because, unlike stock, this action runs off a
+ * per-tick trigger (improvement #3): one item per tick would hold the action
+ * slot for as many ticks as the boss dropped items.
  */
 
 #ifndef _DUNGEONCLEAR_BETTERLOOTROLLACTION_H
@@ -45,6 +53,48 @@
 #include "LootRollAction.h"
 
 class PlayerbotAI;
+class Player;
+class Roll;
+
+// The ONE predicate for "this bot has a vote on this roll that the core will
+// actually record". Both the per-tick trigger and the action loop above call
+// it, and that shared call is the point: when the two drifted apart the run
+// died outright.
+//
+// tr-20260831-123946-18 (Gundrak, tank Olinigo) is the case. The trigger fired
+// on any unemitted vote whose item template resolved; the action dutifully
+// called Group::CountRollVote, which REFUSED the vote at Group.cpp:1516 —
+//
+//     if (roll->getLoot())
+//         if (roll->getLoot()->items.empty())
+//             return false;          // returns BEFORE recording the vote
+//
+// — so the vote stayed NOT_EMITED_YET, the trigger stayed hot, and the action
+// returned true every tick. At DcRel::LootRollPending (95) that outranks the
+// whole driving ladder, so `dungeon clear advance` (15) was PUSHED on all 3142
+// ticks of the freeze and executed on NONE of them. The party stood still for
+// ten minutes with every watchdog reading zero, because the watchdogs live
+// inside the action that never ran.
+//
+// The trigger already mirrored the action's OTHER no-vote path (an item
+// template that does not resolve) with the note that such a roll "must not fire
+// the trigger every tick forever". This is that same rule, one guard short —
+// which is why the guard now lives in one place instead of two.
+namespace DcLootRoll
+{
+    // Mirrors Group::CountRollVote's accept conditions, in ITS dependency order:
+    //   * the roll is still valid — CountRollVote resolves it through
+    //     Group::GetRoll, which requires isValid() (Group.cpp:2680), and an
+    //     invalidated roll stays in the group's list looking answerable, and
+    //   * the bot is a voter on this roll and has not voted yet, and
+    //   * the roll's loot object, IF it has one, still holds items, and
+    //   * the item template resolves (the action skips the roll otherwise).
+    // A null Loot* on a VALID roll is deliberately votable — CountRollVote only
+    // rejects a loot object that exists and is empty. On an invalidated roll a
+    // null Loot* means something else entirely, which is why validity is tested
+    // first rather than inferred from the pointer.
+    bool IsVotablePendingRoll(Roll* roll, Player* bot);
+}
 
 class DungeonClearBetterLootRollAction : public LootRollAction
 {

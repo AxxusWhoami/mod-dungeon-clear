@@ -31,6 +31,7 @@ namespace DcTestPlan
         bool heroic = false;           // children run at DUNGEON_DIFFICULTY_HEROIC
         std::uint32_t seedBase = 0;    // 0 = random comp per run;
                                        // N = child i replays seed N+i
+        std::uint32_t size = 0;        // 0 = classic 5-man; 2-40 = raid comp size
         // Gear ceiling every child run is geared to. Plan-wide rather than
         // per-child on purpose: a campaign exists to compare runs against each
         // other, which only means anything at one ceiling.
@@ -112,7 +113,7 @@ namespace DcTestPlan
     }
 
     // `.dc test plan start <token> [heroic] total=N [concurrent=N] [level=N]
-    // [seed=N] [ilvl=N|none] [quality=N|epic|…]`. Fills the whole Spec except
+    // [seed=N] [size=N] [ilvl=N|none] [quality=N|epic|…]`. Fills the whole Spec except
     // planId. ok is false with a usage-shaped err on a missing token/total, a
     // duplicate bare word, or a malformed key=value.
     struct ParseResult

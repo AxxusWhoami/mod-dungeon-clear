@@ -114,29 +114,18 @@ namespace DcPullDecisionIo
     {
         static std::mutex mtx;
         static std::ofstream file;
-        static unsigned writesSinceFlush = 0;
-        std::string const line = ToJsonl(PullDecisionRecord{guid, tick, obs, verdict});
+        static bool opened = false;
 
         std::lock_guard<std::mutex> lock(mtx);
-        if (!file.is_open())
+        if (!opened)
         {
-            file.clear();
             file.open(CapturePath(), std::ios::out | std::ios::app);
+            opened = true;
         }
         if (!file.is_open())
             return;
 
-        file << line << '\n';
-        if (!file)
-        {
-            file.close();
-            writesSinceFlush = 0;
-            return;
-        }
-        if (++writesSinceFlush >= 64)
-        {
-            file.flush();
-            writesSinceFlush = 0;
-        }
+        file << ToJsonl(PullDecisionRecord{guid, tick, obs, verdict}) << '\n';
+        file.flush();
     }
 }

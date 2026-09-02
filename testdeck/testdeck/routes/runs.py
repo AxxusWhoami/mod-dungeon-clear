@@ -146,6 +146,9 @@ class RunStartRequest(BaseModel):
     heroic: bool = False
     level: int = 0
     seed: int = 0
+    # Party size: 0 = the classic 5-man comp; 2..40 fields a raid comp.
+    # Only meaningful for raid rows (the catalogue marks them "raid": true).
+    size: int = 0
     # Gear ceiling: 0 = inherit the server's AiPlayerbot.AutoGear* values,
     # -1 = no limit, >0 = that item level. quality is 0 (inherit) or 1..5.
     ilvl: int = 0
@@ -160,7 +163,7 @@ async def api_testruns_start(req: RunStartRequest, request: Request):
     in — the start did NOT happen and the reply carries pending=true; the
     frontend retries, or falls back to a plan of total=1 (plans wait the
     driver out server-side)."""
-    from .plans import catalogue_rows, check_dungeon, check_gear
+    from .plans import catalogue_rows, check_dungeon, check_gear, check_size
 
     _cat, rows = await catalogue_rows()
     check_dungeon(rows, req.dungeon, req.heroic)
@@ -168,11 +171,14 @@ async def api_testruns_start(req: RunStartRequest, request: Request):
         raise HTTPException(400, "level must be 0..80")
     if req.seed < 0:
         raise HTTPException(400, "seed must be >= 0")
+    check_size(rows, req.dungeon, req.size)
     check_gear(rows, req.dungeon, req.heroic, req.ilvl, req.quality)
 
     cmd = f".dc test start {req.dungeon}"
     if req.heroic:
         cmd += " heroic"
+    if req.size:
+        cmd += f" size={req.size}"
     if req.level:
         cmd += f" level={req.level}"
     if req.seed:

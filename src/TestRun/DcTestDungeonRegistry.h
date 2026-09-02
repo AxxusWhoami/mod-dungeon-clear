@@ -33,11 +33,10 @@ namespace DcTestDungeonRegistry
         std::uint32_t recommendedLevel;  // default bot level for the run
         char const* wing;         // wing label for split maps, "" otherwise
         // Default bot level for a HEROIC run, and the "heroic offered" flag in
-        // one: 0 = no heroic mode for this row. TBC rows carry 70. WotLK rows
-        // deliberately stay 0 until their heroic content pass lands (the
-        // TBC-only scope gate — see the heroic-dungeons plan doc); flipping
-        // them to 80 is the whole enablement. Trailing member so the classic /
-        // WotLK aggregate rows need no edit (value-initialized to 0).
+        // one: 0 = no heroic mode for this row. TBC rows carry 70, WotLK rows
+        // 80. Classic dungeons have no heroic mode at all, so they stay 0 and
+        // this stays a trailing member — those rows need no edit
+        // (value-initialized).
         std::uint32_t heroicLevel = 0;
     };
 
@@ -47,6 +46,14 @@ namespace DcTestDungeonRegistry
     Row const* Find(std::string const& tokenOrMapId);
 
     std::vector<Row> const& All();
+
+    // Map.dbc's own expansion id for a row's map: 0 classic, 1 TBC, 2 WotLK.
+    // Read from the DBC rather than carried as a hand-typed column, so the
+    // catalogue cannot drift from the client build the server actually loaded
+    // — and a row added to the wrong section of the table still reports the
+    // truth. 0 for a map the store does not know.
+    inline constexpr std::uint32_t kExpansionWrath = 2;
+    std::uint32_t ExpansionOf(Row const& row);
 
     // Dump the catalogue (plus the test-run caps the dashboard's start form
     // needs) to dc_test_dungeons.json in the worldserver cwd — the same

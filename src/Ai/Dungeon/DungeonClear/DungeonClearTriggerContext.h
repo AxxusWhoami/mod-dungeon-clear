@@ -47,6 +47,10 @@ public:
         creators["dungeon clear break stuck combat"] = &DungeonClearTriggerContext::break_stuck_combat;
         creators["dungeon clear heal reposition"] = &DungeonClearTriggerContext::heal_reposition;
         creators["dungeon clear hazard vacate"] = &DungeonClearTriggerContext::hazard_vacate;
+        creators["dungeon clear razorgore orb"] = &DungeonClearTriggerContext::razorgore_orb;
+        creators["dungeon clear razorgore camp"] = &DungeonClearTriggerContext::razorgore_camp;
+        creators["dungeon clear transit pack"] = &DungeonClearTriggerContext::transit_pack;
+        creators["dungeon clear hold fire"] = &DungeonClearTriggerContext::hold_fire;
         creators["dungeon clear hakkar suppressor"] = &DungeonClearTriggerContext::hakkar_suppressor;
         creators["dungeon clear hakkar flame"] = &DungeonClearTriggerContext::hakkar_flame;
         creators["dungeon clear hakkar loot blood"] = &DungeonClearTriggerContext::hakkar_loot_blood;
@@ -98,6 +102,10 @@ private:
     static Trigger* break_stuck_combat(PlayerbotAI* ai) { return new DungeonClearBreakStuckCombatTrigger(ai); }
     static Trigger* heal_reposition(PlayerbotAI* ai) { return new DungeonClearHealRepositionTrigger(ai); }
     static Trigger* hazard_vacate(PlayerbotAI* ai) { return new DungeonClearHazardVacateTrigger(ai); }
+    static Trigger* razorgore_orb(PlayerbotAI* ai) { return new DungeonClearRazorgoreOrbTrigger(ai); }
+    static Trigger* razorgore_camp(PlayerbotAI* ai) { return new DungeonClearRazorgoreCampTrigger(ai); }
+    static Trigger* transit_pack(PlayerbotAI* ai) { return new DungeonClearTransitPackTrigger(ai); }
+    static Trigger* hold_fire(PlayerbotAI* ai) { return new DungeonClearHoldFireTrigger(ai); }
     static Trigger* hakkar_suppressor(PlayerbotAI* ai) { return new DungeonClearHakkarSuppressorTrigger(ai); }
     static Trigger* hakkar_flame(PlayerbotAI* ai) { return new DungeonClearHakkarFlameTrigger(ai); }
     static Trigger* hakkar_loot_blood(PlayerbotAI* ai) { return new DungeonClearHakkarLootBloodTrigger(ai); }

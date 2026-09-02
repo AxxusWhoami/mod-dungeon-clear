@@ -83,11 +83,8 @@ namespace
     std::mutex g_dcActiveTanksMutex;
 
     // Server-side observer for changed STATUS frames (the `.dc test` harness).
-    // Registered once at module startup, before any run exists. Guarded by a
-    // mutex so a late registration (or a future swap) can't race the world-tick
-    // read — the API doesn't enforce startup-only, so the lock does.
+    // Registered once at module startup, before any run exists — not guarded.
     DcStatusPublisher::StatusObserver g_dcStatusObserver;
-    std::mutex g_dcStatusObserverMutex;
 
     // Throttle accumulator for the world-tick detector (ms).
     uint32 g_dcPushAccumMs = 0;
@@ -459,9 +456,18 @@ void DcStatusPublisher::UnmarkActiveTank(ObjectGuid tank)
     std::lock_guard<std::mutex> lock(g_dcActiveTanksMutex);
     g_dcActiveTanks.erase(tank);
 }
+
+std::vector<ObjectGuid> DcStatusPublisher::ActiveTanks()
+{
+    std::vector<ObjectGuid> out;
+    std::lock_guard<std::mutex> lock(g_dcActiveTanksMutex);
+    out.reserve(g_dcActiveTanks.size());
+    for (auto const& kv : g_dcActiveTanks)
+        out.push_back(kv.first);
+    return out;
+}
 void DcStatusPublisher::SetStatusObserver(StatusObserver observer)
 {
-    std::lock_guard<std::mutex> lock(g_dcStatusObserverMutex);
     g_dcStatusObserver = std::move(observer);
 }
 void DcStatusPublisher::TickStatusPushes(uint32 diff)
@@ -545,13 +551,8 @@ void DcStatusPublisher::TickStatusPushes(uint32 diff)
         if (emitStatus)
         {
             SendAddonMessage(botAI, payload);
-            StatusObserver observer;
-            {
-                std::lock_guard<std::mutex> lock(g_dcStatusObserverMutex);
-                observer = g_dcStatusObserver;
-            }
-            if (observer)
-                observer(guid, payload);
+            if (g_dcStatusObserver)
+                g_dcStatusObserver(guid, payload);
         }
         if (emitBosses)
             // Reuse the existing boss-list action (silent) so the BOSS_START /

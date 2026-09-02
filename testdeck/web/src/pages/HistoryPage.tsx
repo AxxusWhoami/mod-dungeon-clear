@@ -251,6 +251,11 @@ function RunsTab() {
                 {r.heroic && (
                   <span className="text-xs text-fuchsia-300">heroic</span>
                 )}
+                {(r.size ?? 0) > 5 && (
+                  <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-xs text-amber-300">
+                    {r.size}-man
+                  </span>
+                )}
                 {r.roster && (
                   <span className="rounded bg-sky-500/15 px-1.5 py-0.5 text-xs text-sky-300">
                     roster
@@ -332,6 +337,7 @@ function RerunButton({
       "Every one of them must be offline right now."
     : `Start a new run at ${where} with this run's setup — level ` +
       `${spec.level || "default"}, comp seed ${spec.seed || "random"}, ` +
+      (spec.size ? `size ${spec.size}, ` : "") +
       `${describeGear(spec)}. It gets its own run id.`;
 
   const rerun = async () => {

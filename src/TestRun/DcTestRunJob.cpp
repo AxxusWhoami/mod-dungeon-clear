@@ -7,12 +7,12 @@
 
 #include <algorithm>
 #include <array>
-#include <atomic>
 #include <ctime>
 #include <optional>
 #include <set>
 
 #include "CharacterCache.h"
+#include "DBCStores.h"
 #include "Chat.h"
 #include "Creature.h"
 #include "Group.h"
@@ -52,10 +52,17 @@
 namespace
 {
     // Stage timeouts: a setup stage overrunning these is itself the failure.
+    // Setup-stage bases; the per-run bound is Scaled(base) = base + 3s per
+    // member (raid-support Plan D): spawn/provision/teleport work is issued a
+    // bot at a time (provisioning literally 1 bot/tick globally), so a 25-man
+    // legitimately needs ~5x a 5-man's clock while a 5-man keeps roughly the
+    // old bounds.
     constexpr uint32 SPAWN_TIMEOUT_MS = 60 * 1000;
     constexpr uint32 PROVISION_TIMEOUT_MS = 60 * 1000;
     constexpr uint32 GROUP_TIMEOUT_MS = 30 * 1000;
-    constexpr uint32 TELEPORT_TIMEOUT_MS = 30 * 1000;
+    // Covers BOTH teleport waves (leader, then the rest — see TickTeleporting),
+    // and the stage clock does not restart between them.
+    constexpr uint32 TELEPORT_TIMEOUT_MS = 45 * 1000;
     constexpr uint32 START_TIMEOUT_MS = 20 * 1000;
 
     constexpr uint32 MONITOR_STEP_MS = 1000;
@@ -73,13 +80,13 @@ namespace
 
     std::string MakeRunId()
     {
-        static std::atomic<uint32> counter{0};
+        static uint32 counter = 0;
         std::time_t const now = std::time(nullptr);
         std::tm tmBuf{};
         localtime_r(&now, &tmBuf);
         char buf[32];
         std::strftime(buf, sizeof(buf), "tr-%Y%m%d-%H%M%S", &tmBuf);
-        return std::string(buf) + "-" + std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
+        return std::string(buf) + "-" + std::to_string(++counter);
     }
 
     char const* ClassToken(uint8 classId)
@@ -225,6 +232,8 @@ void DcTestRunJob::InitIdentity(Player* gm, DcTestDungeonRegistry::Row const& ro
     _heroic = heroic;
     _level = level;
     _gmGuid = gm->GetGUID();
+    MapEntry const* mapEntry = sMapStore.LookupEntry(_mapId);
+    _isRaidMap = mapEntry && mapEntry->IsRaid();
 
     _limits.pauseGraceMs = DcSettings::GetUInt(ObjectGuid::Empty, "TestRun.PauseGraceS") * 1000;
     _limits.stallGraceMs = DcSettings::GetUInt(ObjectGuid::Empty, "TestRun.StallGraceS") * 1000;
@@ -249,7 +258,8 @@ void DcTestRunJob::InitIdentity(Player* gm, DcTestDungeonRegistry::Row const& ro
 }
 
 std::unique_ptr<DcTestRunJob> DcTestRunJob::Create(Player* gm, DcTestDungeonRegistry::Row const& row,
-                                                   uint32 levelOverride, uint32 seed, bool heroic,
+                                                   uint32 levelOverride, uint32 seed, uint32 size,
+                                                   bool heroic,
                                                    DcTestGearTiers::Spec const& gear,
                                                    std::unordered_set<ObjectGuid> const& reservedGuids,
                                                    std::string const& planId, std::string* err)
@@ -276,7 +286,27 @@ std::unique_ptr<DcTestRunJob> DcTestRunJob::Create(Player* gm, DcTestDungeonRegi
     job->_record.gearIlvl = job->_gear.ilvl;
     job->_record.gearQuality = job->_gear.quality;
 
-    std::array<DcTestComp::Slot, DcTestComp::kPartySize> const comp = DcTestComp::BuildComp(seed);
+    // Death knights are a Wrath class whose kit starts at 55, so they are on
+    // the table only for a WotLK row — and only when the run's LEVEL actually
+    // reaches the floor, because `level=N` can drop a WotLK run under it and
+    // the factory levels every test bot to whatever the run asked for.
+    DcTestComp::Roster const roster =
+        DcTestDungeonRegistry::ExpansionOf(row) >= DcTestDungeonRegistry::kExpansionWrath &&
+                level >= DcTestComp::kDeathKnightMinLevel
+            ? DcTestComp::Roster::WithDeathKnights
+            : DcTestComp::Roster::NoDeathKnights;
+
+    // size 0 keeps the classic 5-man draw (distinct classes) bit-for-bit; a
+    // requested size uses the quota'd raid comp (duplicates spread evenly).
+    std::vector<DcTestComp::Slot> comp;
+    if (size == 0)
+    {
+        auto const classic = DcTestComp::BuildComp(seed, roster);
+        comp.assign(classic.begin(), classic.end());
+    }
+    else
+        comp = DcTestComp::BuildComp(seed, size, roster);
+    job->_record.size = static_cast<uint32>(comp.size());
     for (DcTestComp::Slot const& c : comp)
     {
         Slot s;
@@ -332,9 +362,15 @@ std::unique_ptr<DcTestRunJob> DcTestRunJob::Create(Player* gm, DcTestDungeonRegi
         ObjectGuid guid = claim(slot.classId);
         if (!guid)
         {
-            for (DcTestComp::Slot const& alt : DcTestComp::RolePool(slot.role))
+            // Distinct-class substitution first; past 9 slots the distinct rule
+            // is impossible anyway, so a raid-sized run may substitute a class
+            // already in the party rather than fail the role.
+            bool const allowDuplicates = job->_slots.size() > 9;
+            for (DcTestComp::Slot const& alt : DcTestComp::RolePool(slot.role, roster))
             {
-                if (alt.classId == slot.classId || usedClasses.count(alt.classId))
+                if (alt.classId == slot.classId)
+                    continue;
+                if (!allowDuplicates && usedClasses.count(alt.classId))
                     continue;
                 guid = claim(alt.classId);
                 if (guid)
@@ -378,10 +414,12 @@ std::unique_ptr<DcTestRunJob> DcTestRunJob::CreateFromRoster(Player* gm,
                                                              std::string const& planId,
                                                              std::string* err)
 {
-    if (roster.size() != DcTestComp::kPartySize)
+    if (roster.size() < DcTestComp::kMinPartySize ||
+        roster.size() > DcTestComp::kMaxPartySize)
     {
         if (err)
-            *err = "a roster must be exactly " + std::to_string(DcTestComp::kPartySize) + " characters";
+            *err = "a roster must be " + std::to_string(DcTestComp::kMinPartySize) + "-" +
+                   std::to_string(DcTestComp::kMaxPartySize) + " characters";
         return nullptr;
     }
 
@@ -628,6 +666,10 @@ void DcTestRunJob::Tick(uint32 diff, bool& provisionBudget)
             break;
         case Stage::Monitoring:
             _monitorMs += diff;
+            // Every tick, NOT on the monitor's 1s step: a bot crosses a small
+            // trigger box in well under a second, and a relay that samples at
+            // 1Hz would silently skip the set-piece it exists to fire.
+            _areaTriggers.Tick(FindTank());
             _monitorAccumMs += diff;
             if (_monitorAccumMs >= MONITOR_STEP_MS)
             {
@@ -660,7 +702,7 @@ void DcTestRunJob::TickSpawning()
         return;
     }
 
-    if (_stageMs >= SPAWN_TIMEOUT_MS)
+    if (_stageMs >= Scaled(SPAWN_TIMEOUT_MS))
     {
         if (_realChars)
         {
@@ -688,7 +730,7 @@ void DcTestRunJob::TickSpawning()
 
 void DcTestRunJob::TickProvisioning(bool& provisionBudget)
 {
-    if (_stageMs >= PROVISION_TIMEOUT_MS)
+    if (_stageMs >= Scaled(PROVISION_TIMEOUT_MS))
     {
         FailSetup("provisioning timed out");
         return;
@@ -954,7 +996,7 @@ void DcTestRunJob::TickGrouping()
         Player* tank = ObjectAccessor::FindPlayer(_slots[0].guid);
         if (!tank)
         {
-            if (_stageMs >= GROUP_TIMEOUT_MS)
+            if (_stageMs >= Scaled(GROUP_TIMEOUT_MS))
                 FailSetup("tank vanished before grouping");
             return;
         }
@@ -974,6 +1016,13 @@ void DcTestRunJob::TickGrouping()
             return;
         }
         sGroupMgr->AddGroup(group);
+        // RAID party (raid-support Plan D): convert BEFORE the sixth member —
+        // AddMember refuses on a full 5-man party group. Raid entry also
+        // REQUIRES a raid group (MapMgr enforces it), so any raid-map run
+        // converts even at size <= 5.
+        bool const raidGroup = _slots.size() > 5 || IsRaidMap();
+        if (raidGroup)
+            group->ConvertToRaid();
         for (std::size_t i = 1; i < _slots.size(); ++i)
         {
             Player* bot = ObjectAccessor::FindPlayer(_slots[i].guid);
@@ -984,8 +1033,27 @@ void DcTestRunJob::TickGrouping()
                 return;
             }
         }
-        group->SetDungeonDifficulty(_heroic ? DUNGEON_DIFFICULTY_HEROIC
-                                            : DUNGEON_DIFFICULTY_NORMAL);
+        if (raidGroup)
+        {
+            // Sub-groups round-robin (8 x 5 slots), and the leader flagged MAIN
+            // TANK so DC's leader election and playerbots' GetMainTankGuid agree
+            // by construction.
+            uint8 subGroup = 0;
+            for (std::size_t i = 0; i < _slots.size(); ++i)
+            {
+                group->ChangeMembersGroup(_slots[i].guid, subGroup);
+                subGroup = (subGroup + 1) % MAX_RAID_SUBGROUPS;
+            }
+            group->SetGroupMemberFlag(tank->GetGUID(), true, MEMBER_FLAG_MAINTANK);
+        }
+        if (IsRaidMap())
+            // Classic raids run at raid difficulty 0 (10-man normal); the
+            // heroic flag is a dungeon-mode concept and never reaches here for
+            // a raid row (the registry validation refuses it).
+            group->SetRaidDifficulty(RAID_DIFFICULTY_10MAN_NORMAL);
+        else
+            group->SetDungeonDifficulty(_heroic ? DUNGEON_DIFFICULTY_HEROIC
+                                                : DUNGEON_DIFFICULTY_NORMAL);
         _tankGuid = tank->GetGUID();
         _groupFormed = true;
     }
@@ -997,13 +1065,16 @@ void DcTestRunJob::TickGrouping()
         // Keep the GM (a real human Player) as each bot's playerbots MASTER, and
         // strip the stock follow-master strategy instead of nulling the master.
         //
-        // Why not masterless: HasRealPlayerMaster() gates the whole "a human is
-        // driving me" fast path in stock playerbots. With no real-player master,
+        // Why not masterless: the real-player-master gate governs the whole "a
+        // human is driving me" fast path in stock playerbots (pre-PR-2592 the
+        // removed HasRealPlayerMaster(); now the master satisfying
+        // IsRealPlayer(master) || IsSelfBot(master)). With no real-player master,
         // GetReactDelay() returns base*10 (1000ms vs 100ms) out of combat, so the
         // party thinks on a 1s beat between packs — test runs looked far slower
-        // and sloppier than a real human-led run. HasRealPlayerMaster() has no
-        // map/distance/visibility gate (it only checks the master pointer is a
-        // non-bot Player), so keeping the GM as master holds the fast path even
+        // and sloppier than a real human-led run. That gate has no
+        // map/distance/visibility check (it only checks the master pointer is a
+        // non-bot Player or a self-bot), so keeping the GM as master holds the
+        // fast path even
         // though the GM is invisible and outside the instance — the test now
         // mirrors a real run in every master-gated respect (react delay, AoE
         // avoidance, wait-for-attack), which is the point of a regression harness.
@@ -1031,7 +1102,7 @@ void DcTestRunJob::TickGrouping()
         return;
     }
 
-    if (_stageMs >= GROUP_TIMEOUT_MS)
+    if (_stageMs >= Scaled(GROUP_TIMEOUT_MS))
         FailSetup("group did not form");
 }
 
@@ -1046,6 +1117,15 @@ void DcTestRunJob::UnbindFromMap() const
         sInstanceSaveMgr->PlayerUnbindInstance(slot.guid, _mapId, DUNGEON_DIFFICULTY_NORMAL,
                                                /*deleteFromDB*/ true);
         sInstanceSaveMgr->PlayerUnbindInstance(slot.guid, _mapId, DUNGEON_DIFFICULTY_HEROIC,
+                                               /*deleteFromDB*/ true);
+        // Raid saves are PERMANENT once a boss dies (non-resettable; "reset all
+        // instances" skips raids), so one leaked bind poisons every later run
+        // of the map for that character. Cover the two raid-only difficulty
+        // values as well — raw 0/1 are already covered by the dungeon pair —
+        // deleteFromDB both. No-ops for maps/difficulties with no bind.
+        sInstanceSaveMgr->PlayerUnbindInstance(slot.guid, _mapId, RAID_DIFFICULTY_10MAN_HEROIC,
+                                               /*deleteFromDB*/ true);
+        sInstanceSaveMgr->PlayerUnbindInstance(slot.guid, _mapId, RAID_DIFFICULTY_25MAN_HEROIC,
                                                /*deleteFromDB*/ true);
     }
 }
@@ -1070,14 +1150,14 @@ bool DcTestRunJob::CheckInstanceBudget()
 
         // Mirror MapMgr::PlayerCannotEnter exactly, including its escape hatch:
         // a member still bound to an instance of this map is re-entering one it
-        // has already paid for, so the count check passes on the found id. A
-        // roster run has just unbound everybody, so the lookup misses and the id
-        // is 0 ("a brand-new instance") — but a pool run on normal difficulty
-        // keeps its bind, and hard-coding 0 here would refuse runs the core would
-        // have allowed.
+        // has already paid for, so the count check passes on the found id. Every
+        // run now unbinds before this point, so in practice the lookup misses and
+        // the id is 0 ("a brand-new instance") — the hatch is kept rather than
+        // hard-coding 0 so this stays a faithful mirror of the core's gate if a
+        // bind ever does survive.
         uint32 idToCheck = 0;
         if (InstanceSave* save = sInstanceSaveMgr->PlayerGetInstanceSave(
-                bot->GetGUID(), _mapId, bot->GetDifficulty(/*isRaid*/ false)))
+                bot->GetGUID(), _mapId, bot->GetDifficulty(IsRaidMap())))
             idToCheck = save->GetInstanceId();
 
         if (bot->CheckInstanceCount(idToCheck))
@@ -1102,30 +1182,78 @@ void DcTestRunJob::TickTeleporting()
             Player* bot = ObjectAccessor::FindPlayer(slot.guid);
             if (!bot)
             {
-                if (_stageMs >= TELEPORT_TIMEOUT_MS)
+                if (_stageMs >= Scaled(TELEPORT_TIMEOUT_MS))
                     FailSetup("bot vanished before teleport");
                 return;  // transient — retry next tick
             }
         }
-        // Heroic 5-man kills create PERMANENT saves (daily reset). A recycled
-        // pool bot still bound to a cleared heroic instance of this map would
-        // teleport into it and trip the stale-instance guard in TickStarting —
-        // shed any leftover heroic bind first so a fresh instance is created.
-        // (Normal 5-man saves are non-permanent and reset when the map empties,
-        // so they need no such hygiene.)
+
+        // Nobody may enter this dungeon FROM a dungeon. Two separate core
+        // behaviours make an instance-to-instance entry unsafe, and one trip out
+        // to the bind point defuses both:
         //
-        // A roster run unbinds BOTH difficulties instead: a real character can
-        // easily be sitting on a half-cleared normal save, and unlike the pool
-        // that is not merely untidy — the party would be dragged into the saved
-        // instance and the verdict's GetCompletedEncounterMask baseline would
-        // start with bosses already dead.
-        if (_realChars)
-            UnbindFromMap();
-        else if (_heroic)
-            for (Slot const& slot : _slots)
-                sInstanceSaveMgr->PlayerUnbindInstance(slot.guid, _mapId,
-                                                       DUNGEON_DIFFICULTY_HEROIC,
-                                                       /*deleteFromDB*/ true);
+        //   * A same-map TeleportTo is a NEAR teleport (Player::TeleportTo keys
+        //     the branch on map id alone). It moves the body but never
+        //     re-resolves which COPY the body is in, so a bot left inside a
+        //     stale instance of this very dungeon — which is exactly what a
+        //     worldserver restart mid-plan leaves behind — would "arrive"
+        //     without ever leaving that copy, dragging its cleared bosses into
+        //     our verdict.
+        //
+        //   * `m_InstanceValid` is cleared by Group::_homebindIfInstance for any
+        //     member pulled out of a group while standing in a dungeon — which
+        //     TickGrouping's pre-formation sweep does to every recycled pool bot
+        //     that logged in inside one. The ONLY place that ever sets it back is
+        //     HandleMoveWorldportAck, and only when the DESTINATION is not
+        //     instanced ("except if going to an instance inside an instance").
+        //     Carry it into the run and Player::UpdateHomebindTime repops the
+        //     member at the entrance graveyard exactly 60s later — the whole
+        //     party ends up outside, the DC strategy gate sees a bot no longer in
+        //     a dungeon, and the run dies as "Left the dungeon" barely a minute
+        //     in.
+        bool evicting = false;
+        for (Slot const& slot : _slots)
+            if (Player* bot = ObjectAccessor::FindPlayer(slot.guid))
+                if (Map const* map = bot->FindMap())
+                    if (map->IsDungeon())
+                    {
+                        evicting = true;
+                        if (!bot->IsBeingTeleported())
+                            bot->TeleportTo(bot->m_homebindMapId, bot->m_homebindX,
+                                            bot->m_homebindY, bot->m_homebindZ,
+                                            bot->GetOrientation());
+                    }
+        if (evicting)
+        {
+            if (_stageMs >= Scaled(TELEPORT_TIMEOUT_MS))
+                FailSetup("could not clear the party out of the dungeon it was already in");
+            return;  // retry next tick
+        }
+
+        // Every member sheds every bind for this map, both difficulties, on
+        // every run. A bind is what decides WHICH COPY of the map a teleport
+        // lands in (InstanceSaveMgr::PlayerGetDestinationInstanceId), so a
+        // leftover one drags the party into an instance somebody already
+        // cleared: the verdict's GetCompletedEncounterMask baseline starts with
+        // bosses dead and TickStarting refuses the run as stale.
+        //
+        // This used to be a roster-only sweep, with pool runs shedding only the
+        // permanent heroic saves on the theory that normal 5-man saves are
+        // non-permanent and reset themselves when the map empties. They do —
+        // eventually, and only if the map ever empties. A worldserver restart
+        // in the middle of a plan leaves the interrupted runs' rows sitting in
+        // character_instance, and the next plan's recycled pool bots walk
+        // straight back into those half-cleared copies. Unbinding
+        // unconditionally is a few guid-keyed deletes and removes the whole
+        // class of failure.
+        //
+        // The cost is real but small: re-entering a bound instance is free
+        // against AccountInstancesPerHour, and a fresh one is not, so a bot
+        // recycled through more runs than that cap in an hour will now be
+        // refused by name in CheckInstanceBudget rather than silently reusing a
+        // copy. The pool is far larger than any one plan, so that is a
+        // theoretical cost against a defect we have actually been paying.
+        UnbindFromMap();
 
         // Now that no member is bound, entering costs each account one of its
         // AccountInstancesPerHour slots — refuse by name here rather than let the
@@ -1133,20 +1261,72 @@ void DcTestRunJob::TickTeleporting()
         if (!CheckInstanceBudget())
             return;
 
-        for (Slot const& slot : _slots)
-            if (Player* bot = ObjectAccessor::FindPlayer(slot.guid))
-                bot->TeleportTo(_mapId, _x, _y, _z, _o);
+        // LEADER FIRST, ALONE. The destination copy is resolved per member at
+        // worldport-ack time from the GROUP LEADER's bind; with nobody bound
+        // that lookup returns 0, which means "mint a brand-new instance". Fire
+        // all five teleports at once and every member that resolves before the
+        // first one has actually been added to a map mints a copy of its own —
+        // we have watched ten parties scatter across twenty-four copies of the
+        // same map in a nine-second window, each tank alone or nearly so, the
+        // run then stalling forever on teammates it can never reach.
+        //
+        // Sending the tank by itself closes the window: once it is inside, its
+        // bind names the copy, and every later arrival resolves to that same id
+        // no matter how the acks interleave.
+        Player* const leader = FindTank();
+        if (!leader)
+        {
+            if (_stageMs >= Scaled(TELEPORT_TIMEOUT_MS))
+                FailSetup("tank vanished before teleport");
+            return;
+        }
+        leader->TeleportTo(_mapId, _x, _y, _z, _o);
         _teleportIssued = true;
     }
 
+    // Wave 1 — wait for the leader to be standing in a copy of its own.
+    Player* const tank = FindTank();
+    if (!tank || tank->GetMapId() != _mapId || !tank->IsInWorld() ||
+        tank->IsBeingTeleported() || !tank->GetInstanceId())
+    {
+        if (_stageMs >= Scaled(TELEPORT_TIMEOUT_MS))
+            FailSetup("tank did not arrive at the dungeon entrance");
+        return;
+    }
+
+    // Wave 2 — the rest of the party, now that there is a copy to join.
+    if (!_followersTeleported)
+    {
+        _destInstanceId = tank->GetInstanceId();
+        for (std::size_t i = 1; i < _slots.size(); ++i)
+            if (Player* bot = ObjectAccessor::FindPlayer(_slots[i].guid))
+                bot->TeleportTo(_mapId, _x, _y, _z, _o);
+        _followersTeleported = true;
+    }
+
+    // Arrival is the INSTANCE id, not the map id. Two members of one party can
+    // both be "on map 601" and never see each other, and the distance helpers
+    // do not check the instance either — a member in the wrong copy reports a
+    // plausible 30-yard distToTank and the run reads as a party that is merely
+    // lagging. Refusing here turns a twenty-minute run that could never have
+    // progressed into a setup failure that names the members and their copies.
+    std::string stranded;
     bool allThere = true;
     for (Slot const& slot : _slots)
     {
         Player* bot = ObjectAccessor::FindPlayer(slot.guid);
-        if (!bot || bot->GetMapId() != _mapId || !bot->IsInWorld() || bot->IsBeingTeleported())
+        if (!bot || !bot->IsInWorld() || bot->IsBeingTeleported())
         {
             allThere = false;
-            break;
+            continue;
+        }
+        if (bot->GetMapId() != _mapId || bot->GetInstanceId() != _destInstanceId)
+        {
+            allThere = false;
+            if (!stranded.empty())
+                stranded += ", ";
+            stranded += Acore::StringFormat("{} (map {} instance {})", bot->GetName(),
+                                            bot->GetMapId(), bot->GetInstanceId());
         }
     }
 
@@ -1156,8 +1336,15 @@ void DcTestRunJob::TickTeleporting()
         return;
     }
 
-    if (_stageMs >= TELEPORT_TIMEOUT_MS)
-        FailSetup("party did not arrive at the dungeon entrance");
+    if (_stageMs >= Scaled(TELEPORT_TIMEOUT_MS))
+    {
+        if (stranded.empty())
+            FailSetup("party did not arrive at the dungeon entrance");
+        else
+            FailSetup(Acore::StringFormat(
+                "party split across instance copies — the tank is in instance {} but {}",
+                _destInstanceId, stranded));
+    }
 }
 
 void DcTestRunJob::TickStarting()
@@ -1219,6 +1406,18 @@ void DcTestRunJob::TickStarting()
         }
         _record.bossesTotal = static_cast<uint32>(_roster.size());
 
+        // RAID runs lean on the playerbots raid strategies for the boss fights
+        // (DC stands down during encounters), and those attach by mapId only
+        // when AiPlayerbot.ApplyInstanceStrategies is on. A raid run with the
+        // knob off would test nothing but bots auto-attacking a raid boss —
+        // fail loudly at start instead of 40 minutes later.
+        if (IsRaidMap() && !sPlayerbotAIConfig.applyInstanceStrategies)
+        {
+            FailSetup("AiPlayerbot.ApplyInstanceStrategies is off — raid runs need the "
+                      "playerbots raid strategies to fight bosses; enable it and retry");
+            return;
+        }
+
         // The run must never wait for a human: kill the WaitAtBoss pre-pull
         // hold for this run whatever the conf says.
         DcSettings::SetOverride(_tankGuid, "WaitAtBoss", 0.0);
@@ -1237,6 +1436,11 @@ void DcTestRunJob::TickStarting()
         LOG_INFO("playerbots.dungeonclear",
                  "TESTRUN {} running: instance {} with {} bosses/objectives",
                  _record.runId, _record.instanceId, _record.bossesTotal);
+        // Nobody in this party has a game client, so nobody will ever send a
+        // CMSG_AREATRIGGER and no `at_*` script would run for the whole clear.
+        // Armed here rather than at Teleporting so it covers exactly the window
+        // the party is actually walking the dungeon.
+        _areaTriggers.Arm(_mapId);
         EnterStage(Stage::Monitoring);
         return;
     }
@@ -2041,6 +2245,16 @@ void DcTestRunJob::Teardown()
     if (_stage.exchange(Stage::TearingDown) == Stage::TearingDown)
         return;
 
+    // Report the relay's tally before Disarm() drops the volume list. Logged
+    // whenever the map had anything to relay, INCLUDING zero fires — "0 of 1"
+    // is the party never reaching the volume, which is a different failure from
+    // a set-piece that fired and did nothing.
+    if (uint32 const armed = _areaTriggers.Armed())
+        LOG_INFO("playerbots.dungeonclear",
+                 "TESTRUN {} areatrigger relay: {} packet(s) over {} volume(s)", _record.runId,
+                 _areaTriggers.Relayed(), armed);
+    _areaTriggers.Disarm();
+
     Player* tank = FindTank();
     if (tank)
     {
@@ -2100,17 +2314,14 @@ void DcTestRunJob::Teardown()
     LogoutBots(gm);
 
     // Shed the saves the run just created so the characters go back clean (and
-    // the instance can reset) — the mirror of the pre-teleport unbind.
-    // Guid-keyed, so it works after the logout. Note this does NOT give back the
-    // AccountInstancesPerHour slot the entry consumed; that is time-based.
-    if (_realChars)
-        UnbindFromMap();
-    else if (_heroic)
-        for (Slot const& slot : _slots)
-            if (slot.guid)
-                sInstanceSaveMgr->PlayerUnbindInstance(slot.guid, _mapId,
-                                                       DUNGEON_DIFFICULTY_HEROIC,
-                                                       /*deleteFromDB*/ true);
+    // the instance can reset) — the mirror of the pre-teleport unbind, and
+    // unconditional for the same reason: a bind left behind here is a bind the
+    // next run has to teleport around. Guid-keyed, so it works after the logout.
+    // Note this does NOT give back the AccountInstancesPerHour slot the entry
+    // consumed; that is time-based. A run killed by a worldserver restart never
+    // reaches this at all, which is exactly why the pre-teleport sweep cannot
+    // rely on it.
+    UnbindFromMap();
 
     _record.endedAtMs = NowUnixMs();
     _record.durationS = static_cast<uint32>((_record.endedAtMs - _record.startedAtMs) / 1000);

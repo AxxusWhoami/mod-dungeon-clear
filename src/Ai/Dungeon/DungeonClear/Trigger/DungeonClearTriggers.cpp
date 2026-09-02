@@ -4,9 +4,12 @@
  */
 
 #include "DungeonClearTriggers.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcBossStandDown.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRun.h"
 
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <optional>
 #include <string>
 #include <unordered_set>
@@ -23,6 +26,7 @@
 #include "Ai/Dungeon/DungeonClear/DcApproachState.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonEventRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
 #include "Ai/Dungeon/DungeonClear/Data/FightInPlaceRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/ScriptedPullRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/RoomAggroRegistry.h"
@@ -33,12 +37,18 @@
 #include "Ai/Dungeon/DungeonClear/Util/DcEngageGeometry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcHazard.h"
 #include "Ai/Dungeon/DungeonClear/Data/DcHazardRegistry.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcNoStopZone.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcPartyState.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcPlayerbotCompat.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRegroupDecision.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcRaidMuster.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRezRecovery.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcStrandedRecovery.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcSmartRest.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearMath.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTickMemo.h"
+#include "Ai/Dungeon/DungeonClear/Action/BetterLootRollAction.h"
+#include "Ai/Dungeon/DungeonClear/Util/DungeonPathFollower.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonEventExecutor.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearTuning.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearUtil.h"
@@ -81,6 +91,24 @@ namespace
         return DcLeaderSignal::IsDungeonClearLeader(bot);
     }
 
+    // The TERMINAL rungs' gate — the party-died bailout and the all-cleared
+    // completion. Deliberately NOT IsEnabled.
+    //
+    // IsEnabled reads the run state off `context`, which is the calling bot's own,
+    // and only the leader ever sets `enabled` — so it is doubly leader-bound: a
+    // follower fails the flag check and the leader fails the election once it is a
+    // corpse. Both terminal questions ("is this run over?" / "did we finish?")
+    // still have answers when the tank is dead, and with no rung left to ask them
+    // the run idles at its last pull phase until the 600s no-progress watchdog.
+    //
+    // See DcLeaderSignal::FindTerminalDriver for the election and the audit
+    // evidence. The run state is read from the OWNER, not from `context`, for the
+    // same reason.
+    bool IsTerminalDriver(Player* bot)
+    {
+        return DcLeaderSignal::IsTerminalDriver(bot);
+    }
+
     // May the driving ladder run this tick? Replaces the raw `bot->IsInCombat()`
     // stand-down that every driver trigger used to carry. The body moved to
     // DcCombatFlag so the follower rung (follow-tank), the rest gates and the
@@ -105,12 +133,27 @@ namespace
 
 bool DungeonClearIdleTrigger::IsActive()
 {
+    // HEARTBEAT FIRST — above every gate below, including IsEnabled. The point of
+    // the stamp is to prove the ladder was evaluated at all; taking it after a
+    // gate would make "DC stood itself down" and "this bot is not being updated"
+    // look identical again, which is the exact confusion it exists to end.
+    // Non-combat engine; the combat ladder stamps in the break-stuck-combat rung.
+    DcTickHeartbeat::Stamp(context);
+
     if (!IsEnabled(context, bot))
         return false;
     if (!bot || bot->isDead() || !MayDrive(bot, context))
         return false;
     Map* map = bot->GetMap();
     if (!map || !map->IsDungeon())
+        return false;
+
+    // Blackwing Lair's egg run holds the raid where it stands: the next boss is
+    // the POSSESSED Razorgore, walking egg to egg, and a route to him is a lap of
+    // the chamber with the whole raid trailing the tank. The action carries the
+    // same guard (a trigger cannot un-queue a basket); this is the half that
+    // keeps the rung from firing at all. See DcBlackwingLair::EggRunHoldsTheRaid.
+    if (DcBlackwingLair::EggRunHoldsTheRaid(bot))
         return false;
 
     std::optional<DungeonBossInfo> next = AI_VALUE(std::optional<DungeonBossInfo>, DcKey::NextDungeonBoss);
@@ -203,6 +246,18 @@ bool DungeonClearAtBossTrigger::IsActive()
     if (next->kind != DungeonAnchorKind::Boss)
         return false;
 
+    // Blackwing Lair, phase 1: the anchor behind us (Grethok) has cleared and
+    // the next boss is a POSSESSED Razorgore our own runner is walking egg to
+    // egg. Everything this rung leads to is wrong for that boss: the raid
+    // muster it hosts would sit the raid down to eat and rebuff mid-egg-run
+    // (live: "raid muster: (rest timed out) rebuff round for Razorgore the
+    // Untamed", 23:15:32), and the engage behind it would pull the one boss in
+    // the game whose death here casts 20038 on all forty of them. Stand down for
+    // the whole egg run; the camp rung holds the raid meanwhile, and this reopens
+    // within ~3s of the last egg. See DcBlackwingLair::EggRunHoldsTheRaid.
+    if (DcBlackwingLair::EggRunHoldsTheRaid(bot))
+        return false;
+
     // Mid-maneuver the pull owns the tank — same window, same bound, same reason as
     // the idle rung above. A trash pull taken within engage range of the boss must
     // not have the boss engage fire underneath it while its own trigger is quiet;
@@ -243,34 +298,60 @@ bool DungeonClearAtBossTrigger::IsActive()
     float const bx = liveBoss ? liveBoss->GetPositionX() : next->x;
     float const by = liveBoss ? liveBoss->GetPositionY() : next->y;
     float const bz = liveBoss ? liveBoss->GetPositionZ() : next->z;
-    if (DcEngageGeometry::ClosedDoorBetween(bot, bx, by, bz))
+    //
+    // EXCEPT an interact-through GATE (DcEventDoorRegistry::IsNavigationIgnored).
+    // The ray is entry-blind, and for that handful of doors standing down is the
+    // exact wrong answer: nothing DC does opens them, the objective behind one is
+    // performed from THIS side, and the rung this stand-down hands the tick to
+    // cannot open it either. Blackwing Lair's Chromaggus cage is the deadlock —
+    // the portcullis sits on the tank->boss line, so this returned false, the
+    // raid muster (ticked at the bottom of this function) never staged, and
+    // ChromaggusCageDue waits on muster Ready, so the lever that opens the cage
+    // was never pulled. tr-20260829-204120-2 idled 30yd out to teardown with
+    // every watchdog clear and zero "raid muster: staging at Chromaggus" lines.
+    // The boss-engage rung holds the tank on the anchor meanwhile (it reads
+    // `caged`), so letting this through does not walk anyone into the gate.
+    if (DcEngageGeometry::ClosedDoorBetween(bot, bx, by, bz) &&
+        !DcEngageGeometry::OnlyEventGatesBetween(bot, bx, by, bz))
         return false;
 
-    // When the long-path cache is anchored (registered route), make sure
-    // all intermediate anchors have been resolved before firing. This
-    // prevents the bot from "engaging" a boss it's geometrically near but
-    // separated from by a wall or door — the cached anchor list runs the
-    // bot around through the actual corridor first.
+    // When the long-path cache is anchored (registered route), make sure the
+    // intermediate anchors STILL AHEAD OF US have been resolved before firing.
+    // This prevents the bot from "engaging" a boss it's geometrically near but
+    // separated from by a wall or door — the cached anchor list runs the bot
+    // around through the actual corridor first.
+    //
+    // FROM THE FOLLOWER'S CURSOR, NOT FROM ZERO. This loop used to start at
+    // segment 0, which asks the bot to be within one arriveRadius (6yd) of every
+    // anchor on the route SIMULTANEOUSLY — satisfiable only by a route whose
+    // anchors all sit inside a 6yd bubble, and false forever for any real one.
+    // It went unnoticed because DungeonClearRouteRegistry had no rows until
+    // Azjol-Nerub's; the first registered route (12 anchors over 250yd) turned
+    // it into a hard stall — 19 of 20 runs in tp-20260818-200553-1 parked 29yd
+    // from Anub'arak at full health, out of combat, watchdogs clear, until the
+    // no-progress watchdog ended them.
+    //
+    // DcAdvanceAction's copy of this check (its atBoss handoff, the one that
+    // logs "holding for at-boss") already started at followerNow.segmentIdx and
+    // was right; the two disagreeing is precisely why Advance said it was done
+    // navigating while the trigger never fired. Same cursor, same answer.
     ChunkedPathfinder::Result const& path =
         AI_VALUE(ChunkedPathfinder::Result&, DcKey::LongPath);
     if (path.reachable && !path.segments.empty())
     {
-        bool anyAnchored = false;
-        for (PathSegment const& seg : path.segments)
-            if (seg.anchored) { anyAnchored = true; break; }
-        if (anyAnchored)
+        DungeonFollowerState const& follower =
+            AI_VALUE(DungeonFollowerState&, DcKey::FollowerState);
+        // Last segment is the boss anchor; the anchored ones between the cursor
+        // and it must be within their arriveRadius. Anchors already walked past
+        // don't gate the engage.
+        for (size_t i = follower.segmentIdx; i + 1 < path.segments.size(); ++i)
         {
-            // Last segment is the boss anchor; everything before it must
-            // be within its arriveRadius.
-            for (size_t i = 0; i + 1 < path.segments.size(); ++i)
-            {
-                PathSegment const& seg = path.segments[i];
-                if (!seg.anchored)
-                    continue;
-                float const d = bot->GetDistance(seg.ex, seg.ey, seg.ez);
-                if (d > seg.arriveRadius)
-                    return false;
-            }
+            PathSegment const& seg = path.segments[i];
+            if (!seg.anchored)
+                continue;
+            float const d = bot->GetDistance(seg.ex, seg.ey, seg.ez);
+            if (d > seg.arriveRadius)
+                return false;
         }
     }
 
@@ -303,6 +384,18 @@ bool DungeonClearAtBossTrigger::IsActive()
             if (!run.sealedMusterSince)
                 run.sealedMusterSince = now;
 
+            // RAID quorum: with 10-40 members, one wedged straggler outside must
+            // not hold the whole raid inside the boss's aggro radius for the full
+            // timeout. A raid holds only while an outside member is a tank/healer
+            // or the outside share exceeds the quorum's tolerance; a dungeon
+            // still holds for literally anyone outside (5 people, one door — the
+            // strict contract is cheap and right there).
+            bool const raidQuorum = bot->GetMap() && bot->GetMap()->IsRaid();
+            uint32 const quorumPct =
+                raidQuorum ? DcSettings::GetUInt(bot, "RaidReadyQuorumPct") : 100;
+            uint32 living = 0;
+            uint32 outsideCount = 0;
+            bool outsideCritical = false;
             Player* outside = nullptr;
             if (Group* group = bot->GetGroup())
             {
@@ -315,14 +408,21 @@ bool DungeonClearAtBossTrigger::IsActive()
                         continue;
                     if (!GET_PLAYERBOT_AI(member))
                         continue;   // a real player is never gated on
+                    ++living;
                     if (!SealedEncounterRegistry::InSealedRoom(
                             *sealed, member->GetPositionX(), member->GetPositionY()))
                     {
-                        outside = member;
-                        break;
+                        ++outsideCount;
+                        if (!outside)
+                            outside = member;
+                        if (PlayerbotAI::IsTank(member) || PlayerbotAI::IsHeal(member))
+                            outsideCritical = true;
                     }
                 }
             }
+            if (raidQuorum && outside && !outsideCritical && living &&
+                (living - outsideCount) * 100 >= living * quorumPct)
+                outside = nullptr;  // quorum inside, stragglers tolerated
 
             // Bounded: a member that cannot path in (stuck, mid-rez, feared out)
             // must not hold the run open. On expiry engage anyway and say so — that
@@ -347,6 +447,41 @@ bool DungeonClearAtBossTrigger::IsActive()
         {
             DcRun::Of(context).sealedMusterSince = 0;   // left the approach; re-arm
         }
+    }
+
+    // RAID BOSS: THE PRE-BOSS MUSTER IS THE GATE.
+    //
+    // Plan C's muster (stage -> top off -> rebuff -> release, every phase and the
+    // whole thing timeout-bounded) used to be hosted only in the engage action
+    // BEHIND this trigger, with IsBetweenPullsReady below as the gate. That is a
+    // loop the muster cannot get out of: it pushes RestHealthPct/RestManaPct to
+    // 100 for the run so bots eat and drink to the bars, IsPartyReady is strict
+    // on every tank and healer, and a priest single-target buffing thirty-nine
+    // people is a healer who is never at full mana. The gate stayed down, the
+    // engage action never ran, and every budget the muster owns — which is only
+    // ever compared against getMSTime() on a tick that EVALUATES it — was never
+    // sampled. Live at Vaelastrasz (2026-08-28, five 40-mans, 60s ceiling): the
+    // kernel was asked three times in 126s and released 66s late; the siblings
+    // ran 77s, 89s, 116s and 218s. Nothing was wrong with DcRaidMusterDecision.
+    //
+    // So tick it HERE, every tick, and gate on its verdict. It subsumes what
+    // IsBetweenPullsReady was doing at a raid boss and does it better: `staged`
+    // is the same PartyMaxSpread walk, `topped` is a stricter HP/mana bar than
+    // the rest floors, and unlike the readiness gate it hands itself forward on a
+    // clock instead of waiting forever. A pending party rez still outranks it —
+    // releasing forty players onto a boss over a corpse the elected rezzer is
+    // already working is never the lesser evil. (DcPartyState::GetRestGate also
+    // stops feeding the muster's own override back into the general readiness
+    // gate, so advance and the pull rungs no longer inherit a 100/100 bar either.)
+    //
+    // The engage action still calls the same helper as the action-side half of
+    // this guard, the pairing used throughout this module; by then the phase
+    // reads Ready and it passes straight through.
+    if (map->IsRaid() && next->kind == DungeonAnchorKind::Boss)
+    {
+        if (DcRezRecovery::IsPending(bot))
+            return false;
+        return !DcRaidMuster::Holds(bot, botAI, context, *next);
     }
 
     // Don't pull while party is still recovering or tank-side loot is pending.
@@ -486,6 +621,21 @@ bool DungeonClearBlockingTrashTrigger::IsActive()
     if (!IsBetweenPullsReady(bot, context))
         return false;
 
+    // Razorgore's egg run: the corridor this rung scans is the route to a boss
+    // the raid must never walk to, so every pack it finds is a reason to leave
+    // the camp. The adds come to the raid on their own — that is what the camp
+    // is for. See DcBlackwingLair::EggRunHoldsTheRaid.
+    if (DcBlackwingLair::EggRunHoldsTheRaid(bot))
+        return false;
+
+    // Scripted-stage muster: the pull trigger is deliberately standing down while
+    // the party drinks to the muster floors. The bystander fall-through below
+    // must not walk the tank in during that window — with the pull Idle it owned
+    // the tick and body-engaged the pack the stage was about to tag (the
+    // muster-window scout face-pull, tp-20260806-212646-1). Read-only latch view.
+    if (DcPartyState::IsScriptedMusterHolding(bot, context))
+        return false;
+
     // Prefer the wider DC-gated scan — packs at the far end of long
     // dungeon corridors fall outside the default 100yd sightDistance cap
     // that drives `possible targets`. Falls back to `possible targets`
@@ -503,10 +653,21 @@ bool DungeonClearBlockingTrashTrigger::IsActive()
         // trash beyond a single PathGenerator call is still detected.
         ChunkedPathfinder::Result const& path =
             AI_VALUE(ChunkedPathfinder::Result&, DcKey::LongPath);
+        DungeonFollowerState const& cursor =
+            AI_VALUE(DungeonFollowerState&, DcKey::FollowerState);
         if (path.reachable && !path.segments.empty())
         {
             trash = DcTargeting::FindBlockingTrashOnPath(
-                bot, path.segments, DC_CORRIDOR_LOOKAHEAD, DC_CORRIDOR_WIDTH, candidates);
+                bot, path.segments, DC_CORRIDOR_LOOKAHEAD, DC_CORRIDOR_WIDTH, candidates, cursor);
+            // En-route sweep — pull the room the walk is about to wake instead of
+            // the mob standing on the centre line. Returns null in heroics.
+            // An already-in-combat corridor pick outranks it; see the twin comment
+            // in DcTargeting::FindPullTarget for why the two scans disagree about
+            // in-combat units and which disagreement wins.
+            if (Unit* const swept = DcTargeting::FindEnRouteAggroPack(
+                    bot, context, path.segments, DC_CORRIDOR_LOOKAHEAD, cursor))
+                if (!trash || !trash->IsInCombat())
+                    trash = swept;
         }
         // No usable long-path cache — fall back to a single-shot corridor
         // computed inline so the trigger stays live in degraded conditions.
@@ -683,9 +844,9 @@ bool DungeonClearRoomPreClearHoldTrigger::IsActive()
 
 bool DungeonClearPartyDiedTrigger::IsActive()
 {
-    if (!IsEnabled(context, bot))
-        return false;
     if (!bot)
+        return false;
+    if (!IsTerminalDriver(bot))
         return false;
 
     bool anyDead = bot->isDead();
@@ -721,8 +882,11 @@ bool DungeonClearPartyDiedTrigger::IsActive()
     // Evaluate also maintains the recovery clock + announcements as its side
     // effect — this per-tick call is one of the clock's two update sites (the
     // rez trigger on every bot is the other, covering a dead leader).
-    return DcRezRecovery::Evaluate(bot).verdict.outcome ==
-           DcRezDecision::Outcome::Disable;
+    // Disable runs the classic funnel; Regroup is the raid wipe verdict — the
+    // same action routes it to the entrance regroup instead (the run continues).
+    DcRezDecision::Outcome const outcome = DcRezRecovery::Evaluate(bot).verdict.outcome;
+    return outcome == DcRezDecision::Outcome::Disable ||
+           outcome == DcRezDecision::Outcome::Regroup;
 }
 
 bool DungeonClearRezPartyTrigger::IsActive()
@@ -731,6 +895,12 @@ bool DungeonClearRezPartyTrigger::IsActive()
     // follower, or the leader itself (a prot paladin raising its healer). No
     // IsEnabled leader gate: Evaluate resolves the run owner dead-tolerantly
     // (the leader may BE the corpse) and returns None for off/paused runs.
+    //
+    // KEEP IN STEP WITH DcRezRecovery::IsElectedRezzer, the read-only twin that
+    // stands the follower movers down for whoever this arms. It cannot simply
+    // call this (a trigger is per-bot state, and Evaluate here is one of the
+    // recovery clock's two update sites — the read-only twin must not mutate),
+    // so the conditions are stated twice on purpose. Change one, change both.
     if (!bot || bot->isDead() || bot->IsInCombat())
         return false;
     Map* map = bot->GetMap();
@@ -738,27 +908,44 @@ bool DungeonClearRezPartyTrigger::IsActive()
         return false;
 
     DcRezRecovery::Plan const plan = DcRezRecovery::Evaluate(bot);
+    // PairedTargetFor covers both elections: the single rezzer everywhere, plus
+    // this bot's parallel pair on a raid run.
     return plan.verdict.outcome == DcRezDecision::Outcome::Hold &&
            plan.verdict.reason == DcRezDecision::Reason::Recovering &&
-           plan.rezzer == bot->GetGUID();
+           !DcRezRecovery::PairedTargetFor(plan, bot).IsEmpty();
 }
 
 bool DungeonClearAllClearedTrigger::IsActive()
 {
-    if (!IsEnabled(context, bot))
-        return false;
     if (!bot)
+        return false;
+    if (!IsTerminalDriver(bot))
         return false;
     Map* map = bot->GetMap();
     if (!map || !map->IsDungeon())
         return false;
 
-    auto const& bosses = AI_VALUE(std::vector<DungeonBossInfo>, DcKey::DungeonBosses);
+    // Read the roster and the next-boss cursor from the RUN OWNER's context, never
+    // from `bot`'s. With the leader alive these are the same context; with it dead
+    // the driver can be any member, and NextDungeonBossValue is not a pure function
+    // of the map — it folds in the owner-local ClearedAnchors set and
+    // DcRunState::selectedBossEntry (NextDungeonBossValue.cpp:99,128). A follower's
+    // copies of those are empty, so asking IT whether the dungeon is finished gets
+    // an answer about a run it was never keeping.
+    Player* const owner = DcLeaderSignal::FindRunOwner(bot);
+    PlayerbotAI* const ownerAI = owner ? GET_PLAYERBOT_AI(owner) : nullptr;
+    if (!ownerAI)
+        return false;
+    AiObjectContext* const ownerCtx = ownerAI->GetAiObjectContext();
+
+    auto const& bosses =
+        ownerCtx->GetValue<std::vector<DungeonBossInfo>>(DcKey::DungeonBosses)->Get();
     if (bosses.empty())
         return false;
 
-    std::optional<DungeonBossInfo> next = AI_VALUE(std::optional<DungeonBossInfo>, DcKey::NextDungeonBoss);
-    return !next.has_value();
+    return !ownerCtx->GetValue<std::optional<DungeonBossInfo>>(DcKey::NextDungeonBoss)
+                ->Get()
+                .has_value();
 }
 
 bool DungeonClearRecoverStrandedTrigger::IsActive()
@@ -783,6 +970,12 @@ bool DungeonClearStalledTrigger::IsActive()
         return false;
     Map* map = bot->GetMap();
     if (!map || !map->IsDungeon())
+        return false;
+
+    // Raid boss stand-down: a stale stall reason must never drive fallback
+    // maneuvers into a live encounter (the fight is the raid strategy's; DC
+    // resumes at loot). Cheap for dungeons — IsActive is raid-gated.
+    if (DcBossStandDown::IsActive(bot))
         return false;
 
     // Only fall back when there is an actual stall reason set by Advance or
@@ -940,7 +1133,30 @@ namespace
         if (DcSettings::GetBool(bot, "SmartRest"))
             return DcSmartRest::IsLatched(tank) ? 100 : 0;
 
-        return DcSettings::GetUInt(bot, key);
+        uint32 const configured = DcSettings::GetUInt(bot, key);
+
+        // SCRIPTED-STAGE MUSTER: eat/drink to the muster floor, not merely to the
+        // configured rest target (0 by default, which hands the bot to the stock
+        // eat/drink that stops at AlmostFullHealth/HighMana — 85/65).
+        //
+        // Without this the muster is a demand with nothing behind it: the gate
+        // would ask for 90/80, the bots would top out at 85/65, and every stage
+        // would spend its whole budget waiting for mana no one was restoring. The
+        // gate and the restore have to name the same number or the gate is just a
+        // delay. Bounded either way — see DC_SCRIPTED_PULL_MUSTER_MS.
+        if (PlayerbotAI* tankAI = GET_PLAYERBOT_AI(tank))
+        {
+            DcPullContext const& tankPull =
+                tankAI->GetAiObjectContext()->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
+            if (tankPull.scriptedMusterSince != 0)
+                return std::max<uint32>(
+                    configured,
+                    static_cast<uint32>(std::strcmp(key, "RestManaPct") == 0
+                                            ? DC_SCRIPTED_PULL_MUSTER_MP
+                                            : DC_SCRIPTED_PULL_MUSTER_HP));
+        }
+
+        return configured;
     }
 }
 
@@ -981,12 +1197,45 @@ bool DungeonClearPullTrigger::IsActive()
     // camp gates — consults the same value, so whichever runs first updates it.
     // No-op for Off/On, where DcPullAction owns the bool.
     bool const pullModeCurrent = AI_VALUE(bool, DcKey::PullModeCurrent);
+
+    // Razorgore's egg run stands this rung down too, and it matters most here: a
+    // maneuver walks the tank OUT to a pack and drags it back, which during the
+    // egg run means leaving the runner's ledge unguarded for the whole round
+    // trip. Read AFTER the governor above so the pull verdict still gets its
+    // per-tick refresh — a rung that stands down BEFORE it can leave a stale code
+    // latched, which is the Shattered Halls failure the comment above describes.
+    //
+    // Only an IDLE FSM is stood down. Cutting the rung mid-maneuver would latch a
+    // live drag in a phase with nothing left to advance it; a maneuver already in
+    // flight finishes and comes home, and nothing new starts until phase 1 is
+    // over. See DcBlackwingLair::EggRunHoldsTheRaid.
+    {
+        DcPullContext const& pullNow = AI_VALUE(DcPullContext&, DcKey::PullContext);
+        if (pullNow.phase == DcPullPhase::Idle && pullNow.scriptedStage < 0 &&
+            DcBlackwingLair::EggRunHoldsTheRaid(bot))
+            return false;
+    }
+
     // decision == 3 is the patrol-wait HOLD: pull mode is off-but-held, so the
     // behavioural bool reads false, but the pull action must still run to halt the
     // tank at commit range while it waits the patrol out. Keep the trigger live in
     // that state too. (Reading pull mode current FIRST runs the governor that may
     // set decision == 3 this tick.)
+    //
+    // NEVER off a verdict the governor can no longer revise. This rung is the one
+    // place a pull code keeps the action alive with the behavioural bool reading
+    // false, so it is also the one place a STALE code can plant the tank forever:
+    // while a persistent anchored event drives, DungeonClearPullModeCurrentValue
+    // stands the whole pull system down and the governor does not run, so nothing
+    // would ever move `decision` off PatrolHold — and the pull action (DcRel::Pull,
+    // 35) outranks the event's own rung (DcRel::AtObjective, 30), so the event could
+    // never drive another step. That is tr-20260817-100413-43/44/45 in Shattered
+    // Halls. The value now clears the verdict on its stand-down, which fixes it at
+    // the root; this reads the same stand-down so the rung can't be resurrected by a
+    // code latched between the two.
+    bool const eventOwnsTank = DungeonEventExecutor::IsPersistentAnchoredEventActive(context);
     bool const patrolWaiting =
+        !eventOwnsTank &&
         AI_VALUE(DcPullContext&, DcKey::PullContext).decision == DcPullDecisionCode::PatrolHold;
     // A PULL-BACK boss (BossPullbackRegistry) runs the maneuver REGARDLESS of the
     // player's pull setting. It isn't a tactical preference there: Ghaz'an's home
@@ -1035,6 +1284,12 @@ bool DungeonClearPullTrigger::IsActive()
     // Mid-pull pre-combat (Forming/Advancing) and the post-fight Engage cleanup
     // run on this non-combat engine, but only while out of combat — the instant
     // the tank aggros, control passes to the combat maneuver trigger.
+    //
+    // Deliberately still the TANK'S OWN flag. The cleanup is the only path that
+    // retires a finished camp fight, and gating it on the party would let one
+    // follower with a stale victim wedge the phase — the residue that
+    // "the puller died mid-pull" exists to sweep up. Starting something NEW is a
+    // separate decision on the Idle branch below, which makes its own test.
     if (phase != static_cast<uint32>(DcPullPhase::Idle))
         return !bot->IsInCombat();
 
@@ -1065,6 +1320,16 @@ bool DungeonClearPullTrigger::IsActive()
         !DcTargeting::IsRoomClearActive(bot, context) && !pullback)
         return false;
     if (!IsBetweenPullsReady(bot, context))
+        return false;
+
+    // A SCRIPTED STAGE MUSTERS LIKE A BOSS PULL. The gate above is satisfied at
+    // 85% HP / 65% mana on stock config, which is sized for whatever the corridor
+    // scan turned up next — not for a hand-counted five-elite heroic pack with its
+    // own healer in it. Hold the plan until the party is genuinely topped up, on a
+    // bounded budget so a stage can never become unreachable. Separate from the gate
+    // above because it must also bind on the Smart Rest path, which passes 0/0
+    // floors by design. See DcPartyState::IsScriptedStageMustering.
+    if (DcPartyState::IsScriptedStageMustering(bot, context))
         return false;
 
     Unit* trash = DcTargeting::GetPullTarget(botAI);
@@ -1241,6 +1506,42 @@ bool DungeonClearHoldAtCampCombatTrigger::IsActive()
 
 namespace
 {
+    // Is something the tank is fighting already standing at the camp?
+    //
+    // The NON-combat assist's scripted-stage exception. See
+    // ScriptedCampFightHasReachedCamp for the measurement that made this necessary
+    // and for why the follower leash is the right radius to ask it at.
+    //
+    // Deliberately the LEADER's fight only, never a groupmate's: the question is
+    // whether the pack the plan pulled has arrived, and a straggler somebody else
+    // woke is not that.
+    bool ScriptedCampFightIsAtCamp(Player* bot)
+    {
+        Player* const leader = DcLeaderSignal::FindLeaderTank(bot);
+        if (!leader || leader == bot)
+            return false;
+
+        Position camp;
+        bool passive = false;
+        if (!DcLeaderSignal::GetLeaderCampHold(bot, camp, passive))
+            return false;
+
+        auto const atCamp = [&](Unit* u)
+        {
+            return u && u->IsAlive() && u->GetMapId() == bot->GetMapId() &&
+                   bot->IsValidAttackTarget(u) &&
+                   ScriptedCampFightHasReachedCamp(
+                       u->GetExactDist2d(camp.GetPositionX(), camp.GetPositionY()));
+        };
+
+        if (atCamp(leader->GetVictim()))
+            return true;
+        for (Unit* attacker : leader->getAttackers())
+            if (atCamp(attacker))
+                return true;
+        return false;
+    }
+
     // Gate for the COMBAT-side fight assist: this follower's leader is mid
     // fight AND the bot currently has NO line-of-sight target of its own. The
     // empty-attackers test is what makes the combat assist self-limiting: the
@@ -1274,6 +1575,11 @@ namespace
         // logged moved=false from 13.6yd out to 21.1yd and it walked into the room
         // and woke Selin. There is nothing for assist to fix here anyway — the camp
         // is in the open with line of sight to everything that arrives.
+        //
+        // UNCONDITIONAL, unlike the non-combat side's. That side was narrowed to
+        // "unless the fight is already at the camp" because its half of the action
+        // only seeds and flips the engine; this side's is the close-on-mob leg, and
+        // there is no arrival test that makes walking out of the camp acceptable.
         if (DcLeaderSignal::IsLeaderScriptedCampFight(bot))
             return false;
 
@@ -1288,17 +1594,40 @@ namespace
         // stall. Mirror the healer: assist (reposition to the tank's fight) whenever
         // nothing is engageable from here; stand down only when there is a real
         // target the rotation can already hit.
+        // The reach test MUST be the one the ACTION enforces, or this stand-down and
+        // the action it gates disagree about the same mob and the trigger re-fires
+        // forever on work the action believes is already done. S1116 closed exactly
+        // this mismatch between the action and stock ReachSpell
+        // (DungeonClearMath::IsWithinAssistAttackRange) but left this predicate on a
+        // bare `dist <= GetRange("spell")`, so the dead band simply moved here:
+        // stock's keep-closing window ends at spellRange + combatReachSum (~32yd,
+        // IsWithinCombatRange adds both reaches) and the action engages there, while
+        // this asked for 28.5yd flat. A ranged follower resting in that ~3.5yd gap is
+        // "in range, engage and yield" to the action, "in range, stop moving" to
+        // stock, and "nothing engageable here" to this trigger — nobody drives it.
+        // Reported live (issue #18): both casters pinned at 29-31yd for the whole
+        // log, 136 samples at 30.6yd and 124 at 30.8yd, zero damage dealt.
+        //
+        // The MELEE arm deliberately keeps its own wider value. reach + 5.0 is looser
+        // than the action's reachSum + 1.0, so melee OVERLAPS instead of gapping and
+        // stock reach-melee (stop point reachSum + 0.75) still closes anything in
+        // between. Narrowing it to match the action would hand melee approaches to
+        // assist that stock already handles — melee has never had this bug.
         GuidVector const& attackers =
             botAI->GetAiObjectContext()->GetValue<GuidVector>(DcKey::Stock::Attackers)->Get();
         if (attackers.empty())
             return true;
-        float const range = botAI->IsMelee(bot)
-            ? (bot->GetCombatReach() + 5.0f)
-            : botAI->GetRange("spell");
+        bool const isMelee = botAI->IsMelee(bot);
+        float const meleeRange = bot->GetCombatReach() + 5.0f;
+        float const spellRange = botAI->GetRange("spell");
         for (ObjectGuid const& guid : attackers)
         {
             Unit* u = ObjectAccessor::GetUnit(*bot, guid);
-            if (u && u->IsAlive() && bot->GetExactDist(u) <= range &&
+            if (!u || !u->IsAlive())
+                continue;
+            if (DungeonClearMath::IsWithinAssistAttackRange(
+                    isMelee, bot->GetExactDist(u), meleeRange, spellRange,
+                    /*combatReachSum*/ bot->GetCombatReach() + u->GetCombatReach()) &&
                 bot->IsWithinLOSInMap(u))
                 return false;  // an engageable target is in reach — let combat fight it
         }
@@ -1339,10 +1668,27 @@ bool DungeonClearAssistCampTrigger::IsActive()
     // target, not the pack); keep assist for DPS that must be driven into the fight.
     if (PlayerbotAI::IsHeal(bot))
         return false;
-    // A scripted camp fight owns its followers — same stand-down as the combat
-    // side (ShouldAssistCampFight), for the same reason: the cure here is "walk at
-    // the pack", which is the one thing the plan forbids.
-    if (DcLeaderSignal::IsLeaderScriptedCampFight(bot))
+    // A scripted camp fight owns its followers — but only the WALK, which is the
+    // one thing the plan forbids. This half of the action does not walk: it seeds
+    // `current target`, SetInCombatWith()s the bot and flips it to the combat
+    // engine, then returns. The walking that the stand-down was written against
+    // (tr-20260802-233048-11, the hunter that woke Selin) is all on the COMBAT
+    // side's close-on-mob leg and in the recall it starved — ShouldAssistCampFight
+    // still stands that down unconditionally, and must keep doing so.
+    //
+    // Closing the seed along with the walk left a follower the pack has not
+    // personally touched with nothing at all that could make it attack, because
+    // every other rung is shut for its own good reason: DungeonClearMultiplier
+    // zeroes the stock proactive pickers for any active-run member (and again for a
+    // camp-held one), and an instance strategy's kill order is combat-engine only
+    // (MgT's focus triggers all test IsInCombat). Hold-at-camp logs "in bounds
+    // mid-fight -> yielding to the rotation" the whole time, so the trace reads
+    // healthy while the bot does nothing. See ScriptedCampFightHasReachedCamp for
+    // the numbers.
+    //
+    // So: fire, but only once the fight is at the camp. A seed pointing at a mob
+    // already inside the follower leash cannot invite anyone anywhere.
+    if (DcLeaderSignal::IsLeaderScriptedCampFight(bot) && !ScriptedCampFightIsAtCamp(bot))
         return false;
     return DcLeaderSignal::IsLeaderFightAssistWanted(bot);
 }
@@ -1359,6 +1705,18 @@ bool DungeonClearAssistCampCombatTrigger::IsActive()
 
 bool DungeonClearLeaderAssistTrigger::IsActive()
 {
+    // NOT ON A NO_STOP LEG. This rung walks the tank BACK to a fight the party
+    // picked up, which is the one thing a crossing must never do — the ground
+    // behind the raid on such a leg is ground it has already paid for, and on the
+    // case NO_STOP was authored for it is also the ground doing the flagging (BWL's
+    // approach hall, trash 24.3yd overhead that cannot be reached or fought). The
+    // action's own co-located guard stops the degenerate 0.0yd spin; this stops the
+    // non-degenerate version, where the tank really does walk 20yd backwards to
+    // stand under the same ceiling. Anything that reaches the party here is still
+    // fought where it stands — stock combat and the tank rotation own that.
+    if (DcNoStopZone::IsInNoStopZone(bot, context))
+        return false;
+
     // Leader-side assist. All the gating (leader-only, out of combat, no own
     // target, a groupmate latched in combat, not mid-drag) lives in the predicate.
     return DcLeaderSignal::IsLeaderShouldAssistFight(bot);
@@ -1449,51 +1807,33 @@ namespace
     // holder actually coming for us (DungeonClearMath::IsHolderProsecutingFight)? Left
     // untouched when the verdict is false, and set to 0 for the opaque no-reference
     // case — that one is script-forced and must stay legitimate unconditionally.
+    //
+    // The walk itself now lives in DcCombatFlag::ScanCombatHolders — the rez
+    // release and the NoRezzer disable ask the same question of the same refs,
+    // and three copies of a guard list this delicate is how they drift. This
+    // wrapper keeps the shape THIS caller needs: opaque (no refs at all) is
+    // legitimate-by-default here, and only here.
     bool HasLegitimateCombatHolder(Player* bot, float& nearestDist)
     {
-        auto const& refs = bot->GetCombatManager().GetPvECombatRefs();
-        if (refs.empty())
+        DcCombatFlag::HolderScan const scan = DcCombatFlag::ScanCombatHolders(bot);
+        if (scan.opaque)
         {
             nearestDist = 0.0f;
             return true;  // no unit to blame -> opaque/forced combat, leave it alone
         }
-
-        Map* const map = bot->GetMap();
-        bool found = false;
-        float best = 0.0f;
-        for (auto const& kv : refs)
-        {
-            CombatReference* const ref = kv.second;
-            if (!ref)
-                continue;
-            Unit* const other = ref->GetOther(bot);
-            if (!other || !other->IsAlive() || other->GetMap() != map)
-                continue;
-            if (other->GetCombatManager().IsInEvadeMode())
-                continue;  // holder is bailing home -> not a real threat
-            if (!DcEngageGeometry::IsReachable(bot, other->GetPositionX(),
-                                               other->GetPositionY(), other->GetPositionZ()))
-                continue;  // unreachable -> the phantom holder
-            if (Creature* const c = other->ToCreature())
-                if (c->AI() && !c->AI()->CanAIAttack(bot))
-                    continue;  // its own script forbids it touching us -> phantom too
-            // A reachable, live, non-evading holder: a REAL fight. Keep scanning so
-            // `nearestDist` is the closest one — the closing test must track whichever
-            // holder is most nearly on top of us, not whichever the map happened to
-            // enumerate first.
-            float const dist = bot->GetExactDist(other);
-            if (!found || dist < best)
-                best = dist;
-            found = true;
-        }
-        if (found)
-            nearestDist = best;
-        return found;
+        if (scan.found)
+            nearestDist = scan.nearestDist;
+        return scan.found;
     }
 }
 
 bool DungeonClearBreakStuckCombatTrigger::IsActive()
 {
+    // HEARTBEAT — the combat engine's half. This is the first rung of the DC
+    // combat ladder, so stamping here keeps the heartbeat live for the whole of a
+    // fight, when the non-combat ladder above is not being evaluated at all.
+    DcTickHeartbeat::Stamp(context);
+
     // Only meaningful while flagged in combat. Out of combat -> nothing to break;
     // reset the streak so a fresh stall later starts its clock clean.
     if (!bot || bot->isDead() || !bot->IsInCombat())
@@ -1503,15 +1843,19 @@ bool DungeonClearBreakStuckCombatTrigger::IsActive()
         return false;
     }
 
-    // Never force-clear combat in a RAID zone. A raid encounter is exactly where an
-    // errant combat drop does the most damage (a wrongly-cleared boss reference can
-    // reset the fight for the whole raid), the phantom-combat deadlock this recovers
-    // is a 5-man dungeon-clear problem, and raid bosses routinely hold the raid in
-    // combat with no per-bot reachable target during phase transitions / adds — the
-    // precise shape this would misread. Gate it out entirely rather than trust the
-    // reachability test there.
+    // Never force-clear combat during a raid ENCOUNTER. A boss fight is exactly
+    // where an errant combat drop does the most damage (a wrongly-cleared boss
+    // reference can reset the fight for the whole raid), and raid bosses
+    // routinely hold the raid in combat with no per-bot reachable target during
+    // phase transitions / adds — the precise shape this would misread. The gate
+    // is the boss stand-down verdict, not the map type: OUTSIDE encounters a
+    // raid run needs this recovery exactly like a dungeon does (phantom combat
+    // from a gated/underground spawn wedges a 40-bot advance just as hard).
+    // The breaker's ACTION is also zeroed by the stand-down check in the combat
+    // multiplier; gating here too keeps the per-tick holder scan off the books
+    // for the whole fight.
     Map* const map = bot->GetMap();
-    if (!map || map->IsRaid())
+    if (!map || DcBossStandDown::IsActive(bot))
     {
         stuckCombatSinceMs = 0;
         holderCloseWatch.Reset();
@@ -1578,19 +1922,33 @@ bool DungeonClearBreakStuckCombatTrigger::IsActive()
 
 bool DungeonClearRegroupCombatTrigger::IsActive()
 {
-    if (!bot || bot->isDead() || !bot->IsInCombat())
+    // Every early-out below must go through this, never a bare `return false`. The
+    // latch is "a reconnect is in flight, keep firing until the bot can contribute
+    // again" — an intent that only makes sense inside one continuous combat. Left
+    // set on the way out (combat ended, run paused, held at a camp) it survives into
+    // the NEXT fight, where `if (_latched) return true` fires on tick one and skips
+    // the 2s debounce entirely: every subsequent pull then opens with the follower's
+    // tick already stolen by rel 29. Clearing here makes each fight start clean.
+    auto standDown = [this]() -> bool
+    {
+        _latched = false;
+        _pendingSince = 0;
         return false;
+    };
+
+    if (!bot || bot->isDead() || !bot->IsInCombat())
+        return standDown();
 
     // Feature toggle.
     if (!DcSettings::GetBool(bot, "CombatRegroup"))
-        return false;
+        return standDown();
 
     // The elected leader tank, non-null only while its clear is active and
     // unpaused. This both gates the feature on an active run and is the bot we
     // regroup on. The leader itself never regroups on anyone — it drives.
     Player* tank = AI_VALUE(Player*, DcKey::PartyTank);
     if (!tank || tank == bot || tank->GetMapId() != bot->GetMapId())
-        return false;
+        return standDown();
 
     // Hand all advanced-pull camp positioning to the camp/assist actions: while
     // the party is held PASSIVE at a camp (Forming/Advancing/Returning) it must
@@ -1601,7 +1959,7 @@ bool DungeonClearRegroupCombatTrigger::IsActive()
     Position camp;
     bool passive = false;
     if (DcLeaderSignal::GetLeaderCampHold(bot, camp, passive) && passive)
-        return false;
+        return standDown();
 
     // Gather the game-state reads the pure contribution kernel needs. The verdict
     // (§1) is role-aware: a DPS "can contribute" while its stock LOS-filtered
@@ -1616,6 +1974,22 @@ bool DungeonClearRegroupCombatTrigger::IsActive()
                                     UNIT_STATE_CONFUSED | UNIT_STATE_ROOT);
     in.hasVisibleAttacker = !botAI->GetAiObjectContext()
                                  ->GetValue<GuidVector>(DcKey::Stock::Attackers)->Get().empty();
+    // Second half of the DPS contribution test — see DecideCombatRegroup. `attackers`
+    // is threat-derived, so it reads empty for every mob the party is FIGHTING but has
+    // not yet landed threat on (including DC's own seed-then-SetInCombatWith window).
+    // A live, valid, in-LOS `current target` means the rotation has real work whatever
+    // the attacker list says, so this rung must not take the tick. Cheap: the LOS
+    // raycast only runs once a target actually resolves, and the whole clause is
+    // skipped for healers (the kernel ignores it for them).
+    in.hasLosTarget = false;
+    if (!in.isHealer)
+    {
+        if (Unit* cur = botAI->GetAiObjectContext()
+                             ->GetValue<Unit*>(DcKey::Stock::CurrentTarget)->Get())
+            in.hasLosTarget = cur->IsAlive() && cur->GetMapId() == bot->GetMapId() &&
+                              bot->IsValidAttackTarget(cur) && bot->IsWithinLOSInMap(cur);
+    }
+
     // Only meaningful for healers (the kernel ignores it for DPS); skip the party
     // scan otherwise. Non-empty = someone is below the heal floor -> HealReposition
     // owns the reposition, so regroup must stand down (its ownership invariant).
@@ -1763,8 +2137,11 @@ bool DungeonClearHazardVacateTrigger::IsActive()
     if (!bot || bot->isDead())
         return false;
 
-    // Cheap map early-out before anything else touches game state.
-    if (!DcHazardRegistry::HasEmitters(bot->GetMapId()))
+    // Cheap map early-out before anything else touches game state. HasAnyHazard,
+    // not HasEmitters: Scholomance registers only a ground pool (Cloud of
+    // Disease) and the Shattered Halls only a gameobject trap (the flame-arrow
+    // Blaze), and a creature-only gate would make the retreat inert on both.
+    if (!DcHazardRegistry::HasAnyHazard(bot->GetMapId()))
         return false;
 
     // Feature toggle.
@@ -1810,25 +2187,40 @@ bool DungeonClearLootRollPendingTrigger::IsActive()
 
     // Self-bot: the vote is the human's to cast (BetterLootRollAction casts
     // none), so an open window must not keep the trigger hot.
-    if (botAI->GetMaster() == bot)
+    if (DcPlayerbotCompat::IsSelfBot(bot))
         return false;
 
     Group* group = bot->GetGroup();
     if (!group)
         return false;
 
+    // Digest every roll this bot could actually vote on right now. The predicate
+    // is shared with the action so the two can never disagree about what
+    // "votable" means — that disagreement was the bug. FNV-1a over the item
+    // GUIDs, with the count kept separately so an unlucky digest can never be
+    // mistaken for an empty window.
+    std::uint64_t signature = 14695981039346656037ull;
+    uint32 votable = 0;
     for (Roll* roll : group->GetRolls())
     {
-        auto voteItr = roll->playerVote.find(bot->GetGUID());
-        if (voteItr == roll->playerVote.end() || voteItr->second != NOT_EMITED_YET)
+        if (!DcLootRoll::IsVotablePendingRoll(roll, bot))
             continue;
-
-        // Mirror the action's only no-vote path: it skips a roll whose item
-        // template doesn't resolve, so such a roll must not fire the trigger
-        // every tick forever.
-        if (sObjectMgr->GetItemTemplate(roll->itemid))
-            return true;
+        ++votable;
+        signature = (signature ^ roll->itemGUID.GetRawValue()) * 1099511628211ull;
     }
 
-    return false;
+    // Starvation bound — see DungeonClearMath::LootRollRungMayFire.
+    if (!DungeonClearMath::LootRollRungMayFire(votable, signature, MAX_UNCHANGED_TICKS,
+                                               _pendingSignature, _unchangedTicks))
+    {
+        if (_unchangedTicks == MAX_UNCHANGED_TICKS + 1)
+            LOG_INFO("playerbots.dungeonclear",
+                     "[DC:{}] loot-roll rung stood down: {} tick(s) on an unchanged pending "
+                     "roll set and the vote never landed — releasing the tick to the driving "
+                     "ladder (re-arms if the rolls change)",
+                     bot->GetName(), MAX_UNCHANGED_TICKS);
+        return false;
+    }
+
+    return true;
 }

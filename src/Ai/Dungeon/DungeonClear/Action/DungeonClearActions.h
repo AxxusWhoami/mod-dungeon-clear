@@ -253,6 +253,7 @@ private:
     Step DoJumpLeg(AdvanceState& st);
     Step DoRideLiveGlide(AdvanceState& st);
     Step DoOffLineRejoin(AdvanceState& st);
+    bool TryChunkedRejoin(AdvanceState& st);         // long re-entry; one MoveTo can't reach
     Step DoIssueSplineWindow(AdvanceState& st);
     Step DoMoveToFallback(AdvanceState& st);         // terminal: always handles the tick
 };
@@ -716,17 +717,174 @@ public:
 
 // ANY role, BOTH engines. Moves the bot OUT of an active-vacate hazard emitter's
 // pulse (DcHazard::NearestVacate — the Arcatraz Destroyed Sentinel's 15yd Energy
-// Discharge). Aims a point directly away from the emitter, just past its pulse
-// radius plus slack, snapped to the navmesh, clear of every OTHER hazard, and
-// path-reachable; if the straight-away point is blocked it fans the away-bearing
-// around until one validates. Re-issued each tick. MOVEMENT_COMBAT priority so it
-// overrides the bot's MoveChase / advance. Driven by
+// Discharge, a Maraudon Creeping Sludge's 5yd Poison Shock). Aims a point directly
+// away from the emitter, past its pulse radius plus that row's retreat slack,
+// snapped to the navmesh, clear of every other hazard's placement keep-out AND of
+// every live danger band, and path-reachable; if the straight-away point is
+// blocked it fans the away-bearing around until one validates. MOVEMENT_COMBAT
+// priority so it overrides the bot's MoveChase / advance. Driven by
 // DungeonClearHazardVacateTrigger.
 class DungeonClearHazardVacateAction : public DcMovementAction
 {
 public:
     DungeonClearHazardVacateAction(PlayerbotAI* botAI)
         : DcMovementAction(botAI, "dungeon clear hazard vacate")
+    {
+    }
+    bool Execute(Event event) override;
+
+private:
+    // The committed retreat point. This action used to recompute every tick, which
+    // is fine with ONE emitter (the bearing is stable) and catastrophic with a
+    // field of them: NearestVacate re-elects a different centre on a step of drift
+    // and the bearing reverses, so the bot re-plots its spline several times a
+    // second and travels nowhere. While this point is still outside every danger
+    // band and the bot is still walking to it, the action owns the tick and leaves
+    // the move alone. Cleared when the bot is clear, or when no bearing validated.
+    //
+    // `_fleeSetAtMs` caps how long that ride may last. A commitment is only as good
+    // as the point behind it, and an unbounded one turned a bad candidate into a
+    // 47-second march in tr-20260815-154816-5. Committed is not unsupervised.
+    Position _fleeTo;
+    bool     _fleeToValid = false;
+    uint32   _fleeSetAtMs = 0;
+};
+
+// BLACKWING LAIR ONLY, one member, both engines. The orb runner's half of
+// Razorgore's egg run: walk to the Orb of Domination and take it.
+//
+// Three states, and every one of them owns the tick:
+//
+//   TRAVELLING — the orb is on the upper ledge 78yd from the boss's spawn, which
+//   is a LONG HAUL: the engine PathGenerator caps a generated path at 74 polys
+//   and a request past that truncates SILENTLY, leaving the bot standing still
+//   with nothing to observe at the call site. So the walk goes through
+//   LongRangePathfinder + one escort spline, exactly like the Violet Hold
+//   driver's portal hops, with a bare MovePoint only for the last short leg.
+//
+//   HOLDING — standing at the orb with the platform's three elites still up and
+//   NOBODY HAVING PULLED THEM: own the tick, click nothing. In practice the
+//   runner is never elected in that window (the leader's FSM does not elect one
+//   until the pull lands), so this is the belt to the FSM's braces — same gate,
+//   by construction, because the runner arrives on its own tick and must not
+//   click an orb the leader believes is still being held back.
+//
+//   CLICKING — standing at the orb, no pet, no Mind Exhaustion: any cast in
+//   flight is interrupted, then GameObject::Use(bot). That call reaches
+//   go_orb_of_domination::GossipHello before the goober type is ever considered,
+//   so it IS the player's click — the script sets the boss's charmer, has it
+//   attack the runner, and casts 19832. The interrupt is load-bearing: the
+//   script's own cast is non-triggered and a cast already in progress refuses it
+//   silently, which is a click that looks like it happened and did not.
+//
+//   POSSESSING — OWN THE TICK AND DO NOTHING. 19832 is a channel, and the egg run
+//   lives or dies by it: a cast, a swing or a step from the runner's own body ends
+//   the possession, frees a boss the raid may not kill, and costs the bot a 60s
+//   lockout. So the rung takes the tick, drops the victim (autoattack runs off
+//   Unit::Update, not off the action engine) and spends the rest of the window
+//   mute. That is the mechanic's price, not an inefficiency — the earlier shape
+//   handed the tick back "so the rotation runs" and the rotation broke the channel.
+//
+// It never yields, in other words, because there is no state in which something
+// else running is better than this bot standing still.
+//
+// Driven by DungeonClearRazorgoreOrbTrigger; the election that names the runner
+// is the leader's (BlackwingLairDriver.cpp).
+class DungeonClearRazorgoreOrbAction : public DcMovementAction
+{
+public:
+    DungeonClearRazorgoreOrbAction(PlayerbotAI* botAI)
+        : DcMovementAction(botAI, "dungeon clear razorgore orb")
+    {
+    }
+    bool Execute(Event event) override;
+};
+
+// BLACKWING LAIR ONLY, everyone except the orb runner, COMBAT engine only. Walks
+// the raid to the camp at the foot of the orb platform and holds it there for the
+// egg run.
+//
+// The reason it exists, from the first live run: the orb and the egg run worked,
+// and the raid fought wherever the pull had left it. The runner is ROOTED on the
+// ledge for ninety seconds at a time and cannot defend itself, so every add that
+// picked it arrived unopposed. Camping the raid between the room and the ledge
+// puts the tank, the heals and the AoE on the path everything takes to reach it.
+//
+// The camp is on the FLOOR beside the platform, not on it (see CAMP_X/Y/Z for the
+// column probe and the distances): a raid on a small ledge has nowhere to spread
+// and nothing between it and the floor the adds cross.
+//
+// COMBAT ENGINE ONLY, deliberately. Out of combat the walk-in and the pre-boss
+// muster own the raid's position, and a rung at this relevance in the non-combat
+// engine would hijack the approach to the boss. The camp's job starts when the
+// fight does.
+//
+// Goes INERT once inside the leash rather than owning the tick and yielding, so
+// the combat engine never contends with it for a bot that is already in position.
+// One leash for the whole raid (CAMP_LEASH, 30yd) — loose enough that anyone can
+// step onto an add that reached the healers without being yanked off it every
+// tick. Driven by DungeonClearRazorgoreCampTrigger.
+//
+// The walk-back aims at the camp's near EDGE, not its centre (CAMP_HOLD_MARGIN):
+// a bot the fight pushed out takes one step back inside the boundary and holds
+// there. Aiming at the centre is what the first live run looked like — every bot
+// crossing the whole camp inward, getting pushed out, and crossing again.
+class DungeonClearRazorgoreCampAction : public DcMovementAction
+{
+public:
+    DungeonClearRazorgoreCampAction(PlayerbotAI* botAI)
+        : DcMovementAction(botAI, "dungeon clear razorgore camp")
+    {
+    }
+    bool Execute(Event event) override;
+};
+
+// Walk back inside the transit pack leash. Every member but the leader, both
+// engines, while the leader is crossing the Suppression Rooms.
+//
+// The destination is the near EDGE of the leash around the leader's live route
+// cursor, not the cursor itself — the CAMP_HOLD_MARGIN lesson, and it matters
+// more here than it did at Razorgore because the anchor is moving toward the bot
+// as well: aiming at the centre of a leash that is itself advancing makes every
+// correction a sprint past the leader instead of a step back into formation.
+//
+// Nothing in this rung walks a bot FORWARD past the cursor, and nothing holds one
+// there. It only ever closes a gap. Driven by DungeonClearTransitPackTrigger.
+class DungeonClearTransitPackAction : public DcMovementAction
+{
+public:
+    DungeonClearTransitPackAction(PlayerbotAI* botAI)
+        : DcMovementAction(botAI, "dungeon clear transit pack")
+    {
+    }
+    bool Execute(Event event) override;
+};
+
+// LET GO of a creature DcTargetExclusionRegistry bars right now. One tick, three
+// side effects, and then the trigger that fires it goes inert:
+//
+//   * AttackStop(), because autoattack runs off GetVictim() inside Unit::Update
+//     and not off the action engine — declining to pick a new target does not stop
+//     a swing already in flight, and on a 40-bot raid those swings are the damage
+//     that matters;
+//   * clear `current target`, because the whole class rotation reads it, so a
+//     stale one keeps casting into the barred creature long after the picker
+//     stopped offering it;
+//   * interrupt a cast already flying at it, for the same reason — a 2.5s cast
+//     started one tick before the bar came up still lands.
+//
+// It does NOT try to pick a replacement. The stock pickers do that on the next
+// tick and they now honour the bar (Value/DungeonClearDpsTargetValue), so a raid
+// with adds up flows straight onto the adds; a raid with nothing else to shoot
+// simply holds its fire, which is the correct answer and the whole point.
+//
+// See DungeonClearHoldFireTrigger for what "barred" means and why the exclusion
+// pool alone could not carry it.
+class DungeonClearHoldFireAction : public Action
+{
+public:
+    DungeonClearHoldFireAction(PlayerbotAI* botAI)
+        : Action(botAI, "dungeon clear hold fire")
     {
     }
     bool Execute(Event event) override;

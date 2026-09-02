@@ -44,6 +44,41 @@ public:
     // AND non-leader (off-)tanks alike — follows it via the follow-tank trigger.
     static bool IsDungeonClearLeader(Player* bot);
 
+    // The member whose DcRunState OWNS this run — DEAD OR ALIVE. FindLeaderTank
+    // elects only among ALIVE tank bots, so in a 5-man with one tank it returns
+    // nullptr the moment that tank dies, and every gate built on it goes inert
+    // precisely when the run most needs deciding. This one falls back to scanning
+    // the same-map group for the bot whose own run state is `enabled` — which is
+    // only ever the tank that started the run, alive or a corpse.
+    //
+    // Use this (not FindLeaderTank) wherever the question is "what is this RUN's
+    // state", and FindLeaderTank wherever it is "who is DRIVING right now".
+    static Player* FindRunOwner(Player* bot);
+
+    // Elects the single member that runs the TERMINAL rungs — the party-died
+    // bailout and the all-cleared completion. These two are not driving decisions;
+    // they are the run's own verdict on itself, and a run whose tank is a corpse
+    // still has to reach one.
+    //
+    // The driving ladder is leader-gated (see IsDungeonClearLeader), which is right
+    // for everything that moves the tank and fatal for these two: with the leader
+    // dead there is no leader, so `DungeonClearPartyDiedTrigger` never consumes the
+    // Disable verdict and `DungeonClearAllClearedTrigger` never fires. The run then
+    // idles until the 600s no-progress watchdog kills it — 17 of 17 no_progress runs
+    // in the MgT heroic 100-run audit (tp-20260805-005412-1) were exactly this, one
+    // of which (run -76) had already killed all four bosses.
+    //
+    // Election, in order: the living elected leader (so nothing changes in the
+    // healthy case), else the lowest-GUID living bot on the owner's map, else — a
+    // full wipe, where nobody is alive to elect — the lowest-GUID bot on it. Every
+    // member computes the same answer, so exactly one drives. Returns nullptr when
+    // the run is off, paused, or has no owner.
+    static Player* FindTerminalDriver(Player* bot);
+
+    // True when `bot` is that member. The terminal triggers' replacement for the
+    // driving ladder's IsEnabled gate.
+    static bool IsTerminalDriver(Player* bot);
+
     // True when `bot` belongs to a dungeon-clear run that is currently PAUSED —
     // either it is the elected leader and its own run is paused, or it is a
     // follower whose elected leader's run is paused. Reads the leader's
@@ -190,7 +225,18 @@ public:
     // the LEADER's crumbs cross-bot (only the tank records them) and only returns a
     // crumb `bot` can reach over a complete generated path. False if there is no
     // leader, the trail is empty, or no reachable point lies far enough back.
-    static bool GetLeaderScoutTrailPoint(Player* bot, float lag, Position& out);
+    //
+    // `probeReachable` buys the reachability/zone-line gate, and it is the whole
+    // cost of the call: a full PathGenerator build (plus a zone-line raycast) per
+    // candidate crumb. Pass FALSE when the answer is only being MEASURED — the
+    // arrival-hold and "am I already on this crumb?" tests in
+    // DungeonClearFollowTankAction, which either stop the bot where it stands or
+    // hand the tick to Follow(), and so can never walk anyone across a navmesh
+    // seam. Those two tests ran on every trailing tick of every follower and were
+    // paying for a Detour query whose result they threw away. Keep it TRUE (the
+    // default) on any path that then MOVES to the returned point.
+    static bool GetLeaderScoutTrailPoint(Player* bot, float lag, Position& out,
+                                         bool probeReachable = true);
 
     // Multi-point variant of GetLeaderScoutTrailPoint: the centered breadcrumb
     // POLYLINE a follower should glide to catch up to the tank, rather than the
@@ -272,6 +318,71 @@ public:
     // aura already on the tank when applied. Paired with the pull-mode toggle.
     static void SetLeaderDazeImmunity(Player* leader, bool apply);
 
+    // BLACKWING LAIR, Razorgore: is `bot` the orb runner the leader elected?
+    //
+    // The only cross-bot fact the egg run publishes. The leader's driver picks a
+    // member that can legally take the Orb of Domination (alive bot, no pet, no
+    // Mind Exhaustion, not the tank) and stamps it into its own run state; that
+    // member's orb rung reads this on its OWN tick and walks itself over. The
+    // leader never touches the runner's movement — a cross-bot MotionMaster poke
+    // fights both the runner's own AI and the `bwl` raid strategy's repositioning,
+    // every tick, and loses.
+    //
+    // False for everyone else, for a real player (no AI to drive), whenever the
+    // leader's run is off or paused, AND whenever the driver has gone quiet.
+    //
+    // That last clause is not decoration. The election is a plain GUID in the
+    // leader's run state and the driver only clears it on a tick that reaches
+    // Step::Done — but the tick after the thirtieth egg the event stops being
+    // DUE, so the hook is never called again and no such tick ever happens. Read
+    // as a bare GUID compare, the runner stayed elected for the rest of the raid:
+    // it held its station at the orb while the party walked to Vaelastrasz.
+    // Pairing the compare with the driver's own liveness stamp releases it within
+    // a tick or two of phase 1 ending, from every exit the encounter has.
+    //
+    // The driver's liveness stamp covers the whole of the runner's life: there is
+    // no election at all until the tank's pull on Grethok has landed, and from
+    // that tick the driver stamps on every step it has work for.
+    static bool IsLeaderRazorgoreRunner(Player* bot);
+
+    // BLACKWING LAIR, Razorgore: is the leader's egg run live right now?
+    //
+    // True while the driver has had work to do within the last few seconds — it
+    // stamps DcRunState::razorDrivingMs on every step but completion and the
+    // pre-pull wait, so this arms with the tank's pull on Grethok and releases
+    // within a tick or two of the last egg breaking, with no latch to reset on a
+    // wipe. The raid's camp rung is its
+    // only consumer: while it holds, everyone but the orb runner fights at the
+    // authored camp instead of wherever the pull left them.
+    static bool IsLeaderRazorgoreDriving(Player* bot);
+
+    // BLACKWING LAIR, the Suppression Rooms: is the leader crossing the gauntlet
+    // right now?
+    //
+    // True while the transit driver has had work within the last few seconds — it
+    // stamps DcRunState::transitDrivingMs on every tick from the leader's arrival
+    // at the staging point to its arrival at the Broodlord standoff. Exactly the
+    // Razorgore-driving shape and for the same reason: the stamp is the whole
+    // window, so the rung that reads it arms with the crossing and releases within
+    // a tick or two of it ending, by EVERY exit the leg has (the standoff, the
+    // event's timeout, a wipe, `dc pause`, a dead leader). There is no latch to
+    // reset.
+    static bool IsLeaderTransitDriving(Player* bot);
+
+    // ...and WHERE is it taking us — the leader's live route cursor, the anchor it
+    // is currently walking toward.
+    //
+    // This is the moving anchor the pack rung leashes to, and it is why that rung
+    // could not simply reuse the Razorgore camp: on this leg there is no fixed
+    // point to camp at. Returns false whenever the transit is not driving, so one
+    // call answers both "is there a pack to hold" and "hold it where".
+    static bool GetTransitAnchor(Player* bot, Position& out);
+
+    // The same read for a caller that has ALREADY resolved the leader. The wrapper
+    // above is on two per-tick, per-bot paths and FindLeaderTank costs a
+    // process-wide mutex acquisition; a caller that needs the leader for its own
+    // reasons must not pay for a second one.
+    static bool GetTransitAnchorFrom(Player* leader, Position& out);
 };
 
 #endif  // _DC_LEADER_SIGNAL_H

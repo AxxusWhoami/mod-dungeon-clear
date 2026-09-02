@@ -8,6 +8,9 @@
 # in-party chat keywords (`dc on`, `dungeon clear on`, …) — no config needed.
 # The settings below tune behaviour, debugging, and pathing.
 #
+# TO TURN THE WHOLE MODULE OFF without rebuilding, set DungeonClear.Enable = 0
+# (MODULE MASTER SWITCH, first section below) and restart the worldserver.
+#
 # PER-PLAYER OVERRIDES: the GENERAL SETTINGS below are the server-wide DEFAULT.
 # Players running the DungeonClear companion addon can override any of them for
 # the duration of their own dungeon run (the override is keyed to their group's
@@ -33,6 +36,46 @@
 # set for their run is never overruled by a heroic default. Every key that ships
 # with a heroic default is listed in the HEROIC DEFAULTS section at the end of
 # the general settings; writing a "<key>.Heroic" line replaces it.
+#
+# RAID MAPS: the same mechanism exists one layer up for raid runs. A setting can
+# be given a raid value by appending ".Raid" to the key; it applies on any raid
+# map (any raid difficulty) and outranks the heroic layer. The built-in raid
+# defaults are listed in the RAID DEFAULTS section after the heroic one. The
+# full order: per-player override -> "<key>.Raid" (raid maps) -> built-in raid
+# default -> "<key>.Heroic" (heroic-tier maps) -> built-in heroic default ->
+# "<key>" -> built-in default.
+
+########################################
+# MODULE MASTER SWITCH
+########################################
+
+#
+#    DungeonClear.Enable
+#        1 (default): mod-dungeon-clear is active.
+#        0: the module stays compiled and linked but is COMPLETELY INERT. It
+#        registers no strategies, actions, triggers or values with
+#        mod-playerbots, so no bot's AI engine can even name one; no bot is ever
+#        given the "dungeon clear" / "dungeon clear combat" strategies; every
+#        `.dc` command and companion-addon button answers "module is disabled"
+#        instead of acting; and every hook the module owns (pull brake,
+#        spectator camera, the per-tick reaper, the `.dc test` harness, the two
+#        core-bug workaround scripts, and the self-bot loot-roll override) does
+#        nothing. Bots behave exactly as they would with the module absent.
+#
+#        Use this when you want the code present — ready to switch on without a
+#        rebuild — but the behaviour off.
+#
+#        READ ONCE AT STARTUP. Registration into mod-playerbots' shared contexts
+#        is a one-way append that already-built bots hold by reference, so it
+#        cannot be undone (or added) live: changing this value and running
+#        `.reload config` logs a warning and changes nothing. Restart the
+#        worldserver for a new value to take effect. Every OTHER setting in this
+#        file is still honoured live on `.reload config`.
+#
+#        Default: 1
+#
+
+DungeonClear.Enable = 1
 
 ########################################
 # GENERAL SETTINGS  (per-player overridable — see note above)
@@ -306,6 +349,35 @@ DungeonClear.StrandedRecovery = 1
 #
 
 DungeonClear.StrandedRecoveryNoProgressSecs = 60
+
+#
+#    DungeonClear.UnreachableCombatPurgeSecs
+#        The other half of "the run has frozen". Not a party member stranded out
+#        of range, but a MOB stranded out of REACH that has the party in combat
+#        and can never be killed, never be reached, and never evade — Gundrak's
+#        Drakkari Raiders are the case this exists for: SmartAI ejects three of
+#        them off a sixteen-yard drop into water, mid-charge, and has them set
+#        their home position where they land. Instanced creatures never leash and
+#        a re-homed one has nowhere to evade back to, so nothing in the core ever
+#        ends that fight: the party stays flagged, the pull FSM never retires its
+#        phase, nobody can eat or drink, and the clear stops where it stands.
+#
+#        Seconds the run must show NO progress before such a holder's combat and
+#        threat are dropped and its entry is barred from target selection for the
+#        same window. This clock is COMBAT-BLIND, unlike the stranded-recovery one
+#        above — the unendable fight is the thing being detected, so a clock that
+#        combat re-armed could never fire.
+#
+#        Only creatures hand-listed in DcCombatPurgeRegistry can ever be dropped
+#        (currently one row: Gundrak's Drakkari Raider), so this window does not
+#        decide WHAT gets purged — only how long a deadlock runs before the
+#        failsafe answers it.
+#            0 = off (an unreachable holder freezes the run until you intervene)
+#
+#        Default: 60 (1 minute)
+#
+
+DungeonClear.UnreachableCombatPurgeSecs = 60
 
 #
 #    DungeonClear.WaitAtBoss
@@ -612,8 +684,16 @@ Appender.DungeonClear=2,4,0,DungeonClear.log
 #        4 (Info, default): milestones only. Raise to 5 (Debug) or 6 (Trace)
 #        to diagnose pathfinding/stall issues.
 #
+#        The appender list is DungeonClear only — the file, not the worldserver
+#        console. A clear logs a handful of Info lines per pack per bot (first
+#        contact, camp marked, party released), which is exactly what you want
+#        in a log you grep after the fact and exactly what you do not want
+#        scrolling the console of a live server. Add `Console` to the list below
+#        if you are actively watching a run. Real errors are unaffected: the
+#        module's error paths log to `playerbots`, which keeps its own routing.
+#
 
-Logger.playerbots.dungeonclear=4,Console DungeonClear
+Logger.playerbots.dungeonclear=4,DungeonClear
 
 #
 #    Advanced-pull sub-channel (playerbots.dungeonclear.pull).
@@ -631,7 +711,7 @@ Logger.playerbots.dungeonclear=4,Console DungeonClear
 #        6 = Trace (per-tick run-in / return / hold-at-camp movement).
 #
 #    Appender.DungeonClearPull=2,5,0,DungeonClearPull.log
-#    Logger.playerbots.dungeonclear.pull=5,Console DungeonClearPull
+#    Logger.playerbots.dungeonclear.pull=5,DungeonClearPull
 
 ########################################
 # ADVANCED PATHING SETTINGS
@@ -1433,6 +1513,59 @@ DungeonClear.SpectateSpeed = 2.5
 # DungeonClear.SmartRestHealerManaPct.Heroic = 60
 
 ###############################################################################
+# RAID DEFAULTS
+#
+#   Every key below ships with a different built-in default while the run is on
+#   a RAID map (any raid difficulty). Same contract as the heroic section: the
+#   lines are commented out and show the value the module already uses.
+#
+#   Why these and not others: the raid profile is only the numbers that must
+#   scale with 10-40 members. Behaviour (routing, pulls, doors, events) is
+#   shared with dungeons; the boss fights themselves are owned by the
+#   playerbots raid strategies while dungeon-clear stands down.
+###############################################################################
+
+#    A 25-40 member column is legitimately longer than a 5-man file; the 25yd
+#    dungeon spread would hold the advance behind every straggler. (The clamp
+#    ceiling for overrides is 120.)
+# DungeonClear.PartyMaxSpread.Raid = 40
+
+#    Raid-only settings (no ".Raid" suffix — these keys are consulted only on
+#    raid maps in the first place).
+#
+#    Quorum for raid trash-flow readiness: the run advances when every tank and
+#    healer meets the readiness bars and at least this percentage of living
+#    members does. Boss pulls still gate at 100/100 with everyone staged —
+#    that stricter bar lives in the pre-boss muster below, under its budgets.
+# DungeonClear.RaidReadyQuorumPct = 90
+#
+#    Fraction of the raid that must be dead (nobody still fighting) for the
+#    fight to count as a WIPE (-> revive at the entrance and continue).
+# DungeonClear.RaidWipeFractionPct = 90
+#
+#    Pre-boss muster budgets: how long the raid may spend topping off at the
+#    staging point, and how long a ForceRebuff round may run, before the muster
+#    advances with what it has (it announces the shortfall; it never deadlocks).
+# DungeonClear.RaidMusterRestTimeoutSecs = 35
+# DungeonClear.RaidMusterRebuffTimeoutSecs = 25
+#
+#    Hard ceiling on the WHOLE muster, measured from the tick it arms for a
+#    boss. When it expires the muster releases the pull from whatever phase it
+#    is in and cancels the open rebuff windows, so buffing never bleeds into
+#    the walk-in or the fight. The two budgets above are authored to sum to it.
+#    This is the real answer to a lone priest single-target buffing thirty-nine
+#    people: the raid never waits out the buff round, it waits out the budget.
+#    At a raid boss the muster IS the pull-readiness gate (it replaces the
+#    between-pulls rest/spread check there), so this ceiling is the longest the
+#    raid can stand in front of a boss doing nothing. Lower it if that is still
+#    longer than you want to watch.
+# DungeonClear.RaidMusterTotalTimeoutSecs = 60
+
+#    Many more corpses to walk between and drink for after a bad fight — the
+#    5-man budget ends winnable raid recoveries early.
+# DungeonClear.PostCombatRezTimeoutSecs.Raid = 180
+
+###############################################################################
 # `.dc test` — AUTOMATED DUNGEON TEST RUNS
 #
 #   Server-only watchdog limits for the test-run harness (a GM command that
@@ -1479,10 +1612,10 @@ DungeonClear.TestRun.NoProgressS = 600
 #        Hard wall-clock cap on a single test run (setup excluded); exceeding
 #        it fails the run as overall_timeout.
 #
-#        Default: 3600
+#        Default: 7200 (2 hours)
 #
 
-DungeonClear.TestRun.OverallTimeoutS = 3600
+DungeonClear.TestRun.OverallTimeoutS = 7200
 
 #
 #    DungeonClear.TestRun.MaxConcurrent

@@ -6,6 +6,7 @@
 #include "gtest/gtest.h"
 
 #include <sstream>
+#include <string>
 
 #include "TestRun/DcDiagSnapshot.h"
 
@@ -392,4 +393,95 @@ TEST(DcDiagSnapshotTest, PhantomVerdictUsesPveRefsOnly)
     EXPECT_FALSE(DcDiag::HasLegitimatePvECombatHolder(true, false));
     EXPECT_TRUE(DcDiag::HasLegitimatePvECombatHolder(false, false));
     EXPECT_TRUE(DcDiag::HasLegitimatePvECombatHolder(true, true));
+}
+
+// ---- the DC heartbeat ------------------------------------------------------
+//
+// The field exists to separate two freezes that every OTHER column reports
+// identically: a tank whose DC rungs all stood down, and a tank whose AI is not
+// being updated at all. Both show a frozen phase token, zeroed watchdogs and a
+// stale route. Only the tick age tells them apart, so the serializer has to
+// carry it — and has to carry "never ran" as something other than zero, because
+// zero is also what a bot that ticked one millisecond ago reports.
+
+TEST(DcDiagSnapshotTest, HeartbeatIsSerializedForTankAndMembers)
+{
+    Snapshot snap = Sample();
+    snap.dcTickSeen = true;
+    snap.dcTickAgeMs = 601102;   // the Gundrak Colossus-altar freeze
+
+    MemberSnapshot live;
+    live.name = "Follower";
+    live.online = true;
+    live.alive = true;
+    live.dcStrategy = true;
+    live.dcTickSeen = true;
+    live.dcTickAgeMs = 180;
+    snap.members.push_back(live);
+
+    // A bot whose ladder has never run reports -1, NOT 0 — 0 is a bot that
+    // ticked this millisecond, which is the opposite conclusion.
+    MemberSnapshot never;
+    never.name = "Newcomer";
+    never.online = true;
+    never.alive = true;
+    never.dcStrategy = true;
+    never.dcTickSeen = false;
+    snap.members.push_back(never);
+
+    std::string const json = Json(snap);
+
+    EXPECT_NE(json.find("\"dcTickAgeMs\":601102"), std::string::npos);
+    EXPECT_NE(json.find("\"dcTickAgeMs\":180"), std::string::npos);
+    EXPECT_NE(json.find("\"dcTickAgeMs\":-1"), std::string::npos);
+}
+
+TEST(DcDiagSnapshotTest, SummarizeStaysQuietOnAHealthyHeartbeat)
+{
+    Snapshot snap = Sample();
+    snap.dcTickSeen = true;
+    snap.dcTickAgeMs = 180;      // one ordinary AI tick ago
+
+    // A line that shouted on every healthy capture would be ignored on the one
+    // capture that matters.
+    EXPECT_EQ(DcDiag::Summarize(snap).find("DC-TICK"), std::string::npos);
+}
+
+TEST(DcDiagSnapshotTest, SummarizeFlagsAStaleTankBesideLiveFollowers)
+{
+    Snapshot snap = Sample();
+    snap.dcTickSeen = true;
+    snap.dcTickAgeMs = 601102;
+
+    // The signature this was written for: the tank silent for ten minutes while
+    // its four followers keep ticking. The companion count is what says the
+    // world is still turning and only this ONE bot stopped.
+    MemberSnapshot tank;
+    tank.name = "Wuachiw";
+    tank.dcStrategy = true;
+    tank.dcTickSeen = true;
+    tank.dcTickAgeMs = 601102;
+    snap.members.push_back(tank);
+    for (int i = 0; i < 4; ++i)
+    {
+        MemberSnapshot f;
+        f.name = "Follower" + std::to_string(i);
+        f.dcStrategy = true;
+        f.dcTickSeen = true;
+        f.dcTickAgeMs = 200;
+        snap.members.push_back(f);
+    }
+
+    std::string const line = DcDiag::Summarize(snap);
+
+    EXPECT_NE(line.find("DC-TICK-STALE 601s"), std::string::npos);
+    EXPECT_NE(line.find("(ticking 4/5)"), std::string::npos);
+}
+
+TEST(DcDiagSnapshotTest, SummarizeSaysNeverWhenTheLadderHasNotRun)
+{
+    Snapshot snap = Sample();
+    snap.dcTickSeen = false;
+
+    EXPECT_NE(DcDiag::Summarize(snap).find("DC-TICK-NEVER"), std::string::npos);
 }

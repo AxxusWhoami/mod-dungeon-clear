@@ -4,15 +4,18 @@
 
 #include "BetterLootRollAction.h"
 
+#include <utility>
+#include <vector>
+
 #include "Group.h"
+#include "LootMgr.h"
 #include "ObjectMgr.h"
 #include "PlayerbotAIConfig.h"
 #include "Playerbots.h"
 #include "RandomItemMgr.h"
 #include "StatsWeightCalculator.h"
-#include "WorldPacket.h"
-#include "WorldSession.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcPlayerbotCompat.h"
 
 namespace
 {
@@ -47,108 +50,132 @@ namespace
     }
 }
 
+bool DcLootRoll::IsVotablePendingRoll(Roll* roll, Player* bot)
+{
+    if (!roll || !bot)
+        return false;
+
+    // FIRST, because it is what CountRollVote depends on before anything else:
+    // it resolves the roll through Group::GetRoll, which matches on
+    // `itemGUID == Guid && isValid()` (Group.cpp:2680). A Roll whose Loot has
+    // been destroyed is INVALIDATED but stays in the group's RollId list, so it
+    // is still handed out by GetRolls() and still looks answerable from the
+    // outside — `getLoot()` just returns null for it, which is precisely why the
+    // empty-items guard below waves it through.
+    //
+    // This is the common flavour in practice: the first fix shipped without it
+    // and the starvation bound still tripped 21 times in tp-20260831-134433-1,
+    // every one of them an invalidated roll rather than an emptied one.
+    if (!roll->isValid())
+        return false;
+
+    auto const voteItr = roll->playerVote.find(bot->GetGUID());
+    if (voteItr == roll->playerVote.end() || voteItr->second != NOT_EMITED_YET)
+        return false;
+
+    // Group.cpp:1516. A loot object that exists but has been emptied — the
+    // corpse looted out from under a still-open roll window — makes
+    // CountRollVote bail before it records anything, so a vote here can never
+    // land and asking for one every tick is a livelock, not a retry.
+    if (Loot* loot = roll->getLoot())
+        if (loot->items.empty())
+            return false;
+
+    // The action's own no-vote path: it skips a roll whose template does not
+    // resolve, so such a roll must not be reported votable either.
+    return sObjectMgr->GetItemTemplate(roll->itemid) != nullptr;
+}
+
 bool DungeonClearBetterLootRollAction::isUseful()
 {
     // Only intercept self-bots (master == bot). A bot driven for a separate
     // human master keeps stock rolling — its vote is its own GUID, no conflict.
-    if (botAI->GetMaster() == bot && DcSettings::GetBool(bot, "BetterLootRolling"))
+    if (DcPlayerbotCompat::IsSelfBot(bot) && DcSettings::GetBool(bot, "BetterLootRolling"))
         return false;  // bot-self: cast no vote so the human gets to roll
 
     return LootRollAction::isUseful();
 }
 
-namespace
+bool DungeonClearBetterLootRollAction::Execute(Event event)
 {
-    // Queue a loot-roll vote as a CMSG_LOOT_ROLL packet so the World thread
-    // processes it on its own update loop. Calling Group::CountRollVote
-    // directly from the MapUpdater worker thread corrupts the Roll's std::map
-    // when two bots roll concurrently — the root cause of the loot-roll
-    // SIGSEGV. QueuePacket defers the handler to World::UpdateSessions, where
-    // all Group mutations are safe.
-    void QueueLootRoll(Player* bot, ObjectGuid itemGuid, uint32 itemSlot,
-                       RollVote vote)
-    {
-        WorldPacket* p = new WorldPacket(CMSG_LOOT_ROLL, 8 + 4 + 1);
-        *p << itemGuid;
-        *p << itemSlot;
-        *p << uint8(vote);
-        bot->GetSession()->QueuePacket(p);
-    }
-}
+    if (!DcSettings::GetBool(bot, "BetterLootRolling"))
+        return LootRollAction::Execute(event);
 
-bool DungeonClearBetterLootRollAction::Execute(Event /*event*/)
-{
+    // The self-bot suppression isUseful() already applies, repeated here
+    // because the engine's queued basket outlives the trigger that filled it:
+    // an action queued while it was useful still runs after isUseful() would
+    // refuse it, so a gate that exists only in isUseful() is not a gate.
+    if (DcPlayerbotCompat::IsSelfBot(bot))
+        return false;
+
     Group* group = bot->GetGroup();
     if (!group)
         return false;
 
-    std::vector<Roll*> rolls = group->GetRolls();
-    for (Roll*& roll : rolls)
+    // Decide every pending roll first and vote afterwards. A vote that
+    // completes a roll destroys it — Group::CountRollVote calls CountTheRoll,
+    // which erases the entry and deletes the Roll — so no Roll* may be read
+    // after any vote has been cast.
+    std::vector<std::pair<ObjectGuid, RollVote>> decided;
+    for (Roll* roll : group->GetRolls())
     {
-        auto voteItr = roll->playerVote.find(bot->GetGUID());
-        if (voteItr == roll->playerVote.end() || voteItr->second != NOT_EMITED_YET)
+        // One predicate with the trigger — see DcLootRoll::IsVotablePendingRoll.
+        // It also screens the roll CountRollVote would refuse, which this loop
+        // must skip for its own sake: `decided` is what makes Execute report
+        // true, so queuing a vote that can never be recorded would keep this
+        // action owning the tick forever.
+        if (!DcLootRoll::IsVotablePendingRoll(roll, bot))
             continue;
 
         ItemTemplate const* proto = sObjectMgr->GetItemTemplate(roll->itemid);
-        if (!proto)
+        // Anything that is not the over-level case is stock's to answer, and
+        // the pass below answers it — leave the vote unemitted for now.
+        if (!IsFutureWearable(proto))
             continue;
 
-        RollVote vote;
+        int32 randomProperty = 0;
+        if (roll->itemRandomPropId)
+            randomProperty = roll->itemRandomPropId;
+        else if (roll->itemRandomSuffix)
+            randomProperty = -((int)roll->itemRandomSuffix);
 
-        if (DcSettings::GetBool(bot, "BetterLootRolling") && IsFutureWearable(proto))
+        RollVote vote = CalculateFutureVote(proto, randomProperty);
+
+        // Same post-processing as stock LootRollAction::Execute.
+        if (vote == NEED)
         {
-            int32 randomProperty = 0;
-            if (roll->itemRandomPropId)
-                randomProperty = roll->itemRandomPropId;
-            else if (roll->itemRandomSuffix)
-                randomProperty = -((int)roll->itemRandomSuffix);
-
-            vote = CalculateFutureVote(proto, randomProperty);
-
-            if (vote == NEED)
-            {
-                if (sPlayerbotAIConfig.lootNeedRollLevel == 0 || RollUniqueCheck(proto, bot))
-                    vote = PASS;
-                else if (sPlayerbotAIConfig.lootNeedRollLevel == 1)
-                    vote = GREED;
-            }
-            else if (vote == GREED && !sPlayerbotAIConfig.lootGreedRollLevel)
+            if (sPlayerbotAIConfig.lootNeedRollLevel == 0 || RollUniqueCheck(proto, bot))
                 vote = PASS;
+            else if (sPlayerbotAIConfig.lootNeedRollLevel == 1)
+                vote = GREED;
         }
-        else
-        {
-            // Stock vote calculation: ask ItemUsageValue what a real player
-            // would do, then apply the same post-processing. Inlined here
-            // (instead of calling LootRollAction::Execute) so the vote goes
-            // through QueueLootRoll instead of the thread-unsafe direct call.
-            ItemUsage usage = AI_VALUE2(ItemUsage, "item usage", proto->ItemId);
-            vote = (usage == ITEM_USAGE_EQUIP || usage == ITEM_USAGE_REPLACE) ? NEED : GREED;
-
-            if (vote == NEED)
-            {
-                if (sPlayerbotAIConfig.lootNeedRollLevel == 0 || RollUniqueCheck(proto, bot))
-                    vote = PASS;
-                else if (sPlayerbotAIConfig.lootNeedRollLevel == 1)
-                    vote = GREED;
-            }
-            else if (vote == GREED && !sPlayerbotAIConfig.lootGreedRollLevel)
-                vote = PASS;
-        }
+        else if (vote == GREED && !sPlayerbotAIConfig.lootGreedRollLevel)
+            vote = PASS;
 
         switch (group->GetLootMethod())
         {
             case MASTER_LOOT:
             case FREE_FOR_ALL:
-                QueueLootRoll(bot, roll->itemGUID, roll->itemSlot, PASS);
+                vote = PASS;
                 break;
             default:
-                QueueLootRoll(bot, roll->itemGUID, roll->itemSlot, vote);
                 break;
         }
-        return true;
+        decided.emplace_back(roll->itemGUID, vote);
     }
 
-    return false;
+    for (auto const& [itemGuid, vote] : decided)
+        group->CountRollVote(bot->GetGUID(), itemGuid, vote);
+
+    // Then stock, for every roll this pass left alone. Upstream #2496 turned
+    // that from one item per Execute into all of them, and matching it is the
+    // point: a five-item boss drop used to hold the action slot for five ticks
+    // (this action runs off a per-tick trigger, not stock's random one), which
+    // is exactly the starvation the one-action-per-tick rule warns about.
+    // The rolls voted above are skipped there — CountRollVote has moved them
+    // off NOT_EMITED_YET.
+    bool const stockVoted = LootRollAction::Execute(event);
+    return !decided.empty() || stockVoted;
 }
 
 bool DungeonClearBetterLootRollAction::IsFutureWearable(ItemTemplate const* proto) const

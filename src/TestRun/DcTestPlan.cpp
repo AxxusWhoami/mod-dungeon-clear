@@ -30,7 +30,7 @@ namespace DcTestPlan
             out.ok = false;
             out.err = why +
                 " — usage: .dc test plan start <dungeon> [heroic] total=N [concurrent=N] [level=N]"
-                " [seed=N] [ilvl=N|none] [quality=rare|epic|…]";
+                " [seed=N] [size=N] [ilvl=N|none] [quality=rare|epic|…]";
             return out;
         };
 
@@ -90,6 +90,12 @@ namespace DcTestPlan
                 out.spec.level = static_cast<std::uint32_t>(n);
             else if (key == "seed")
                 out.spec.seedBase = static_cast<std::uint32_t>(n);
+            else if (key == "size")
+            {
+                if (n < 2 || n > 40)
+                    return usage("size must be 2-40 in '" + word + "'");
+                out.spec.size = static_cast<std::uint32_t>(n);
+            }
             else
                 return usage("unknown option '" + key + "'");
         }

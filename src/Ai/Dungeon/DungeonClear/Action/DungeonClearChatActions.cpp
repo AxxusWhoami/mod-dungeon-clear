@@ -26,6 +26,7 @@
 #include "Ai/Dungeon/DungeonClear/Data/RoomAggroRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonWingRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Util/ChunkedPathfinder.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcPlayerbotCompat.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRezRecovery.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearUtil.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonEventExecutor.h"
@@ -65,8 +66,8 @@ namespace
         // own PlayerbotAI has master == bot). Without this exception the
         // moment a player enables bot self mode they would be silently
         // locked out of every dc command.
-        if (PlayerbotAI* ownerAI = GET_PLAYERBOT_AI(owner))
-            if (ownerAI->GetMaster() != owner)
+        if (GET_PLAYERBOT_AI(owner))
+            if (!DcPlayerbotCompat::IsSelfBot(owner))
                 return false;
         if (!bot || !bot->GetGroup())
             return false;
@@ -278,6 +279,10 @@ bool DcOnAction::Execute(Event event)
 
     // Reset transient state and enable.
     DcRun::Of(context).enabled = true;
+    // Raid runs flip the non-interference contract (boss stand-down; see
+    // DcRunState). Map::IsDungeon() was verified above, so this is the honest
+    // map type, stamped once for the run session.
+    DcRun::Of(context).raidRun = bot->GetMap()->IsRaid();
     // Register this tank with the event-driven status pusher so the server
     // begins emitting STATUS packets on state transitions (replacing the
     // addon's old 2s poll). The matching UnmarkActiveTank lives in every
@@ -577,8 +582,7 @@ bool DcBossesAction::Execute(Event event)
         return ev->panelTeam != TEAM_NEUTRAL && ev->panelTeam != myTeam;
     };
     // Difficulty-gated events are hidden from the other difficulty's panel.
-    Difficulty const panelDifficulty =
-        bot->GetMap() ? bot->GetMap()->GetDifficulty() : DUNGEON_DIFFICULTY_NORMAL;
+    DcDiffKey const panelDifficulty = DcDifficulty::Of(bot->GetMap());
 
     for (DungeonEvent const* ev : DungeonEventRegistry::Conditional(bot->GetMapId(), panelDifficulty))
     {
@@ -938,8 +942,7 @@ bool DcGoAction::Execute(Event event)
     {
         std::string query = param;
         std::transform(query.begin(), query.end(), query.begin(), ::tolower);
-        Difficulty const goDifficulty =
-            bot->GetMap() ? bot->GetMap()->GetDifficulty() : DUNGEON_DIFFICULTY_NORMAL;
+        DcDiffKey const goDifficulty = DcDifficulty::Of(bot->GetMap());
         for (DungeonEvent const* ev : DungeonEventRegistry::Conditional(bot->GetMapId(), goDifficulty))
         {
             bool keyMatch = isNumeric &&
