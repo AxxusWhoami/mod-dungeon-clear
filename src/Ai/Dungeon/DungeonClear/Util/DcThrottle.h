@@ -62,6 +62,11 @@ enum class DcThrottle : uint8
     HosWaveLog,          // the Halls of Stone wave telemetry line
     RezRefusalLog,       // RezRefusalDiag — why a party rez was refused
 
+    // --- scan caches (time only) -------------------------------------------
+    BmDrainerScan,       // BmDrainersOnMedivh — creature scan near Medivh
+    BmRiftScan,          // BmSelectTargetRift — creature scan for rifts
+    HosAddScan,           // HosAddNearestBrann / HosNearestAdd — wave add scan
+
     Count
 };
 

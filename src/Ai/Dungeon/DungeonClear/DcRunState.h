@@ -296,6 +296,20 @@ struct DcRunState
     ObjectGuid vhKeeperLock;
     ObjectGuid bmRiftLock;
 
+    // --- cached per-tick scan results (leader-owned, throttled) -------------
+    // GetCreatureListWithEntryInGrid is an O(all-creatures-in-grid) scan that
+    // several driver hooks call every tick. These fields cache the RESULT for
+    // a short window so a scan runs at most once per window per run, not once
+    // per caller. The cache is stamped alongside the throttle slot of the same
+    // name; a miss (slot expired) re-scans and re-stamps both.
+    //
+    // BmDrainersOnMedivh: count of live drainers on Medivh's ring.
+    uint32 bmDrainerCount = 0;
+    // BmSelectTargetRift: the GUID of the rift the scan picked (empty = none).
+    // Re-validated on every read even inside the window, so a despawned rift
+    // never lingers — the cache only saves the scan, not the validation.
+    ObjectGuid bmRiftScanResult;
+
     // --- per-bot throttles (see Util/DcThrottle.h) --------------------------
 
     DcThrottleSlot throttles[kDcThrottleCount]{};

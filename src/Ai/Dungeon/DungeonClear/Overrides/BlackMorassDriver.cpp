@@ -497,10 +497,24 @@ namespace
 
     // Count the rift adds parked on (or arriving at) Medivh's ring — the party's
     // one real loss condition, since each of them is channelling Corrupt.
-    uint32 BmDrainersOnMedivh(Creature* medivh)
+    // Throttled: the scan runs at most once per 500ms per run; callers within the
+    // window read the cached count. The window is short enough that a fresh drainer
+    // arriving is seen within one tick of it mattering.
+    uint32 BmDrainersOnMedivh(Player* bot, Creature* medivh)
     {
         if (!medivh)
             return 0;
+
+        PlayerbotAI* const botAI = GET_PLAYERBOT_AI(bot);
+        if (botAI)
+        {
+            DcRunState& st = DcRun::Of(botAI);
+            if (!st.Throttled(DcThrottle::BmDrainerScan, 500))
+                st.bmDrainerCount = 0;  // re-scan below
+            else if (st.bmDrainerCount > 0)
+                return st.bmDrainerCount;
+        }
+
         std::list<Creature*> found;
         medivh->GetCreatureListWithEntryInGrid(found, BlackMorassDrainEntries(),
                                                BM_MEDIVH_RING);
@@ -508,6 +522,9 @@ namespace
         for (Creature* c : found)
             if (c && c->IsAlive())
                 ++alive;
+
+        if (botAI)
+            DcRun::Of(botAI).bmDrainerCount = alive;
         return alive;
     }
 
@@ -856,7 +873,7 @@ namespace
         }
 
         Creature* medivh = bot->FindNearestCreature(BM_NPC_MEDIVH, BM_MEDIVH_SCAN, /*alive*/ true);
-        uint32 const draining = BmDrainersOnMedivh(medivh);
+        uint32 const draining = BmDrainersOnMedivh(bot, medivh);
 
         // Wave 18's boss. Looked up before the rift machinery because he preempts
         // all of it — see branch 1.
