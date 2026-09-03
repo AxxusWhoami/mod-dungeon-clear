@@ -16,12 +16,17 @@
  * the message so no further chat processing occurs.
  */
 
+#include <algorithm>
+#include <cmath>
 #include <cstdlib>
+#include <chrono>
+#include <unordered_map>
 
 #include "ScriptMgr.h"
 #include "PlayerScript.h"
 #include "Chat.h"
 #include "Log.h"
+#include "ObjectAccessor.h"
 #include "Player.h"
 #include "ServerFacade.h"
 #include "Playerbots.h"
@@ -34,6 +39,7 @@
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettingsRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearUtil.h"
+#include "Ai/Dungeon/DungeonClear/Value/DungeonBossesValue.h"
 
 namespace
 {
@@ -95,6 +101,67 @@ namespace
         SendAddonPayload(player, "DC\tSYNCEND");
     }
 
+    // V-01: The run owner is the group leader, or — when the leader is a bot —
+    // the player who owns that bot. This is the single authority check every
+    // mutating command passes through. Read-only commands (status, sync) skip it.
+    bool IsRunOwner(Player* player)
+    {
+        if (!player)
+            return false;
+
+        Group* group = player->GetGroup();
+        if (!group)
+            return false;
+
+        ObjectGuid leaderGuid = group->GetLeaderGUID();
+        if (leaderGuid != player->GetGUID())
+        {
+            Player* leader = ObjectAccessor::FindConnectedPlayer(leaderGuid);
+            if (!leader || !leader->IsPlayerbot())
+                return false;
+
+            PlayerbotAI* leaderAi = leader->GetPlayerbotAI();
+            if (!leaderAi)
+                return false;
+            if (leaderAi->GetOwner() != player)
+                return false;
+        }
+
+        return true;
+    }
+
+    // V-02: Validate that a creature entry is a boss in the tank bot's current
+    // instance. Prevents a modified client from sending the tank to an arbitrary
+    // creature ID that could exploit pathfinding or cause stalls.
+    bool IsValidBossEntry(Player* tankBot, uint32 entry)
+    {
+        if (!tankBot || entry == 0)
+            return false;
+
+        PlayerbotAI* botAI = GET_PLAYERBOT_AI(tankBot);
+        if (!botAI)
+            return false;
+
+        auto const& bosses = botAI->GetAiObjectContext()
+            ->GetValue<std::vector<DungeonBossInfo>>(DcKey::DungeonBosses)->Get();
+
+        for (auto const& boss : bosses)
+            if (boss.entry == entry)
+                return true;
+        return false;
+    }
+
+    // V-10: Reject parameters containing tab or newline characters that would
+    // break the tab-delimited addon protocol or inject unexpected fields.
+    bool IsValidParam(std::string const& param)
+    {
+        if (param.empty())
+            return true;
+        return param.find('\t') == std::string::npos &&
+               param.find('\n') == std::string::npos &&
+               param.find('\r') == std::string::npos;
+    }
+
     // set / reset / sync share the same run-owner resolution. Returns false (and
     // reports an error) when the player has no leader tank to own the overrides.
     void HandleSettingsCommand(Player* player, std::string const& subCmd,
@@ -119,9 +186,34 @@ namespace
             return;
         }
 
+        // V-03: set and reset require run-owner authority.
+        if (!IsRunOwner(player))
+        {
+            SendAddonError(player,
+                "Only the group leader can change dungeon clear settings.");
+            return;
+        }
+
         if (subCmd == "reset")
         {
-            // param is the key to reset, or empty to reset the whole run.
+            // V-04: If a specific key is named, validate it exists and is
+            // player-facing before clearing its override.
+            if (!param.empty())
+            {
+                DcSettingDef const* def = FindDcSetting(param);
+                if (!def)
+                {
+                    SendAddonError(player, "Unknown setting: " + param);
+                    return;
+                }
+                if (!def->playerFacing)
+                {
+                    SendAddonError(player,
+                        "Setting " + param + " is not player-configurable.");
+                    return;
+                }
+            }
+
             DcSettings::ResetOverride(owner, param);
             SendSettingsSync(player, owner);
             return;
@@ -138,16 +230,43 @@ namespace
         std::string const key = param.substr(0, sep);
         std::string const valStr = param.substr(sep + 1);
 
+        // V-04a: The key must exist in the registry.
+        DcSettingDef const* def = FindDcSetting(key);
+        if (!def)
+        {
+            SendAddonError(player, "Unknown setting: " + key);
+            return;
+        }
+
+        // V-04b: The key must be player-facing.
+        if (!def->playerFacing)
+        {
+            SendAddonError(player,
+                "Setting " + key + " is not player-configurable.");
+            return;
+        }
+
+        // V-04c: The value must be a valid number.
         char* end = nullptr;
         double const value = std::strtod(valStr.c_str(), &end);
-        if (end == valStr.c_str())
+        if (end == valStr.c_str() || !std::isfinite(value))
         {
             SendAddonError(player, "Invalid value for " + key + ".");
             return;
         }
 
+        // V-04d: Clamp to the setting's [min, max] range and inform the player
+        // if the value was adjusted.
+        double const clamped = std::clamp(value, def->minVal, def->maxVal);
+        if (clamped != value)
+        {
+            SendAddonError(player,
+                Acore::StringFormat("{} clamped to {:.1} (range {}-{}).",
+                    key, clamped, def->minVal, def->maxVal));
+        }
+
         std::string err;
-        if (!DcSettings::SetOverride(owner, key, value, &err))
+        if (!DcSettings::SetOverride(owner, key, clamped, &err))
         {
             SendAddonError(player, err);
             return;
@@ -156,6 +275,54 @@ namespace
         // Echo the stored (clamped) value back so the addon shows the truth.
         if (DcSettingDef const* d = FindDcSetting(key))
             SendSettingLine(player, owner, *d);
+    }
+
+    // V-07: Per-player, per-subcommand rate limiting to prevent addon-message
+    // spam from a modified client. Uses steady_clock for monotonic intervals.
+    // Cleaned up on player logout.
+    using TimePoint = std::chrono::steady_clock::time_point;
+
+    // Cooldowns per subcommand (milliseconds). Read-only commands get short
+    // windows; mutating commands get longer ones.
+    std::unordered_map<std::string, uint32> const kCooldowns = {
+        { "status",   1000 },
+        { "bosses",    2000 },
+        { "sync",      5000 },
+        { "on",        1000 },
+        { "off",       1000 },
+        { "skip",      1000 },
+        { "pause",     1000 },
+        { "pull",      1000 },
+        { "go",        1000 },
+        { "set",       1000 },
+        { "reset",     2000 },
+        { "spectate",  1000 },
+    };
+
+    // player GUID -> (subCmd -> last-used timestamp)
+    std::unordered_map<ObjectGuid,
+        std::unordered_map<std::string, TimePoint>> g_throttleState;
+
+    bool IsThrottled(Player* player, std::string const& subCmd)
+    {
+        auto it = kCooldowns.find(subCmd);
+        if (it == kCooldowns.end())
+            return false;
+
+        auto now = std::chrono::steady_clock::now();
+        auto& playerState = g_throttleState[player->GetGUID()];
+        auto& lastUsed = playerState[subCmd];
+
+        if (lastUsed.time_since_epoch().count() != 0)
+        {
+            auto const elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - lastUsed).count();
+            if (static_cast<uint32>(elapsed) < it->second)
+                return true;
+        }
+
+        lastUsed = now;
+        return false;
     }
 }
 
@@ -203,7 +370,11 @@ public:
         if (!DcModule::IsEnabled())
             return;  // no run can exist, so no override store to clear
         if (player)
+        {
             DcSettings::ClearRun(player->GetGUID());
+            // V-07: Clean up throttle state for the departing player.
+            g_throttleState.erase(player->GetGUID());
+        }
     }
 
     // Block the core from relaying our own control messages to the rest of the
@@ -260,6 +431,10 @@ public:
         if (subCmd.empty())
             return;
 
+        // V-07: Per-player rate limiting.
+        if (IsThrottled(player, subCmd))
+            return;
+
         // Per-run settings overrides (set/reset/sync) are handled in-process
         // rather than dispatched as a tank-bot action.
         if (subCmd == "set" || subCmd == "reset" || subCmd == "sync")
@@ -276,13 +451,41 @@ public:
             std::string whyNot;
             bool ok = true;
             if (param == "follow")
+            {
                 ok = DcSpectator::ToggleFollow(player, nullptr, &whyNot);
+            }
             else if (param == "next")
+            {
                 ok = DcSpectator::CycleFollow(player, +1, &whyNot);
+            }
             else if (param == "prev")
+            {
                 ok = DcSpectator::CycleFollow(player, -1, &whyNot);
+            }
+            else if (param.compare(0, 7, "follow\t") == 0)
+            {
+                // V-05: "follow\t<name>" — validate the named bot exists and is
+                // in the same instance as the sender.
+                std::string botName = param.substr(7);
+                Player* target = ObjectAccessor::FindPlayerByName(botName, false);
+                if (!target || !target->IsPlayerbot())
+                {
+                    SendAddonError(player, "Bot not found: " + botName);
+                    return;
+                }
+                if (target->GetMapId() != player->GetMapId() ||
+                    target->GetInstanceId() != player->GetInstanceId())
+                {
+                    SendAddonError(player,
+                        "Bot is not in your instance: " + botName);
+                    return;
+                }
+                ok = DcSpectator::ToggleFollow(player, target, &whyNot);
+            }
             else
+            {
                 ok = DcSpectator::Toggle(player, &whyNot);
+            }
             if (!ok)
                 SendAddonError(player, whyNot);
             return;
@@ -294,16 +497,80 @@ public:
         if (subCmd == "status")
             SendSpectateState(player);
 
+        // V-10: Reject parameters containing tab or newline characters that
+        // could inject unexpected fields into the action-dispatch protocol. The
+        // in-process handlers (set, spectate) parse their own multi-field params
+        // and are exempt.
+        if (!IsValidParam(param))
+        {
+            SendAddonError(player, "Invalid parameter: contains forbidden characters.");
+            return;
+        }
+
+        // V-01: Read-only commands (status, bosses) are allowed from any group
+        // member. All mutating commands require run-owner authority.
+        bool const readOnly = (subCmd == "status" || subCmd == "bosses");
+        if (!readOnly && !IsRunOwner(player))
+        {
+            SendAddonError(player,
+                "You are not the leader of this dungeon clear.");
+            return;
+        }
+
         // Map subcommand strings to action names.
         std::string action;
         if (subCmd == "on")         action = "dc on";
         else if (subCmd == "off")   action = "dc off";
         else if (subCmd == "skip")  action = "dc skip";
         else if (subCmd == "pause") action = "dc pause";
-        else if (subCmd == "pull")  action = "dc pull";
+        else if (subCmd == "pull")
+        {
+            // V-06: Validate the pull parameter is one of the three allowed values.
+            if (param != "off" && param != "on" && param != "dynamic")
+            {
+                SendAddonError(player,
+                    "pull requires 'off', 'on', or 'dynamic'.");
+                return;
+            }
+            action = "dc pull";
+        }
         else if (subCmd == "status") action = "dc status";
         else if (subCmd == "bosses") action = "dc bosses";
-        else if (subCmd == "go")    action = "dc go";
+        else if (subCmd == "go")
+        {
+            // V-02: Validate that the go parameter is a valid integer and
+            // corresponds to a boss in the tank bot's current instance.
+            if (param.empty())
+            {
+                SendAddonError(player, "go requires a creature entry id.");
+                return;
+            }
+
+            char* end = nullptr;
+            long const entry = std::strtol(param.c_str(), &end, 10);
+            if (end == param.c_str() || *end != '\0' || entry <= 0)
+            {
+                SendAddonError(player, "Invalid creature entry: " + param);
+                return;
+            }
+
+            Player* leader = DcLeaderSignal::FindLeaderTank(player);
+            if (!leader)
+            {
+                SendAddonError(player, "No tank bot found in your group.");
+                return;
+            }
+
+            if (!IsValidBossEntry(leader, static_cast<uint32>(entry)))
+            {
+                SendAddonError(player,
+                    "Creature " + param + " is not a boss in this instance.");
+                return;
+            }
+
+            action = "dc go";
+            param = std::to_string(entry);
+        }
         else
         {
             LOG_DEBUG("module", "mod-dungeon-clear: unknown addon subcommand '{}' from {}",
