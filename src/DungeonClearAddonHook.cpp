@@ -117,13 +117,13 @@ namespace
         if (leaderGuid != player->GetGUID())
         {
             Player* leader = ObjectAccessor::FindConnectedPlayer(leaderGuid);
-            if (!leader || !leader->IsPlayerbot())
+            if (!leader || !GET_PLAYERBOT_AI(leader))
                 return false;
 
-            PlayerbotAI* leaderAi = leader->GetPlayerbotAI();
+            PlayerbotAI* leaderAi = GET_PLAYERBOT_AI(leader);
             if (!leaderAi)
                 return false;
-            if (leaderAi->GetOwner() != player)
+            if (leaderAi->GetMaster() != player)
                 return false;
         }
 
@@ -468,7 +468,7 @@ public:
                 // in the same instance as the sender.
                 std::string botName = param.substr(7);
                 Player* target = ObjectAccessor::FindPlayerByName(botName, false);
-                if (!target || !target->IsPlayerbot())
+                if (!target || !GET_PLAYERBOT_AI(target))
                 {
                     SendAddonError(player, "Bot not found: " + botName);
                     return;
