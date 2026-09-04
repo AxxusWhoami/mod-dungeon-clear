@@ -1,3 +1,5 @@
+> **The fixes made in this module have been implemented at https://corelegacy.gg**
+
 # mod-dungeon-clear
 
 Autonomous dungeon-clearing mode for **mod-playerbots** tank bots, packaged as a
