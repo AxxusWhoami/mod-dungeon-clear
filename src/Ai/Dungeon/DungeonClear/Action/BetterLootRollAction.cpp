@@ -174,11 +174,11 @@ bool DungeonClearBetterLootRollAction::Execute(Event event)
     for (auto const& roll : decided)
     {
         WorldPacket data(CMSG_LOOT_ROLL, 8 + 4 + 1);
-        data << uint64(roll.guid);
+        data << uint64(roll.guid.GetRawValue());
         data << uint32(roll.slot);
         data << uint8(roll.vote);
-        
-        bot->GetSession()->QueuePacket(data);
+
+        bot->GetSession()->QueuePacket(&data);
     }
 
     // Then stock, for every roll this pass left alone. Upstream #2496 turned
