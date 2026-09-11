@@ -192,9 +192,10 @@ void DcStatusPublisher::SendAddonMessage(PlayerbotAI* botAI, std::string const& 
     std::string const payload = "DC\t" + msg;
 
     WorldPacket data;
-    ChatHandler::BuildChatPacket(data, CHAT_MSG_PARTY, payload.c_str(),
-                                 LANG_ADDON, CHAT_TAG_NONE,
-                                 bot->GetGUID(), bot->GetName());
+    ChatHandler::BuildChatPacket(data, CHAT_MSG_PARTY, LANG_ADDON,
+                                 bot->GetGUID(), bot->GetGUID(),
+                                 std::string_view(payload),
+                                 CHAT_TAG_NONE);
 
     for (Player* receiver : botAI->GetRealPlayersInGroup())
         ServerFacade::instance().SendPacket(receiver, &data);
