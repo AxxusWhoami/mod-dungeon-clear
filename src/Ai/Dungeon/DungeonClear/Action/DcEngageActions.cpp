@@ -1461,6 +1461,32 @@ bool DungeonClearEngageActionBase::DriveEscortCreature(EventStep const& step,
                            escortee->GetName());
             return true;
         }
+        // AND "LANDED" MEANS THE FLAG IS GONE, not that the packet went out.
+        // SelectGossip reports that it sent a select, which is a weaker claim: a
+        // select can land on an option that opens ANOTHER menu instead of firing
+        // the action, and the escortee keeps his gossip flag. This branch is
+        // entered only while that flag is up, so a flag that survives the call is
+        // a click that did not resume anything — and stamping progress for it
+        // reproduced the exact invisibility the note above describes, one dungeon
+        // later: Culling of Stratholme's Arthas re-clicked ~4x/second for ten
+        // minutes with every watchdog clear (tp-20260910-083410-1, 10/10 runs).
+        // Every scripted resume gossip DC drives clears the flag on the option
+        // that fires its DoAction (Arthas, Old Hillsbrad's Thrall), so this is a
+        // reliable receipt rather than a heuristic.
+        if (escortee->HasNpcFlag(UNIT_NPC_FLAG_GOSSIP))
+        {
+            if (!DcRun::Of(botAI).Throttled(DcThrottle::EscortResumeGossipLog, 10000))
+            {
+                LOG_WARN("playerbots.dungeonclear",
+                         "[dungeon-clear] {}: the resume gossip on {} (option {}) left "
+                         "his gossip flag up — the select did not reach the option that "
+                         "resumes him; not counting it as progress",
+                         bot->GetName(), escortee->GetName(), step.gossipOption);
+            }
+            EscortWatchdog(botAI, context, prog, now, /*keepingUp*/ false,
+                           escortee->GetName());
+            return true;
+        }
         LOG_INFO("playerbots.dungeonclear",
                  "[dungeon-clear] {} resumed the escort of {} at a checkpoint "
                  "(gossip option {})",
@@ -1763,14 +1789,11 @@ bool DungeonClearEngageActionBase::DriveUseItemOnGO(EventStep const& step)
         if (!DcMovement::DcMovementAllowed(botAI))
             return false;
         DcMovement::ResolveEscortConflict(bot);
-        if (MotionMaster* mm = bot->GetMotionMaster())
-        {
-            mm->Clear();
-            mm->MovePoint(0, target->GetPositionX(), target->GetPositionY(),
+        bot->GetMotionMaster()->Clear();
+        bot->GetMotionMaster()->MovePoint(0, target->GetPositionX(), target->GetPositionY(),
                                           target->GetPositionZ(), FORCED_MOVEMENT_NONE,
                                           0.0f, 0.0f, /*generatePath*/ true,
                                           /*forceDestination*/ true);
-        }
         return true;
     }
 
@@ -1801,6 +1824,62 @@ bool DungeonClearEngageActionBase::DriveUseItemOnGO(EventStep const& step)
     DcRecordBreadcrumb(context, bot);  // followers inherit the centered trail
     DcMoveTo(bot->GetMapId(), target->GetPositionX(), target->GetPositionY(),
              target->GetPositionZ(), /*idle*/ false, /*react*/ false,
+             /*normal_only*/ false, /*exact_waypoint*/ false,
+             MovementPriority::MOVEMENT_NORMAL);
+    return true;
+}
+
+bool DungeonClearEngageActionBase::DriveUseItemAt(EventStep const& step)
+{
+    if (!bot || step.itemId == 0 || step.goEntry == 0)
+        return false;
+
+    // Mirrors the executor's DC_EVENT_USEITEM_REACH / DC_EVENT_USEITEM_LATCH — keep
+    // the three in sync, or the driver and RunStep disagree about arrival and the
+    // tank oscillates between walking and casting.
+    float const reach = step.radius > 0.0f ? step.radius : 4.0f;
+    constexpr float DC_USEITEM_LATCH = 5.0f;
+
+    // Already done: the receipt GO (the Plagued Grain Crate the helper's SpellHit
+    // summons in the Suspicious one's place) stands on the anchor. Hand back from
+    // wherever the tank is — RunStep's identical latch reports Done and the chain
+    // moves to the next crate, so walking here would be walking to a spent one.
+    {
+        std::list<GameObject*> receipts;
+        bot->GetGameObjectListWithEntryInGrid(receipts, step.goEntry, 80.0f);
+        for (GameObject* g : receipts)
+            if (g && g->GetExactDist(step.x, step.y, step.z) <= DC_USEITEM_LATCH)
+                return false;
+    }
+
+    // In position -> hand back so RunStep uses the item. Also the exit for an
+    // anchor this driver has delivered: a tank inside `reach` must not be re-moved,
+    // or the 10s item cooldown is spent re-issuing splines instead of waiting.
+    if (bot->GetExactDist(step.x, step.y, step.z) <= reach)
+        return false;
+
+    // PARTY-COHESION GATE, the barrel run's verbatim (and the same reason):
+    // this drive owns the tick at DcRel::AtObjective (30), so without it the tank
+    // runs the 330yd of road alone while the status panel reports it is waiting for
+    // the party. Spread-only — HP/mana is the rest decision's job, below — and
+    // measured through GetSpreadGate so a hold-at-camp party legitimately standing
+    // PullSetback behind the tank cannot deadlock it.
+    DcPartyState::SpreadGate const gate = DcPartyState::GetSpreadGate(bot, context);
+    if (!DcPartyState::IsPartyReady(bot, /*minHp*/ 0.0f, /*minMp*/ 0.0f, gate.maxSpread,
+                                    gate.anchor, gate.maxTankGap))
+    {
+        SetPhase(context, "objective");
+        DcMovement::StopBot(bot, DcMovement::Stop::Hold);
+        return true;
+    }
+
+    // OWN THE TICK and drive a sustained navigation to the crate. Through the DC
+    // movement system (not a bare MovePoint) because the legs are 48-81yd — past
+    // the point where the engine's 74-point path cap truncates silently — and
+    // because the at-objective Hold would chop a plain spline every tick.
+    SetPhase(context, "objective");
+    DcRecordBreadcrumb(context, bot);  // followers inherit the centered trail
+    DcMoveTo(bot->GetMapId(), step.x, step.y, step.z, /*idle*/ false, /*react*/ false,
              /*normal_only*/ false, /*exact_waypoint*/ false,
              MovementPriority::MOVEMENT_NORMAL);
     return true;
@@ -1969,6 +2048,34 @@ bool DcObjectiveArriveAction::Execute(Event /*event*/)
                         break;
                 }
                 if (DriveUseItemOnGO(step))
+                    return true;
+            }
+            // UseItemAt: the Durnholde-barrel argument with one map's geography
+            // swapped in. OWN THE TICK to drive the approach, because the
+            // StopBot(Hold) below cancels RunStep's own HopTo every tick and the
+            // Culling of Stratholme's crate legs are 48-81yd of open road — far
+            // enough that a one-tick-of-movement-per-cycle crawl would burn the
+            // step timeout. Recover between crates for the same reason the barrels
+            // do: this rung sits above NeedsRest (26.5), the five crates are 330yd
+            // apart end to end, and the party has the whole intro RP ahead of it.
+            else if (step.kind == EventStepKind::UseItemAt)
+            {
+                switch (EventRestDecision())
+                {
+                    case EventRest::Yield:
+                        DcMovement::StopBot(bot, DcMovement::Stop::Hold);
+                        SetPhase(context, "objective");
+                        ClearStall(context);
+                        return false;  // NeedsRest (26.5) wins -> the tank drinks/eats
+                    case EventRest::Hold:
+                        DcMovement::StopBot(bot, DcMovement::Stop::Hold);
+                        SetPhase(context, "objective");
+                        ClearStall(context);
+                        return true;   // own the tick; wait for the party to recover
+                    case EventRest::None:
+                        break;
+                }
+                if (DriveUseItemAt(step))
                     return true;
             }
         }

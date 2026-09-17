@@ -198,6 +198,24 @@ DcPartyState::SpreadGate DcPartyState::GetSpreadGate(Player* bot, AiObjectContex
     if (!context)
         return gate;
 
+    // A PARTY WITH A RIDER IN IT IS NOT MEASURED BY SPREAD. Distances between a
+    // drake and a member on foot — or between two drakes on their lanes — say
+    // nothing about readiness, and the driver that put them there owns cohesion
+    // until they are all on foot again (The Oculus's flight driver; Trial of the
+    // Champion's joust driver, which holds the tank off the ladder anyway).
+    if (Group* const group = bot->GetGroup())
+    {
+        for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+        {
+            Player* const m = ref->GetSource();
+            if (m && m->GetMapId() == bot->GetMapId() && m->IsAlive() && m->GetVehicle())
+            {
+                gate.maxSpread = 100000.0f;
+                return gate;
+            }
+        }
+    }
+
     DcPullContext const& pull =
         context->GetValue<DcPullContext&>(DcKey::PullContext)->Get();
     // Waive the spread requirement ONLY while a pull maneuver is actually

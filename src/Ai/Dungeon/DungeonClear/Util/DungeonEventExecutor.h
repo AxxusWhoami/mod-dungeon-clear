@@ -94,6 +94,31 @@ struct DungeonEventProgress
     int32  lastLoggedResult{-1};
     uint32 lastLogMs{0};
 
+    // Re-base every per-activation clock for a NEW event id, leaving only the
+    // fields that outlive an event (instanceId, lastDriveMs, the log throttle).
+    //
+    // THE ESCORT CLOCKS BELONG HERE and leaving them out cost a live run to read.
+    // DriveEscortCreature's dead-air watchdog is meant to give a new escort leg 15
+    // seconds before it declares the escortee unreachable, but escortProgressMs is
+    // only ever stamped by escort PROGRESS — never by entering an escort. Carried
+    // across events it is a clock from the PREVIOUS leg: on tr-20260910-073715-4
+    // the Culling of Stratholme Town Hall leg inherited the city-gate leg's stamp
+    // from eleven minutes earlier, so the first tick that could not see Arthas was
+    // already eleven minutes into a fifteen-second window and stalled instantly. A
+    // leg that would have recovered — an escortee mid-respawn, or one a moment from
+    // walking back into search range — never got its grace.
+    void BeginEvent(uint32 newEventId, uint32 now)
+    {
+        eventId = newEventId;
+        stepIndex = 0;
+        attempts = 0;
+        stepStartMs = now;
+        maxStepIndex = 0;
+        progressMs = now;
+        escortProgressMs = 0;
+        escortCombatWedgeMs = 0;
+    }
+
     void Reset()
     {
         eventId = 0;
@@ -241,6 +266,11 @@ public:
     // Needs the bot as well as the context: the conditional half re-evaluates
     // activation predicates, which are written against a Player.
     static bool IsPullOwningEventDriving(Player* bot, AiObjectContext* context);
+
+    // IsPullOwningEventDriving, minus a conditional event whose row carries
+    // DungeonEvent::yieldsTheApproach. The question the off-line route rejoin
+    // asks: "has an event taken the party's movement away from the route?"
+    static bool PullOwningEventHoldsTheApproach(Player* bot, AiObjectContext* context);
 
     // If `context`'s current objective drives an event with a KillCreature ENGAGE
     // step (KillCreatureEngage — .engage set), report true and fill `outEntry` /

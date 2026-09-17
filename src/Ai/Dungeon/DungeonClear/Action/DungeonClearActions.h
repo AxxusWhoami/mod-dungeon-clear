@@ -164,6 +164,22 @@ protected:
     // through to Drive and RunStep fires the GO.
     bool DriveUseItemOnGO(EventStep const& step);
 
+    // Drive a UseItemAt step's APPROACH (the Culling of Stratholme's five plagued
+    // grain crates, 48-81yd apart along 330yd of road). Owns the tick (returns
+    // true) while walking the tank to the step's anchor through the DC movement
+    // system, for the same reason the UseItemOnGO driver does: the at-objective
+    // StopBot(Hold) runs BEFORE Drive and cancels a plain MovePoint spline every
+    // tick, so RunStep's own HopTo alone would stutter-walk the road one tick of
+    // movement at a time. Returns false once the tank is inside the step's arrival
+    // radius (or the receipt GO is already standing), so the caller falls through
+    // to Drive and RunStep uses the item / latches.
+    //
+    // Simpler than the UseItemOnGO driver by exactly the things the crates do not
+    // need: no target GO, so no LOS/doorway detour and no forced-destination
+    // walk-in — every crate stands in the open on the road, and the spell finds its
+    // own target within 8yd rather than range-checking an interact box.
+    bool DriveUseItemAt(EventStep const& step);
+
     // Recovery verdict for a long non-combat set-piece (the Old Hillsbrad barrel
     // run). The objective drive owns the tick at DcRel::AtObjective (30), which
     // sits ABOVE the NeedsRest triggers (26.5) — so without an explicit yield the
@@ -887,6 +903,51 @@ public:
         : Action(botAI, "dungeon clear hold fire")
     {
     }
+    bool Execute(Event event) override;
+};
+
+// HALLS OF REFLECTION ONLY, every role, BOTH engines. Move this bot FORWARD along
+// the escape path — to the party's stand point, a few yards past the point
+// Jaina/Sylvanas is waiting at — because it is inside the Lich King's Remorseless
+// Winter ring or has fallen behind him.
+//
+// THE DIRECTION IS THE ENTIRE CONTENT OF THIS ACTION. It never computes a bearing
+// away from anything: the destination is an authored point that is ahead of the
+// leader, ahead of the Lich King, and on the far side of both from the summons
+// chasing the party. A radial retreat — which is what DungeonClearHazardVacate
+// would do with the same emitter — is wrong here in the one direction that
+// matters, because "away from him" for a bot that is already behind him is
+// further behind, and behind is a 10 000-damage Zap plus a knockback that makes
+// the next check worse.
+//
+// Which stand point is decided the same way the driver decides it: from the
+// LEADER'S position (DcHallsOfReflection::StopIndexNear), because currentWall is
+// private to the boss AI and her position is the observable equivalent. Both must
+// reach the same answer or the tank and its followers would hold different
+// ground, which is why the arithmetic is one shared pure function rather than two
+// copies.
+//
+// Driven by DungeonClearHorStayAheadTrigger.
+class DungeonClearHorStayAheadAction : public DcMovementAction
+{
+public:
+    DungeonClearHorStayAheadAction(PlayerbotAI* botAI)
+        : DcMovementAction(botAI, "dungeon clear hor stay ahead")
+    {
+    }
+    bool Execute(Event event) override;
+};
+
+// THE OCULUS ONLY, every member, both engines: the rider rung — an essence from
+// the givers, the mount, this member's drake on its lane, the landing, the
+// dismount, and the stations on Eregos. A PLAIN Action on purpose: stock
+// `wotlk-occ`'s OccFlyingMultiplier zeroes every MovementAction on a mounted bot,
+// and this rung drives the drake's MotionMaster directly. See
+// DcOculusRiderAction.cpp. Driven by DungeonClearOculusRiderTrigger.
+class DungeonClearOculusRiderAction : public Action
+{
+public:
+    DungeonClearOculusRiderAction(PlayerbotAI* botAI) : Action(botAI, "dungeon clear oc rider") {}
     bool Execute(Event event) override;
 };
 

@@ -47,6 +47,8 @@ public:
         creators["dungeon clear break stuck combat"] = &DungeonClearTriggerContext::break_stuck_combat;
         creators["dungeon clear heal reposition"] = &DungeonClearTriggerContext::heal_reposition;
         creators["dungeon clear hazard vacate"] = &DungeonClearTriggerContext::hazard_vacate;
+        creators["dungeon clear hor stay ahead"] = &DungeonClearTriggerContext::hor_stay_ahead;
+        creators["dungeon clear oc rider"] = &DungeonClearTriggerContext::oc_rider;
         creators["dungeon clear razorgore orb"] = &DungeonClearTriggerContext::razorgore_orb;
         creators["dungeon clear razorgore camp"] = &DungeonClearTriggerContext::razorgore_camp;
         creators["dungeon clear transit pack"] = &DungeonClearTriggerContext::transit_pack;
@@ -102,6 +104,8 @@ private:
     static Trigger* break_stuck_combat(PlayerbotAI* ai) { return new DungeonClearBreakStuckCombatTrigger(ai); }
     static Trigger* heal_reposition(PlayerbotAI* ai) { return new DungeonClearHealRepositionTrigger(ai); }
     static Trigger* hazard_vacate(PlayerbotAI* ai) { return new DungeonClearHazardVacateTrigger(ai); }
+    static Trigger* hor_stay_ahead(PlayerbotAI* ai) { return new DungeonClearHorStayAheadTrigger(ai); }
+    static Trigger* oc_rider(PlayerbotAI* ai) { return new DungeonClearOculusRiderTrigger(ai); }
     static Trigger* razorgore_orb(PlayerbotAI* ai) { return new DungeonClearRazorgoreOrbTrigger(ai); }
     static Trigger* razorgore_camp(PlayerbotAI* ai) { return new DungeonClearRazorgoreCampTrigger(ai); }
     static Trigger* transit_pack(PlayerbotAI* ai) { return new DungeonClearTransitPackTrigger(ai); }

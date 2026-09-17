@@ -101,11 +101,11 @@ public:
                                                           std::string const& planId,
                                                           std::string* err);
 
-    // Drive from the world thread. provisionBudget is shared across all runs
-    // this tick: the one heavyweight PlayerbotFactory::Randomize roll a run
-    // performs consumes it (sets it false), so at most one factory roll runs
-    // per world tick across the whole registry.
-    void Tick(uint32 diff, bool& provisionBudget);
+    // Drive from the world thread. The one heavyweight PlayerbotFactory::
+    // Randomize roll a run performs claims DcProvisionBudget, the realm-wide
+    // one-roll-per-world-tick ration, so at most one factory roll runs per tick
+    // across every run AND every other provisioning subsystem.
+    void Tick(uint32 diff);
 
     bool Done() const { return _done; }
     bool IsMonitoring() const { return _stage.load() == Stage::Monitoring; }
@@ -191,7 +191,7 @@ private:
     static char const* StageName(Stage s);
 
     void TickSpawning();
-    void TickProvisioning(bool& provisionBudget);
+    void TickProvisioning();
     // Roster variant: read the characters out into the record and leave them
     // otherwise untouched. No factory roll, so no per-tick budget.
     void TickProvisioningRoster();

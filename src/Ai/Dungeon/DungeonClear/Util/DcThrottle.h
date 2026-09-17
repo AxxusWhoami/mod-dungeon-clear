@@ -46,6 +46,9 @@ enum class DcThrottle : uint8
     RazorgoreOrbIssue,   // the BWL egg runner's walk between eggs
     DtkCampIssue,        // the Drak'Tharon camp-return point move (time only)
     HosTravelIssue,      // HosTravelTo — the Halls of Stone Tribunal arena
+    HorStayAheadIssue,   // the HoR escape's per-follower forward step
+    TocMoveIssue,        // the ToC driver's point move (the horse, or the tank on foot)
+    OcMoveIssue,         // the Oculus rider's drake move (the vehicle base) and its giver walk
 
     // --- log throttles (time only) -----------------------------------------
     TransitLog,          // BwlTransitLog — one crossing telemetry line per 3s
@@ -61,11 +64,35 @@ enum class DcThrottle : uint8
     HosTribunalLog,      // the Halls of Stone Tribunal garrison line
     HosWaveLog,          // the Halls of Stone wave telemetry line
     RezRefusalLog,       // RezRefusalDiag — why a party rez was refused
+    UpHarpoonLog,        // the Utgarde Pinnacle harpoon driver's telemetry line
+    UpHarpoonMissingLog, // "in the pocket, and launcher 192175 is not there"
+    PosGauntletLog,      // the Pit of Saron gauntlet driver's per-tick line
+    PosLedgeLog,         // the Pit of Saron ledge hook's per-state line
+    HorWaveLog,          // the Halls of Reflection altar driver's per-tick line
+    HorEscapeLog,        // the Halls of Reflection escape driver's per-tick line
+    HorEscapeIssue,      // the escape driver's own re-issue floor on the stand point
+    HorIntroLog,         // "walking to Jaina/Sylvanas to start the intro"
+    HorThroneLog,        // the throne-room gather / forge line
+    HorEscapeGoLog,      // "not ready for the point of no return, because ..."
+    HorStallWarn,        // the escape's "he is on her and the wall is still shut" WARN
+    CosWaveLog,          // the Culling of Stratholme wave driver's per-tick line
+                         // (its walk to the wave goes through DcTransit::TravelTo,
+                         //  which owns the TransitIssue floor above, so there is no
+                         //  movement slot of its own here)
+    EscortResumeGossipLog,  // "the resume gossip left his gossip flag up" WARN
+    TocTelemetryLog,     // the ToC driver's `DcToc progress=...` line
+    TocWarn,             // the ToC driver's never-mounted / Knight-strand WARNs
+    TocClick,            // the ToC driver's announcer click (and its log line)
+    OcTelemetryLog,      // the Oculus driver's `DcOc ring=...` line
+    OcWarn,              // the Oculus WARNs (blocked chord, stalled leg, fabricated essence)
+    OcGossip,            // the Oculus rider's giver click (and its log line)
+    OcEregosLog,         // the Oculus Eregos hold's per-fight line (hook 39)
 
-    // --- scan caches (time only) -------------------------------------------
-    BmDrainerScan,       // BmDrainersOnMedivh — creature scan near Medivh
-    BmRiftScan,          // BmSelectTargetRift — creature scan for rifts
-    HosAddScan,           // HosAddNearestBrann / HosNearestAdd — wave add scan
+    // --- action floors (time only) -----------------------------------------
+    UpHarpoonFire,       // floor between two Harpoon Launcher clicks (its own
+                         // autoclose is 1000ms and GO_FLAG_IN_USE blocks a click
+                         // until GameObject::Update clears it, so a faster cadence
+                         // can only produce swallowed clicks and log noise)
 
     Count
 };

@@ -39,6 +39,7 @@
 #include "Ai/Dungeon/DungeonClear/DcApproachState.h"
 #include "Ai/Dungeon/DungeonClear/Data/DcEventDoorRegistry.h"
 #include "Ai/Dungeon/DungeonClear/Data/DungeonBossInfo.h"
+#include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcEngageGeometry.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcHazard.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcPlayerbotCompat.h"
@@ -350,6 +351,68 @@ bool DungeonClearFollowTankAction::Execute(Event /*event*/)
                   "[DC:{}] follow-tank: standing down, the transit owns the column",
                   bot->GetName());
         return false;
+    }
+
+    // ON FOOT THROUGH THE JOUST: the lance and the horse are mod-playerbots' walk,
+    // not ours. `toc mount` (64) outranks this rung but only keeps the ticks it
+    // SUCCEEDS on, and its MoveTo fails every tick the walk to the horse is still
+    // in flight — so without this the follower was turned back to the tank on each
+    // of those ticks and never reached a horse farther away than follow distance
+    // (see DcTocDriver::FollowerMountsItself). Clear a MoveFollow left from before
+    // the stand-down, the same once-only teardown as the rezzer's; the walk to the
+    // horse is a point move, so the guard never touches it.
+    if (TocFollowerMountsItself(bot))
+    {
+        followedTank = tank->GetGUID();
+        DcFollowerLifecycle::MarkFollowing(bot->GetGUID());
+        MotionMaster* mm = bot->GetMotionMaster();
+        if (mm && mm->GetCurrentMovementGeneratorType() == FOLLOW_MOTION_TYPE)
+            DcMovement::StopBot(bot, DcMovement::Stop::Hold);
+        return false;
+    }
+
+    // MOUNTED: FOLLOW WITH THE HORSE, NEVER THE PASSENGER. Every mover below acts
+    // on the bot's own MotionMaster — the persistent MoveFollow, the trail glide's
+    // escort spline — and on a vehicle the bot is the passenger: its position is
+    // the seat's, and a generator on it walks nothing. Trial of the Champion puts
+    // the whole party on horses for the joust, and a follower left to those
+    // branches micro-steps in the saddle while its horse stands at the wall.
+    //
+    // DcMoveTo takes MovementAction::MoveTo's vehicle branch, which drives the
+    // vehicle BASE when the seat has CAN_CONTROL (and refuses when it does not,
+    // which is the right answer for a seat that cannot steer). Same golden-angle
+    // fan as the Follow() slot at the bottom, so the riders spread the same way
+    // the walkers do; inside the bubble the tick is yielded, as Follow()'s own
+    // in-range early-out does.
+    if (bot->GetVehicle())
+    {
+        // THE OCULUS: every rider flies its own drake on its own lane (the rider
+        // rung), to a pad the tank may not even have reached yet. Following the
+        // tank here would pull the drake off its lane every tick.
+        if (bot->GetMapId() == DcOculus::MAP_ID)
+            return false;
+
+        followedTank = tank->GetGUID();
+        DcFollowerLifecycle::MarkFollowing(bot->GetGUID());
+
+        // A MoveFollow installed on foot, before the mount, would otherwise stay
+        // on the passenger for the whole ride.
+        MotionMaster* mm = bot->GetMotionMaster();
+        if (mm && mm->GetCurrentMovementGeneratorType() == FOLLOW_MOTION_TYPE)
+            mm->Clear();
+
+        float const riderDist = std::min<float>(sPlayerbotAIConfig.followDistance, 6.0f);
+        if (bot->GetExactDist(tank) <= riderDist + kTrailArrival)
+            return false;
+
+        float const riderAngle = Position::NormalizeOrientation(
+            static_cast<float>(bot->GetGUID().GetCounter()) * 2.39996323f);
+        bool const moved = DcMoveTo(tank->GetMapId(),
+                                    tank->GetPositionX() + std::cos(riderAngle) * riderDist,
+                                    tank->GetPositionY() + std::sin(riderAngle) * riderDist,
+                                    tank->GetPositionZ(), false, false, /*normal_only=*/false);
+        Unit* const horse = bot->GetVehicleBase();
+        return moved || (horse && horse->isMoving());
     }
 
     // In DYNAMIC pull mode, trail the tank at a lag distance while it scouts toward
@@ -2087,6 +2150,23 @@ bool DungeonClearRezPartyAction::Execute(Event /*event*/)
     {
         DC_PULL_TRACE("[DC:{}] rez party: approaching {}'s body ({:.1f}yd)",
                       bot->GetName(), target->GetName(), dist);
+
+        // NOT FROM A SADDLE, AND NOT TO A BODY IN THE AIR. A rezzer on a vehicle
+        // cannot walk (its position is the seat's) and cannot cast; and on The
+        // Oculus a member who died on a drake hangs where the drake was, 50yd above
+        // the nearest floor, where no walk ends within cast range. Owning the tick
+        // there only spins until the recovery timeout — hand it back instead, and
+        // let the flight driver's regroup take the unreachable body.
+        if (bot->GetVehicle())
+            return false;
+        if (bot->GetMapId() == DcOculus::MAP_ID)
+        {
+            NavmeshSnap::Result const snap = NavmeshSnap::Snap(bot->GetMap(), target->GetPositionX(),
+                                                               target->GetPositionY(), target->GetPositionZ(),
+                                                               DcOculus::SNAP_RADIUS, DcOculus::SNAP_VERT);
+            if (!snap.ok)
+                return false;
+        }
         // Standing still with a walk owed means the recorded wait is stale — the
         // leg it was sized for is not running any more (cancelled by whatever last
         // stopped us, or refused outright). Drop it so the replacement leg can go

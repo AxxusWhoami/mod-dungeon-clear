@@ -98,4 +98,62 @@ void RegisterHallsOfStoneHooks(ObjectiveHookRegistry::HookTable& out);
 // HallsOfLightningDriver.cpp. Id 24.
 void RegisterHallsOfLightningHooks(ObjectiveHookRegistry::HookTable& out);
 
+// Utgarde Pinnacle (map 575) — the two areatrigger starts, the Grauf harpoon
+// driver and the Svala ritual retarget. See UtgardePinnacleDriver.cpp. Ids 25-28.
+//
+// Three of the four are the SHORT kind that would ordinarily live in this file's
+// own table. They are in a TU of their own because they share map 575's constants
+// and its reasoning with the driver, and splitting one dungeon's four hooks across
+// two files to satisfy a size rule would cost more than it saves.
+void RegisterUtgardePinnacleHooks(ObjectiveHookRegistry::HookTable& out);
+
+// Pit of Saron (map 658) — the Ymirjar gauntlet driver and the Tyrannus ledge
+// gate. See PitOfSaronDriver.cpp. Ids 29-30.
+//
+// The gauntlet hook is the controller: three edge-ordered areatrigger gates and
+// two summoned waves, with the arithmetic in the pure kernel
+// Util/DcPosGauntletDecision.h. The ledge hook is the short kind that would
+// ordinarily live in this file's own table; it is in the driver's TU because it
+// shares map 658's constants and its areatrigger forge with the controller.
+void RegisterPitOfSaronHooks(ObjectiveHookRegistry::HookTable& out);
+
+// Halls of Reflection (map 668) — the intro gossip, the altar wave driver, the
+// throne-room cutscene, the point-of-no-return gossip and the escape driver.
+// See HallsOfReflectionDriver.cpp. Ids 31-35.
+//
+// TWO of the five are controllers, which is one more than any other map in the
+// module has, and that is what this dungeon is: hooks 32 and 35 own the party
+// for roughly three quarters of the run (there is nothing to pull between the
+// first gossip and Marwyn's death, and nothing but a footrace after the second).
+// Their arithmetic is in the pure kernels Util/DcHorWaveDecision.h and
+// Util/DcHorEscapeDecision.h. Hooks 31, 33 and 34 are the short kind that would
+// ordinarily live in this file's own table; they are in the driver's TU because
+// they share map 668's constants and its areatrigger forge with the controllers.
+void RegisterHallsOfReflectionHooks(ObjectiveHookRegistry::HookTable& out);
+
+// The Culling of Stratholme (map 595) — the ten-wave controller, and nothing else.
+// See CullingOfStratholmeDriver.cpp. Id 36.
+//
+// ONE hook for a whole dungeon is the point worth recording: nothing on map 595 is
+// started by an areatrigger (so no packet has to be forged the way Pit of Saron's
+// and Utgarde Pinnacle's do), every gossip on the critical path is reachable
+// through the declarative Gossip step or the escort driver's resume branch, and the
+// five crates are the new UseItemAt step. The waves are the single thing with no
+// declarative expression, because what they need is a standing preference
+// re-decided every tick rather than a sequence. Its arithmetic is in the pure
+// kernel Util/DcCosWaveDecision.h.
+void RegisterCullingOfStratholmeHooks(ObjectiveHookRegistry::HookTable& out);
+
+// Trial of the Champion (map 650) — the arena driver: the muster, the three
+// announcer clicks (the first from horseback), and the Argent side-pack pulls.
+// See TrialOfTheChampionDriver.cpp. Id 37. Its decisions are the pure kernel
+// Util/DcTocDriverDecision.h; the joust itself is mod-playerbots' `wotlk-toc`.
+void RegisterTrialOfTheChampionHooks(ObjectiveHookRegistry::HookTable& out);
+
+// The Oculus (map 578) — the flight driver (38: muster, fly, land, Eregos) and the
+// Eregos hold's telemetry (39). See OculusDriver.cpp. Its decisions are the pure
+// kernel Util/DcOculusDriverDecision.h; each member flies its own drake from the
+// rider rung (Action/DcOculusRiderAction.cpp).
+void RegisterOculusHooks(ObjectiveHookRegistry::HookTable& out);
+
 #endif

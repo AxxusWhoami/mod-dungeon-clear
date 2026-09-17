@@ -218,7 +218,42 @@ public:
     // state.pointIdx to it. Returns false if no forward candidate within
     // RESNAP_RADIUS — caller should rebuild from current position.
     // Clears offPathTicks on success.
-    static bool Resnap(Player* bot, ChunkedPathfinder::Result const& path, DungeonFollowerState& state);
+    //
+    // `movedOut` (optional) reports whether the cursor ACTUALLY CHANGED, which
+    // is a different fact from the return value and must never be conflated
+    // with it. The search window starts AT the cursor, so the point the cursor
+    // already holds is itself a candidate — and on an authored anchor route,
+    // whose points sit 15-20yd apart, a bot that has overshot its cursor by a
+    // few yards is nearer to the point it just passed than to the next one.
+    // Resnap then re-picks the cursor, returns true, and has repaired nothing.
+    // A rung whose complaint IS the cursor (the hop is behind me; I am wedged
+    // and want a new anchor) reads that as a cure and asks again next tick,
+    // forever: 198 such re-anchors at an unchanging 4.0-4.4yd in
+    // tr-20260902-134056-2, and the "resnapped onto existing route" rung pinned
+    // at attempt 1 for a whole run in tr-20260804-153254-2.
+    //
+    // Callers that only need "is there a valid forward anchor" (the off-path
+    // probe, whose cure for perpendicular drift is the rejoin rather than a
+    // rebuild) may ignore it and keep the old meaning.
+    static bool Resnap(Player* bot, ChunkedPathfinder::Result const& path, DungeonFollowerState& state,
+                       bool* movedOut = nullptr);
+
+    // Escalation for a cursor the bot has WALKED PAST: step it one point
+    // forward so the follower stops aiming backward. The companion to
+    // SkipStrandedPoint (which handles a point the bot is standing under), and
+    // safe for the same reason — the caller has established that the hop lies
+    // behind the bot along the route, so the leg being skipped is ground the
+    // bot has already covered.
+    //
+    // This is the escape Resnap cannot provide: Resnap is forward-only and the
+    // cursor is its own nearest forward candidate, so once a sparse route's
+    // next point is farther away than the passed one, no number of resnaps can
+    // move the cursor off it. Out-param `skipped` carries the abandoned point
+    // for logging. One point per call, never a scan — same doctrine as
+    // SkipStrandedPoint: if the next point is behind us too, the next tick
+    // handles it and the stall watchdogs still see a bot making no ground.
+    static bool SkipPassedPoint(ChunkedPathfinder::Result const& path,
+                                DungeonFollowerState& state, G3D::Vector3& skipped);
 
     // Seed a follower cursor for a route that has JUST been installed: reset it,
     // then — when the route does not start where the bot stands, i.e. an

@@ -66,6 +66,12 @@ namespace
             RegisterVioletHoldRoster(t);
             RegisterMoltenCoreRoster(t);
             RegisterHallsOfStoneRoster(t);
+            RegisterUtgardePinnacleRoster(t);
+            RegisterPitOfSaronRoster(t);
+            RegisterHallsOfReflectionRoster(t);
+            RegisterCullingOfStratholmeRoster(t);
+            RegisterTrialOfTheChampionRoster(t);
+            RegisterOculusRoster(t);
             return t;
         }();
         return kPatches;

@@ -65,6 +65,11 @@ namespace
             Player* member = ref->GetSource();
             if (!member || !member->IsInWorld())
                 continue;
+            // A rider is never rescued (see Recover), so it is never a stray
+            // either — otherwise Decide would ask for a rescue Recover refuses,
+            // and ask again every tick.
+            if (member != anchor && member->GetVehicle())
+                continue;
 
             DcStrandedDecision::Member m;
             m.isBot = GET_PLAYERBOT_AI(member) != nullptr;
@@ -251,6 +256,12 @@ namespace DcStrandedRecovery
             if (member->GetMapId() != leader->GetMapId())
                 continue;
             if (!GET_PLAYERBOT_AI(member))       // bots only, never a human
+                continue;
+            // Never a rider. NearTeleportTo ejects a passenger and leaves the
+            // vehicle where it stood — on Trial of the Champion that is a horse at
+            // the arena wall and a lance-armed bot on foot in the middle of a
+            // joust, which is a strand this recovery would be CAUSING.
+            if (member->GetVehicle())
                 continue;
             float const strandedDist = leader->GetDistance(member);
             if (strandedDist <= maxSpread)

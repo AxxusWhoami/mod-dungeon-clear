@@ -20,6 +20,7 @@ TEST(DcNavPenaltyRegistry, ReportsMapsWithVolumes)
     EXPECT_TRUE(DcNavPenaltyRegistry::HasVolumes(543));   // Hellfire Ramparts
     EXPECT_TRUE(DcNavPenaltyRegistry::HasVolumes(389));   // Ragefire Chasm
     EXPECT_TRUE(DcNavPenaltyRegistry::HasVolumes(43));    // Wailing Caverns
+    EXPECT_TRUE(DcNavPenaltyRegistry::HasVolumes(658));   // Pit of Saron
     EXPECT_FALSE(DcNavPenaltyRegistry::HasVolumes(0));     // no rows
     EXPECT_FALSE(DcNavPenaltyRegistry::HasVolumes(230));   // BRD — no rows
     EXPECT_FALSE(DcNavPenaltyRegistry::HasVolumes(560));   // Old Hillsbrad — no rows
@@ -283,4 +284,41 @@ TEST(DcNavPenaltyRegistry, DoesNotPenalizeOutsideTheBox)
     EXPECT_FLOAT_EQ(DcNavPenaltyRegistry::PenaltyAt(229, 200.0f, 200.0f, 44.0f), 1.0f);
     // Inside the box geometrically, but a different map → no volume applies.
     EXPECT_FLOAT_EQ(DcNavPenaltyRegistry::PenaltyAt(0, -126.1f, -390.3f, 44.4f), 1.0f);
+}
+
+TEST(DcNavPenaltyRegistry, FencesThePitOfSaronNorthBridge)
+{
+    // The one bad link out of the three that cross the chasm between Krick's
+    // arena and the ambush ramp: (865.87,76.75,524.31) -> (869.69,75.11,527.40).
+    // Its midpoint, and both of its ends, sit inside the box.
+    EXPECT_GT(DcNavPenaltyRegistry::PenaltyAt(658, 867.78f, 75.93f, 525.86f), 1.0f);
+    EXPECT_GT(DcNavPenaltyRegistry::PenaltyAt(658, 865.87f, 76.75f, 524.31f), 1.0f);
+    EXPECT_GT(DcNavPenaltyRegistry::PenaltyAt(658, 869.69f, 75.11f, 527.40f), 1.0f);
+    // The far end of the shortcut, where it lands on the ramp proper.
+    EXPECT_GT(DcNavPenaltyRegistry::PenaltyAt(658, 872.80f, 74.13f, 528.87f), 1.0f);
+
+    // THE RAMP'S REAL FOOT MUST STAY FREE — this is the crossing the party is
+    // being steered onto, so taxing it would defeat the row entirely.
+    EXPECT_FLOAT_EQ(DcNavPenaltyRegistry::PenaltyAt(658, 861.93f, 52.93f, 517.07f), 1.0f);
+    EXPECT_FLOAT_EQ(DcNavPenaltyRegistry::PenaltyAt(658, 871.13f, 58.27f, 522.07f), 1.0f);
+
+    // Every Leg A anchor between Krick and the top of the ambush ramp is clear.
+    EXPECT_FLOAT_EQ(DcNavPenaltyRegistry::PenaltyAt(658, 846.59f, 84.66f, 511.53f), 1.0f);  // 3
+    EXPECT_FLOAT_EQ(DcNavPenaltyRegistry::PenaltyAt(658, 850.31f, 73.25f, 519.56f), 1.0f);  // 4
+    EXPECT_FLOAT_EQ(DcNavPenaltyRegistry::PenaltyAt(658, 855.75f, 58.23f, 517.33f), 1.0f);  // 5
+    EXPECT_FLOAT_EQ(DcNavPenaltyRegistry::PenaltyAt(658, 861.03f, 47.09f, 516.74f), 1.0f);  // 6 gate 1
+    EXPECT_FLOAT_EQ(DcNavPenaltyRegistry::PenaltyAt(658, 871.83f, 52.31f, 523.03f), 1.0f);  // 7
+    EXPECT_FLOAT_EQ(DcNavPenaltyRegistry::PenaltyAt(658, 882.64f, 57.54f, 530.37f), 1.0f);  // 8
+
+    // The nearest point of the corridor the party actually walks down to gate 1
+    // — outside the box on all three axes, and the reason the Z floor is 520.
+    EXPECT_FLOAT_EQ(DcNavPenaltyRegistry::PenaltyAt(658, 860.00f, 69.40f, 518.47f), 1.0f);
+
+    // Under the box in Z: the arena-to-gate-1 descent runs beneath the bridge.
+    EXPECT_FLOAT_EQ(DcNavPenaltyRegistry::PenaltyAt(658, 867.00f, 76.00f, 517.00f), 1.0f);
+    // Krick's arena floor and the ARM staging point are far outside it.
+    EXPECT_FLOAT_EQ(DcNavPenaltyRegistry::PenaltyAt(658, 852.85f, 123.53f, 510.11f), 1.0f);
+    EXPECT_FLOAT_EQ(DcNavPenaltyRegistry::PenaltyAt(658, 836.65f, 115.08f, 509.81f), 1.0f);
+    // Inside the box geometrically, but a different map -> no volume applies.
+    EXPECT_FLOAT_EQ(DcNavPenaltyRegistry::PenaltyAt(0, 867.78f, 75.93f, 525.86f), 1.0f);
 }

@@ -6,6 +6,7 @@
 #include "TestRun/DcDiagSnapshot.h"
 
 #include <algorithm>
+#include <list>
 #include <optional>
 #include <unordered_set>
 #include <vector>
@@ -15,9 +16,11 @@
 #include "CreatureAI.h"
 #include "Group.h"
 #include "InstanceScript.h"
+#include "Map.h"
 #include "Player.h"
 #include "SharedDefines.h"
 #include "Timer.h"
+#include "Vehicle.h"
 
 #include "PlayerbotAI.h"
 #include "Playerbots.h"
@@ -34,7 +37,9 @@
 #include "Ai/Dungeon/DungeonClear/Util/DcTargeting.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcTickMemo.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonClearMath.h"
+#include "Ai/Dungeon/DungeonClear/Util/DungeonEventExecutor.h"
 #include "Ai/Dungeon/DungeonClear/Util/DungeonPathFollower.h"
+#include "Ai/Dungeon/DungeonClear/Util/NavmeshSnap.h"
 #include "TestRun/DcTestRunRecord.h"
 
 namespace
@@ -67,6 +72,35 @@ namespace
         if (!maxPower)
             return 0;
         return static_cast<std::uint32_t>((static_cast<std::uint64_t>(p->GetPower(power)) * 100) / maxPower);
+    }
+
+    // The floor column: narrow, and tall enough to reach the street from a unit
+    // a dozen yards under it. NavmeshSnap's default 10yd would have missed the
+    // deeper of the two King's Square tanks (12.4yd down). The nearest poly in
+    // z wins, so a unit genuinely on a lower floor still finds its own floor.
+    constexpr float kFloorColumnRadius = 3.0f;
+    constexpr float kFloorColumnHalfHeight = 40.0f;
+    // Ask the ground from just above the unit, so one standing ON a floor finds
+    // that floor rather than whatever is below it.
+    constexpr float kGroundProbeLift = 2.0f;
+
+    DcDiag::FloorProbe ProbeFloor(WorldObject const* at)
+    {
+        DcDiag::FloorProbe f;
+        Map* const map = at ? at->FindMap() : nullptr;
+        if (!map)
+            return f;
+        float const x = at->GetPositionX();
+        float const y = at->GetPositionY();
+        float const z = at->GetPositionZ();
+        f.probed = true;
+        NavmeshSnap::Result const mesh =
+            NavmeshSnap::Snap(map, x, y, z, kFloorColumnRadius, kFloorColumnHalfHeight);
+        f.meshOk = mesh.ok;
+        f.meshZ = mesh.z;
+        f.groundZ = at->GetMapHeight(x, y, z + kGroundProbeLift);
+        f.gridZ = map->GetGridHeight(x, y);
+        return f;
     }
 
     // At most this many holders are described per member. A bot held by a whole
@@ -118,7 +152,16 @@ namespace
             Creature* const asCreature = other->ToCreature();
             bool const canAttackMe =
                 !asCreature || !asCreature->AI() || asCreature->AI()->CanAIAttack(member);
-            bool const legitimate = reachable && canAttackMe;
+            // A TRIGGER holder can never be attacked back, so it can never end the
+            // fight — the matching guard in ScanCombatHolders. Recorded as its own
+            // field rather than folded silently into `legitimate` because this is
+            // precisely the row a reader has to be able to see: before the guard
+            // existed the teardown printed `Flame Breath Trigger (Skadi) 0.0yd
+            // 100% reach LEGIT` and the wedge looked like a healthy fight.
+            bool const trigger =
+                DungeonClearMath::IsUnresolvableCombatHolder(asCreature != nullptr,
+                                                             asCreature && asCreature->IsTrigger());
+            bool const legitimate = reachable && canAttackMe && !trigger;
             if (DcDiag::IsLegitimatePvECombatHolder(pvp, legitimate))
                 anyLegitimatePvEHolder = true;
 
@@ -142,6 +185,8 @@ namespace
             h.x = other->GetPositionX();
             h.y = other->GetPositionY();
             h.z = other->GetPositionZ();
+            if (sameMap)
+                h.floor = ProbeFloor(other);
             if (Unit* hv = other->GetVictim())
                 h.victim = hv->GetName();
             // One of the hatch's guards since S1476, and the reason it became one:
@@ -152,6 +197,7 @@ namespace
             // whole time printing the answer next to a LEGITIMATE verdict
             // (tr-20260803-211838-7, 334s wedged) before it was wired into one.
             h.canAttackMe = canAttackMe;
+            h.trigger = trigger;
             // Scripted-out-of-the-fight state. See the header: a boss playing a
             // defeat sequence is alive, reachable and attack-permitted, and the
             // row said exactly that for eleven seconds while a run was thrown away.
@@ -190,6 +236,130 @@ namespace
         return getMSTimeDiff(stampMs, getMSTime());
     }
 
+    // The escortee search. The spawn-id store holds every DB-spawned creature on
+    // the map whatever its state and whoever is near it, so it is the one list a
+    // grid-visibility problem cannot hide a copy from; the grid search around the
+    // tank adds the summons the store never holds, and records which copies a
+    // grid search CAN see — the same kind of search the driver makes.
+    constexpr float kEscorteeGridScanYd = 500.0f;
+    constexpr std::size_t kMaxEscorteeCopies = 4;
+
+    // Mirror of DriveEscortCreature's resolve radius (DcEngageActions.cpp),
+    // default included. Change the two together.
+    constexpr float kEscortDefaultSearchYd = 80.0f;
+
+    DungeonEvent const* ActiveEscortEvent(Player* tank, AiObjectContext* context,
+                                          DungeonEventProgress const*& progOut)
+    {
+        for (char const* key : { DcKey::EventProgress, DcKey::ConditionalEventProgress })
+        {
+            DungeonEventProgress const& p = context->GetValue<DungeonEventProgress&>(key)->Get();
+            if (!p.eventId)
+                continue;
+            if (p.instanceId && p.instanceId != tank->GetInstanceId())
+                continue;
+            DungeonEvent const* ev = DungeonEventRegistry::Find(tank->GetMapId(), p.eventId);
+            if (!ev || p.stepIndex >= ev->steps.size())
+                continue;
+            if (ev->steps[p.stepIndex].kind != EventStepKind::EscortCreature)
+                continue;
+            progOut = &p;
+            return ev;
+        }
+        return nullptr;
+    }
+
+    void CaptureEscort(Player* tank, AiObjectContext* context, DcDiag::EscortSnapshot& e)
+    {
+        DungeonEventProgress const* prog = nullptr;
+        DungeonEvent const* ev = ActiveEscortEvent(tank, context, prog);
+        if (!ev || !prog)
+            return;
+
+        EventStep const& step = ev->steps[prog->stepIndex];
+        e.active = true;
+        e.eventId = ev->id;
+        e.eventName = ev->name;
+        e.stepIndex = prog->stepIndex;
+        e.entry = step.creatureEntry;
+        e.searchRadius = step.radius > 0.0f ? step.radius : kEscortDefaultSearchYd;
+        if (Creature* seen = tank->FindNearestCreature(e.entry, e.searchRadius, /*alive*/ true))
+        {
+            e.driverSees = true;
+            e.driverSeesGuid = seen->GetGUID().GetRawValue();
+        }
+        e.deadAirSeen = prog->escortProgressMs != 0;
+        e.deadAirMs = SinceMs(prog->escortProgressMs);
+        e.instanceDataId = step.instanceDataId;
+        e.instanceDataMin = step.instanceDataMin;
+        if (step.instanceDataId >= 0)
+            if (InstanceScript* inst = DcTargeting::GetInstanceScript(tank))
+                e.instanceData = inst->GetData(static_cast<uint32>(step.instanceDataId));
+
+        Map* const map = tank->GetMap();
+        std::vector<Creature*> found;
+        std::unordered_set<std::uint64_t> known;
+        for (auto const& kv : map->GetCreatureBySpawnIdStore())
+        {
+            Creature* c = kv.second;
+            if (c && c->GetEntry() == e.entry && known.insert(c->GetGUID().GetRawValue()).second)
+                found.push_back(c);
+        }
+        std::list<Creature*> nearby;
+        tank->GetCreatureListWithEntryInGrid(nearby, e.entry, kEscorteeGridScanYd);
+        std::unordered_set<std::uint64_t> gridSeen;
+        for (Creature* c : nearby)
+        {
+            if (!c)
+                continue;
+            gridSeen.insert(c->GetGUID().GetRawValue());
+            if (known.insert(c->GetGUID().GetRawValue()).second)
+                found.push_back(c);
+        }
+
+        e.copyCount = static_cast<std::uint32_t>(found.size());
+        std::sort(found.begin(), found.end(), [tank](Creature* a, Creature* b)
+                  { return tank->GetExactDist(a) < tank->GetExactDist(b); });
+        for (Creature* c : found)
+        {
+            if (e.copies.size() >= kMaxEscorteeCopies)
+                break;
+            DcDiag::EscorteeCopy copy;
+            copy.guid = c->GetGUID().GetRawValue();
+            copy.spawnId = static_cast<std::uint32_t>(c->GetSpawnId());
+            copy.alive = c->IsAlive();
+            copy.deathState = static_cast<std::uint32_t>(c->getDeathState());
+            copy.inWorld = c->IsInWorld();
+            copy.x = c->GetPositionX();
+            copy.y = c->GetPositionY();
+            copy.z = c->GetPositionZ();
+            Position const& home = c->GetHomePosition();
+            copy.homeX = home.GetPositionX();
+            copy.homeY = home.GetPositionY();
+            copy.homeZ = home.GetPositionZ();
+            copy.distToTank = tank->GetExactDist(c);
+            copy.moving = c->isMoving();
+            copy.inCombat = c->IsInCombat();
+            copy.evading = c->IsInEvadeMode();
+            copy.gossipFlag = c->HasNpcFlag(UNIT_NPC_FLAG_GOSSIP);
+            copy.faction = c->GetFaction();
+            copy.updateNeeded = c->IsUpdateNeeded();
+            copy.gridLoaded = map->IsGridLoaded(copy.x, copy.y);
+            copy.seenByGridScan = gridSeen.count(copy.guid) != 0;
+            e.copies.push_back(copy);
+        }
+    }
+
+    void AppendFloor(std::ostringstream& s, DcDiag::FloorProbe const& f)
+    {
+        if (!f.probed)
+            return;
+        s << ",\"floor\":{\"meshOk\":" << (f.meshOk ? "true" : "false")
+          << ",\"meshZ\":" << f.meshZ
+          << ",\"groundZ\":" << f.groundZ
+          << ",\"gridZ\":" << f.gridZ << '}';
+    }
+
     void AppendEscaped(std::ostringstream& s, std::string const& v)
     {
         s << '"' << DcTestRunRecord::EscapeJson(v) << '"';
@@ -218,6 +388,11 @@ namespace DcDiag
     bool HasLegitimatePvECombatHolder(bool hasPvERefs, bool anyLegitimatePvEHolder)
     {
         return !hasPvERefs || anyLegitimatePvEHolder;
+    }
+
+    bool IsUnderMesh(FloorProbe const& floor, float z)
+    {
+        return floor.probed && floor.meshOk && z < floor.meshZ - kUnderMeshYd;
     }
 
     Snapshot Capture(Player* tank, char const* capturedAt)
@@ -384,6 +559,20 @@ namespace DcDiag
                 m.y = member->GetPositionY();
                 m.z = member->GetPositionZ();
                 m.distToTank = (m.mapId == snap.mapId) ? tank->GetDistance(member) : -1.f;
+                m.floor = ProbeFloor(member);
+                if (Vehicle* const vehicle = member->GetVehicle())
+                {
+                    m.onVehicle = true;
+                    if (Unit* const base = vehicle->GetBase())
+                    {
+                        m.baseEntry = base->GetEntry();
+                        m.baseX = base->GetPositionX();
+                        m.baseY = base->GetPositionY();
+                        m.baseZ = base->GetPositionZ();
+                    }
+                    VehicleSeatEntry const* const seat = vehicle->GetSeatForPassenger(member);
+                    m.seatCanControl = seat && seat->CanControl();
+                }
                 m.alive = member->IsAlive();
                 m.healthPct = static_cast<std::uint32_t>(member->GetHealthPct());
                 if (member->getPowerType() == POWER_MANA)
@@ -511,6 +700,8 @@ namespace DcDiag
             snap.roster.push_back(std::move(b));
         }
 
+        CaptureEscort(tank, context, snap.escort);
+
         return snap;
     }
 
@@ -620,12 +811,18 @@ namespace DcDiag
               << ",\"inCombat\":" << (m.inCombat ? "true" : "false")
               << ",\"victim\":";
             AppendEscaped(s, m.victim);
+            AppendFloor(s, m.floor);
             s << ",\"dcStrategy\":" << (m.dcStrategy ? "true" : "false")
               << ",\"dcCombatStrategy\":" << (m.dcCombatStrategy ? "true" : "false")
               << ",\"dcTickAgeMs\":"
               << (m.dcTickSeen ? static_cast<std::int64_t>(m.dcTickAgeMs) : -1)
               << ",\"botState\":";
             AppendEscaped(s, m.botState);
+            // Emitted only for a rider, so every existing reader sees the same row.
+            if (m.onVehicle)
+                s << ",\"onVehicle\":true,\"baseEntry\":" << m.baseEntry
+                  << ",\"baseX\":" << m.baseX << ",\"baseY\":" << m.baseY << ",\"baseZ\":" << m.baseZ
+                  << ",\"seatCanControl\":" << (m.seatCanControl ? "true" : "false");
             // Emitted only for a flagged member, so an absent block means "was
             // not in combat" rather than "nothing was holding it" — the two
             // read identically if every member carries an empty array.
@@ -656,10 +853,12 @@ namespace DcDiag
                     AppendBool(s, "reachable", c.reachable);
                     AppendBool(s, "reachChecked", c.reachChecked);
                     AppendBool(s, "canAttackMe", c.canAttackMe);
+                    AppendBool(s, "trigger", c.trigger);
                     AppendBool(s, "immune", c.immune);
                     AppendBool(s, "passive", c.passive);
                     AppendBool(s, "atOneHp", c.atOneHp);
                     AppendBool(s, "legitimate", c.legitimate);
+                    AppendFloor(s, c.floor);
                     s << ",\"victim\":";
                     AppendEscaped(s, c.victim);
                     s << '}';
@@ -692,7 +891,53 @@ namespace DcDiag
               << ",\"isSticky\":" << (b.isSticky ? "true" : "false")
               << '}';
         }
-        s << "]}";
+        s << ']';
+
+        // Only while an escort step is active: an absent key means "no escort
+        // running", which an always-present empty block would blur.
+        if (snap.escort.active)
+        {
+            EscortSnapshot const& e = snap.escort;
+            s << ",\"escort\":{\"eventId\":" << e.eventId << ",\"eventName\":";
+            AppendEscaped(s, e.eventName);
+            s << ",\"stepIndex\":" << e.stepIndex
+              << ",\"entry\":" << e.entry
+              << ",\"searchRadius\":" << e.searchRadius;
+            AppendBool(s, "driverSees", e.driverSees);
+            s << ",\"driverSeesGuid\":" << e.driverSeesGuid
+              // -1 == the dead-air clock has never been stamped.
+              << ",\"deadAirMs\":" << (e.deadAirSeen ? static_cast<std::int64_t>(e.deadAirMs) : -1)
+              << ",\"instanceDataId\":" << e.instanceDataId
+              << ",\"instanceData\":" << e.instanceData
+              << ",\"instanceDataMin\":" << e.instanceDataMin
+              << ",\"copyCount\":" << e.copyCount
+              << ",\"copies\":[";
+            for (std::size_t i = 0; i < e.copies.size(); ++i)
+            {
+                EscorteeCopy const& c = e.copies[i];
+                if (i)
+                    s << ',';
+                s << "{\"guid\":" << c.guid
+                  << ",\"spawnId\":" << c.spawnId
+                  << ",\"deathState\":" << c.deathState
+                  << ",\"x\":" << c.x << ",\"y\":" << c.y << ",\"z\":" << c.z
+                  << ",\"homeX\":" << c.homeX << ",\"homeY\":" << c.homeY << ",\"homeZ\":" << c.homeZ
+                  << ",\"distToTank\":" << c.distToTank
+                  << ",\"faction\":" << c.faction;
+                AppendBool(s, "alive", c.alive);
+                AppendBool(s, "inWorld", c.inWorld);
+                AppendBool(s, "moving", c.moving);
+                AppendBool(s, "inCombat", c.inCombat);
+                AppendBool(s, "evading", c.evading);
+                AppendBool(s, "gossipFlag", c.gossipFlag);
+                AppendBool(s, "updateNeeded", c.updateNeeded);
+                AppendBool(s, "gridLoaded", c.gridLoaded);
+                AppendBool(s, "seenByGridScan", c.seenByGridScan);
+                s << '}';
+            }
+            s << "]}";
+        }
+        s << '}';
     }
 
     std::string Summarize(Snapshot const& snap)
@@ -770,6 +1015,33 @@ namespace DcDiag
             s << " PHANTOM-COMBAT=" << phantom;
         if (offEngine)
             s << " FLAGGED-OFF-COMBAT-ENGINE=" << offEngine;
+        std::uint32_t underMesh = 0;
+        std::uint32_t riders = 0;
+        for (MemberSnapshot const& m : snap.members)
+        {
+            if (m.onVehicle)
+                ++riders;  // airborne by design: its column's mesh is the ring below
+            else if (m.online && IsUnderMesh(m.floor, m.z))
+                ++underMesh;
+        }
+        if (underMesh)
+            s << " UNDER-MESH=" << underMesh;
+        if (riders)
+            s << " RIDERS=" << riders;
+        // The escort driver's own view disagreeing with the map is the question
+        // the Town Hall stall left open; say which way it disagrees.
+        if (snap.escort.active && !snap.escort.driverSees)
+        {
+            s << " ESCORTEE-UNSEEN copies=" << snap.escort.copyCount;
+            if (!snap.escort.copies.empty())
+            {
+                EscorteeCopy const& c = snap.escort.copies.front();
+                s << " nearest=" << c.distToTank << "yd"
+                  << (c.alive ? " alive" : " DEAD")
+                  << (c.updateNeeded ? "" : " NOT-UPDATED")
+                  << (c.seenByGridScan ? "" : " GRID-BLIND");
+            }
+        }
         return s.str();
     }
 
@@ -798,7 +1070,9 @@ namespace DcDiag
             if (!first)
                 s << " | ";
             first = false;
-            s << m.name << " [engine=" << (m.botState.empty() ? "?" : m.botState)
+            s << m.name
+              << (m.onVehicle ? " ON-VEHICLE" : (IsUnderMesh(m.floor, m.z) ? " UNDER-MESH" : ""))
+              << " [engine=" << (m.botState.empty() ? "?" : m.botState)
               << " attackers=" << m.attackerCount
               << " victim=" << (m.victim.empty() ? "-" : m.victim)
               << (m.phantomCombat ? " PHANTOM" : "") << "] held by ";
@@ -828,6 +1102,8 @@ namespace DcDiag
                   << (!c.reachChecked ? " path-not-tested"
                                       : (c.reachable ? " reachable" : " UNREACHABLE"))
                   << (c.canAttackMe ? "" : " CANNOT-ATTACK-ME")
+                  << (c.trigger ? " TRIGGER" : "")
+                  << (IsUnderMesh(c.floor, c.z) ? " UNDER-MESH" : "")
                   << (c.legitimate ? " -> LEGITIMATE" : " -> phantom");
                 if (!c.victim.empty())
                     s << " fighting=" << c.victim;

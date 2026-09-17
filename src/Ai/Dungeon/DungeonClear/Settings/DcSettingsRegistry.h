@@ -818,6 +818,27 @@ inline constexpr DcSettingDef kDcSettings[] =
     { "TestRun.Plan.BackoffMs",  DcType::UInt,   5000,  0, 600000, false },
     { "TestRun.Plan.DriverWaitMs", DcType::UInt, 120000, 0, 600000, false },
 
+    // RDF instant queue fill (DungeonClear.DungeonQueueFill.*). Server policy,
+    // not a per-run tunable: a player cannot ask for it from the addon, so
+    // every row is playerFacing=false. Read once per world tick by the fill
+    // manager, so it goes through DcSettings for the same anti-spam reason the
+    // TestRun rows do.
+    //
+    // The DungeonClear.BgQueueFill.* prefix is RESERVED for the battleground
+    // counterpart — a separate feature with a separate switch, because an
+    // operator must be able to run dungeon fill without battleground fill.
+    // Nothing is ever named plain QueueFill.
+    { "DungeonQueueFill.Enable",          DcType::Bool,   0,  0,      1, false },
+    // Bounds the fills SETTING UP, not the parties out — see the conf.dist.
+    { "DungeonQueueFill.MaxConcurrent",   DcType::UInt,   3,  0,    100, false },
+    { "DungeonQueueFill.SetupTimeoutSec", DcType::UInt,  60, 10,    600, false },
+    { "DungeonQueueFill.MatchTimeoutSec", DcType::UInt, 120, 10,   1800, false },
+    { "DungeonQueueFill.MinPlayerLevel",  DcType::UInt,  15,  1,     80, false },
+    { "DungeonQueueFill.GearIlvl",        DcType::UInt,   0,  0, 100000, false },
+    { "DungeonQueueFill.GearQuality",     DcType::UInt,   0,  0,      7, false },
+    { "DungeonQueueFill.AutoClear",       DcType::Bool,   0,  0,      1, false },
+    { "DungeonQueueFill.LogoutOnRelease", DcType::Bool,   1,  0,      1, false },
+
     // Server-only (not overridable from the addon).
     { "AsyncPathfinding",      DcType::Bool,   1,   0,   1,  false },
     { "PathCenterEnable",      DcType::Bool,   1,   0,   1,  false },

@@ -62,10 +62,17 @@ TEST(DcHazardRegistry, ReportsMapsWithEmitters)
     EXPECT_TRUE(DcHazardRegistry::HasTrapHazards(540));
     EXPECT_TRUE(DcHazardRegistry::HasAnyHazard(540));
 
+    // Pit of Saron is ground-pools-only as well — Krick's and the Plagueborn
+    // Horror's Toxic Waste — so it takes the same shape Scholomance does.
+    EXPECT_FALSE(DcHazardRegistry::HasEmitters(658));
+    EXPECT_TRUE(DcHazardRegistry::HasGroundHazards(658));
+    EXPECT_TRUE(DcHazardRegistry::HasAnyHazard(658));
+
     // ...and no other map carries a trap row today.
     EXPECT_FALSE(DcHazardRegistry::HasTrapHazards(289));
     EXPECT_FALSE(DcHazardRegistry::HasTrapHazards(349));
     EXPECT_FALSE(DcHazardRegistry::HasTrapHazards(552));
+    EXPECT_FALSE(DcHazardRegistry::HasTrapHazards(658));
     EXPECT_FALSE(DcHazardRegistry::HasTrapHazards(0));
 }
 
@@ -242,7 +249,11 @@ TEST(DcHazardRegistry, GroundPoolRetreatPointClearsItsOwnKeepOut)
                                         DcHazardRegistry::FindGround(601, 59419),
                                         DcHazardRegistry::FindGround(600, 47346),
                                         DcHazardRegistry::FindGround(600, 49034),
-                                        DcHazardRegistry::FindGround(600, 49548) })
+                                        DcHazardRegistry::FindGround(600, 49548),
+                                        DcHazardRegistry::FindGround(608, 58693),
+                                        DcHazardRegistry::FindGround(604, 55627),
+                                        DcHazardRegistry::FindGround(658, 69024),
+                                        DcHazardRegistry::FindGround(658, 70274) })
     {
         ASSERT_NE(pool, nullptr);
 

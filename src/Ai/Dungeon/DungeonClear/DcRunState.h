@@ -296,19 +296,163 @@ struct DcRunState
     ObjectGuid vhKeeperLock;
     ObjectGuid bmRiftLock;
 
-    // --- cached per-tick scan results (leader-owned, throttled) -------------
-    // GetCreatureListWithEntryInGrid is an O(all-creatures-in-grid) scan that
-    // several driver hooks call every tick. These fields cache the RESULT for
-    // a short window so a scan runs at most once per window per run, not once
-    // per caller. The cache is stamped alongside the throttle slot of the same
-    // name; a miss (slot expired) re-scans and re-stamps both.
+    // --- Pit of Saron: the Ymirjar gauntlet (map 658) ------------------------
     //
-    // BmDrainersOnMedivh: count of live drainers on Medivh's ring.
-    uint32 bmDrainerCount = 0;
-    // BmSelectTargetRift: the GUID of the rift the scan picked (empty = none).
-    // Re-validated on every read even inside the window, so a despawned rift
-    // never lingers — the cache only saves the scan, not the validation.
-    ObjectGuid bmRiftScanResult;
+    // The two clocks DcPosGauntlet::Decide carries across ticks, plus the state
+    // it last reported so the driver logs one line per transition instead of one
+    // per tick.
+    //
+    // BOTH CLOCKS BELONG TO A PHASE, NOT TO A STATE. `posGauntletPhase` is the
+    // instance's own DATA_INSTANCE_PROGRESS value (2, 3 or 4), and it is what the
+    // kernel compares against to decide whether to re-stamp: Arm and Gate1 are
+    // both phase 2, Wave1 and Gate2 are both phase 3, and a clock that restarted
+    // on the sub-state transition would restart exactly where it is needed — the
+    // wave-summon grace window opens on the gate being ACCEPTED, which is the same
+    // tick the sub-state flips from Gate to Wave.
+    //
+    // Here rather than in a file-scope map for the Util/DcThrottle.h reason: a map
+    // keyed on the bot and owned by a map-update thread is neither pruned nor
+    // stably owned, and a lapsed clock here would re-open a spent grace window.
+    uint8  posGauntletPhase = 0;         // DATA_INSTANCE_PROGRESS the clocks belong to
+    uint32 posGauntletPhaseMs = 0;       // getMSTime() the party entered it
+    uint32 posGateHoldMs = 0;            // ...and when the leader first stood in its gate
+    uint32 posWaveHoldMs = 0;            // ...and when a live wave mob first stood in
+                                         // reach saying nothing (the standoff clock)
+    bool   posGateStallReported = false; // has the "forged and still refused" WARN fired?
+    bool   posWaveArmedLatched = false;  // has the wave-1 arming hold released this
+                                         // phase? ONE-WAY within a phase and reset by
+                                         // the kernel on the progress bump, because
+                                         // the armed COUNT alone falls back below the
+                                         // quorum as the party kills the wave
+    uint8  posGauntletState = 0;         // DcPosGauntlet::State last logged
+
+    // --- Halls of Reflection: the altar and the escape (map 668) -------------
+    //
+    // TWO DRIVERS, TWO BLOCKS, and neither carries a decision clock the way the
+    // Pit of Saron block does — both kernels derive their state fresh from the
+    // instance every tick. What is stored here is what the WORLD cannot answer:
+    // which state was last LOGGED (so the driver prints one line per transition
+    // rather than one per tick), and the two one-shot report latches.
+    //
+    // horRestartLogged is scoped to one wipe episode. A leash wipe on this map is
+    // both expensive (waves 1-4 replay with every dead mob respawned) and
+    // INVISIBLE from every other probe — after it the counter reads 0, all 34 mobs
+    // are hidden again and nothing is fightable, which is indistinguishable from a
+    // healthy gap between waves. The one WARN line is the whole signal, so it must
+    // fire once per episode and not once per tick.
+    uint8  horWaveState = 0;             // DcHorWaves::State last logged
+    uint32 horWaveStateMs = 0;           // getMSTime() it was entered
+    bool   horRestartLogged = false;     // has this wipe episode been named?
+
+    // The escape's stall watchdog is keyed on the STOP rather than on the state,
+    // because the party legitimately cycles Hold -> Fight -> Hold several times at
+    // one wall and a per-state latch would re-report on every cycle. horEscapeStop
+    // is the stand point the latch belongs to; horEscapeStopHoldMs is when the
+    // Lich King first came inside LK_STALL_DIST of the leader with that wall still
+    // shut and its adds still up.
+    uint8  horEscapeState = 0;           // DcHorEscape::State last logged
+    uint32 horEscapeStateMs = 0;
+    uint8  horEscapeStop = 0;            // the stop the stall latch belongs to
+    uint32 horEscapeStopHoldMs = 0;
+    bool   horEscapeStallReported = false;
+    uint32 horEscapeTargetStopMs = 0;    // when horEscapeStop last CHANGED
+
+    // HOW LONG A SUMMON HAS BEEN UP WITH NONE OF IT ON THE TANK, and whether the
+    // party has ever actually made the stop it is standing at. The first arms the
+    // driver's pickup (a tank with nothing on it and nothing in reach did nothing
+    // at all for eighty-seven seconds on tr-20260908-225156-15); the second tells
+    // an unfinished 180yd LEG, which must end on the stand point, from a chase
+    // step that drifted off a stop the party already owns, which must end on the
+    // near edge of the band. Both are cleared whenever the stop changes.
+    uint32 horEscapeIdleMs = 0;
+    bool   horEscapeReachedStand = false;
+
+    // THE PER-FOLLOWER ADVANCE LATCH (DcHorEscape::DecideFollow). Set when this
+    // bot is further from the party's stand point than STAND_LEAVE_LEASH,
+    // cleared when it gets inside STAND_LEASH — the same Schmitt pair the driver
+    // uses on the tank, and for the same reason: without the hysteresis the rung
+    // hands the tick back to MoveChase halfway through a 136yd leg and the bot
+    // is walked back onto the add it left.
+    bool   horFollowAdvancing = false;
+
+    // --- The Culling of Stratholme: the ten waves (map 595) ------------------
+    //
+    // ONE CLOCK AND ONE STATE ID, which is all this phase needs — and the reason
+    // it needs so much less than Pit of Saron or Halls of Reflection is worth
+    // recording: the counter it drives off is MONOTONIC with exactly two values in
+    // the window, so there is no wipe to detect, no restart to orchestrate and no
+    // phase to re-stamp clocks against.
+    //
+    // cosWaveStandoffMs runs ONLY while a live wave mob stands inside engage range
+    // with nobody in combat. That is the one shape on this map that can deadlock
+    // forever (a parked party and a parked mob, neither relocating, so neither
+    // ever takes an aggro check), and the clock is what bounds it. Cleared by the
+    // kernel in every other shape, so the budget is always measured from the
+    // current silence.
+    uint8  cosWaveState = 0;         // DcCosWaves::State last logged
+    uint32 cosWaveStateMs = 0;       // getMSTime() it was entered
+    uint32 cosWaveStandoffMs = 0;    // when the current silence began (0 = not silent)
+    uint32 cosWaveRestMs = 0;        // ...and when the current rest window opened,
+                                     // which bounds it: a party that can never top
+                                     // off must not be able to hold the phase for
+                                     // ever (see WAVE_REST_BUDGET_MS)
+    uint32 cosWaveRestSpentMs = 0;   // futile rest banked from windows that already
+                                     // CLOSED with the party still short. The budget
+                                     // is measured across the phase, not per window,
+                                     // so an interrupting wave fight can no longer
+                                     // hand a stuck party a fresh full one; only
+                                     // actually recovering clears it.
+
+    // --- Trial of the Champion: the arena driver (map 650) -------------------
+    //
+    // Three "since when" clocks the kernel round-trips (DcTocDriver::Decide), and
+    // the last progress value the telemetry line reported. No latch: the counter
+    // rewinds on a full wipe, so everything the driver knows is re-derived from it
+    // every tick and these only measure how long the current shape has held.
+    uint8  tocState = 0;               // DcTocDriver::State last logged
+    uint32 tocStateMs = 0;             // getMSTime() it was entered
+    uint32 tocMountedSinceMs = 0;      // the tank has been on a horse since (muster timeout)
+    uint32 tocUnmountedSinceMs = 0;    // ...on foot through the joust since (mount WARN)
+    uint32 tocStrandSinceMs = 0;       // progress 8, no Knight and no announcer, since
+    uint32 tocLastProgress = 0xFFFFFFFFu;  // the progress the telemetry last reported
+
+    // --- The Oculus: the party plan (map 578, on the RUN OWNER) ----------------
+    //
+    // The driver kernel's verdict, memoised for PLAN_MEMO_MS and read by every
+    // member's rider rung (DcOculusDriver::Decide). Plus the three "since when"
+    // clocks it round-trips. No latch: every field is re-derived from the
+    // encounter slots and the census each refresh.
+    uint32 ocPlanStampMs = 0;          // getMSTime() of the last refresh (0 = never)
+    uint8  ocPlanPhase = 0;            // DcOculusDriver::Phase
+    uint8  ocPlanDest = 0xFF;          // DcOculus::Site
+    bool   ocPlanHover = false;
+    uint8  ocPlanAction = 0;           // DcOculusDriver::Action
+    uint32 ocPlanLegSeq = 0;           // bumps when a new leg starts (phase or destination change)
+    bool   ocPlanTankOnFootOnDest = false;
+    bool   ocPlanEregosEngaged = false;
+    uint8  ocDriverState = 0xFF;       // DcOculusDriver::State last logged
+    uint32 ocDriverStateMs = 0;
+    uint32 ocMusterSinceMs = 0;
+    uint32 ocLandWaitSinceMs = 0;
+    uint32 ocLastRegroupMs = 0;
+
+    // --- The Oculus: this member's drake (map 578, on EVERY member) ------------
+    ObjectGuid ocBaseGuid;             // the drake PrepareBase last set up
+    uint32 ocMountIssuedMs = 0;        // the Call cast went out (the settle clock)
+    uint32 ocMasterWaitSinceMs = 0;    // a master holding its own mount for its members, since
+    uint32 ocEssenceWaitSinceMs = 0;   // on Drakos's ring without an essence, since (GIVER_WAIT_MS)
+    uint32 ocLegSeq = 0;               // the plan leg this member's cursor belongs to
+    uint8  ocLegDest = 0xFF;
+    uint8  ocLegPhase = 0;
+    bool   ocLegPadCentre = false;     // re-planned onto lane 0 after PAD_FALLBACK_MS
+    uint8  ocLegCount = 0;
+    uint8  ocLegCursor = 0;
+    float  ocLegWp[18]{};              // up to six waypoints, x y z
+    uint32 ocLegArrivedMs = 0;
+    uint32 ocProgressMs = 0;           // when the drake last moved LEG_PROGRESS_YD
+    float  ocProgressX = 0.0f, ocProgressY = 0.0f, ocProgressZ = 0.0f;
+    bool   ocStallReissued = false;
+    uint8  ocRiderAction = 0;          // DcOculusRider::Action last logged
 
     // --- per-bot throttles (see Util/DcThrottle.h) --------------------------
 
@@ -367,6 +511,95 @@ struct DcRunState
     // teardown: the leg is Repeatable and a leader shoved back into the gauntlet
     // re-arms it, so coming back holding a stale cursor — or a gather gate that
     // latched open two rooms ago — is the one way this state can lie.
+    // Drop the Pit of Saron gauntlet block. Called from the run teardown for the
+    // ClearTransit reason: the event is Repeatable and a party that re-enters the
+    // instance walks the same corridor, so coming back holding a phase clock from
+    // the previous run is the one way this state can lie.
+    void ClearPosGauntlet()
+    {
+        posGauntletPhase = 0;
+        posGauntletPhaseMs = 0;
+        posGateHoldMs = 0;
+        posWaveHoldMs = 0;
+        posGateStallReported = false;
+        posWaveArmedLatched = false;
+        posGauntletState = 0;
+        ClearThrottle(DcThrottle::PosGauntletLog);
+    }
+
+    // Drop the Halls of Reflection block. Called from the run teardown for the
+    // ClearPosGauntlet reason and one this map has on its own: both events are
+    // Repeatable, and the wave event in particular re-arms after every leash wipe
+    // — so a run that comes back holding a spent restart latch would replay the
+    // whole first half without ever naming the wipe that caused it.
+    void ClearHor()
+    {
+        horWaveState = 0;
+        horWaveStateMs = 0;
+        horRestartLogged = false;
+        horEscapeState = 0;
+        horEscapeStateMs = 0;
+        horEscapeStop = 0;
+        horEscapeStopHoldMs = 0;
+        horEscapeStallReported = false;
+        horEscapeTargetStopMs = 0;
+        horEscapeIdleMs = 0;
+        horEscapeReachedStand = false;
+        horFollowAdvancing = false;
+        ClearThrottle(DcThrottle::HorWaveLog);
+        ClearThrottle(DcThrottle::HorEscapeLog);
+        ClearThrottle(DcThrottle::HorIntroLog);
+        ClearThrottle(DcThrottle::HorThroneLog);
+        ClearThrottle(DcThrottle::HorEscapeGoLog);
+        ClearThrottle(DcThrottle::HorStallWarn);
+    }
+
+    // Drop the Culling of Stratholme block. Called from the run teardown for the
+    // reason every other driver block is: the wave event is Repeatable, so a run
+    // that came back holding a spent standoff clock would open its pull budget on
+    // a silence that ended ten minutes ago.
+    void ClearCos()
+    {
+        cosWaveState = 0;
+        cosWaveStateMs = 0;
+        cosWaveStandoffMs = 0;
+        cosWaveRestMs = 0;
+        cosWaveRestSpentMs = 0;
+        ClearThrottle(DcThrottle::CosWaveLog);
+    }
+
+    // Drop the Trial of the Champion block once the Knight is dead, for the
+    // Culling's reason: the driver is Repeatable.
+    void ClearToc()
+    {
+        tocState = 0;
+        tocStateMs = 0;
+        tocMountedSinceMs = 0;
+        tocUnmountedSinceMs = 0;
+        tocStrandSinceMs = 0;
+        tocLastProgress = 0xFFFFFFFFu;
+        ClearThrottle(DcThrottle::TocTelemetryLog);
+        ClearThrottle(DcThrottle::TocMoveIssue);
+        ClearThrottle(DcThrottle::TocWarn);
+        ClearThrottle(DcThrottle::TocClick);
+    }
+
+    // Drop this member's drake leg: a new leg, a dismount, or a mount on a
+    // different drake all start from where the drake is, never from a stale cursor.
+    void ClearOcLeg()
+    {
+        ocLegSeq = 0;
+        ocLegDest = 0xFF;
+        ocLegPhase = 0;
+        ocLegPadCentre = false;
+        ocLegCount = 0;
+        ocLegCursor = 0;
+        ocLegArrivedMs = 0;
+        ocProgressMs = 0;
+        ocStallReissued = false;
+        ClearThrottle(DcThrottle::OcMoveIssue);
+    }
+
     void ClearTransit()
     {
         transitDrivingMs = 0;

@@ -278,6 +278,22 @@ ObjectGuid DungeonClearBlockingDoorValue::Calculate()
         // checks; see DcEngageGeometry::IsDoorClosed.
         if (!DcEngageGeometry::IsDoorClosed(go))
             continue;
+        // A door PHASED AWAY from the bot cannot block it. Collision is resolved
+        // per-phase — the dynamic VMAP tree is queried with a phasemask, which is
+        // why the LOS detector below already passes bot->GetPhaseMask() — so a
+        // shut door the bot is not in phase with has no collision for that bot
+        // and it walks straight through. Flagging one parks the party in front of
+        // an obstacle that does not exist for them, in front of a door nothing
+        // will ever open, and drops through to the auto-pause.
+        //
+        // The footprint detector is phase-blind (a GeoBox is pure geometry), so
+        // without this the two detectors disagree and the phase-blind one wins.
+        // Halls of Reflection is what found it: GO 202302 'Frostmourne' is closed
+        // and SetPhaseMask(2)'d at the end of the Lich King intro, out of the
+        // party's phase for the whole rest of the run, and it ended all ten runs
+        // of tp-20260907-214408-1 at 3/6 bosses.
+        if (!go->InSamePhase(bot))
+            continue;
         // Interact-THROUGH gates (Old Hillsbrad's prison door): the objective is
         // completed from the players' side of the shut door and the event opens
         // it itself — never flag one as blocking, never pause on it.

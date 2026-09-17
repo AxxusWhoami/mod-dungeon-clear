@@ -601,6 +601,61 @@ public:
     bool IsActive() override;
 };
 
+// HALLS OF REFLECTION ONLY (map 668), every role, BOTH engines. Fires while the
+// escape is running and THIS bot is either inside the Lich King's Remorseless
+// Winter ring or has fallen behind him along the path.
+//
+// WHY THE ESCAPE NEEDS A RUNG OF ITS OWN rather than the generic hazard vacate.
+// The driver (hook 35) steers the TANK ONLY — DungeonClearEventDueTrigger is
+// leader-only — while the four followers are in the combat engine killing the
+// wall's summons, and the summons are the problem: they spawn AT the Lich King
+// and run to the leader's stop, so a melee chasing the last Risen Witch Doctor
+// (which casts from 20yd on HIS side) walks straight into the ring, and a bot
+// that takes the 70653 Zap is KNOCKED FURTHER BACK by it.
+//
+// Both of those are answered by moving forward, to the party's stand point. The
+// generic vacate would answer them by moving away from him, which for a bot
+// behind him is further behind — deeper into the zap rule, whose own knockback
+// then makes the next check worse. That is why the ring is registered as a
+// placement keep-out with NO vacateRadius (see DcHazardRegistry) and why this
+// exists at relevance 56, one above HazardVacate.
+//
+// TWO TRIGGERS, and they are the encounter's own numbers scaled back so the
+// correction happens before the damage rather than after it:
+//   * inside LK_PRESSURE_DIST (16yd) of him — the pulse is 10yd and deals
+//     7068 +/- 863 frost per second;
+//   * (bot.x + bot.y) - (lk.x + lk.y) above LK_BEHIND_SUM (6) — the core zaps at
+//     20 on exactly this scalar, and the path runs -x -y so it IS "behind him".
+//
+// ...OR the party has simply MOVED ON without it: the wall opened, the leader ran
+// 100-186yd to her next stop, the escape driver took the tank after her and this
+// bot is still at the old wall. That arm is latched (STAND_LEAVE_LEASH to arm,
+// STAND_LEASH to clear) and is NOT gated on Remorseless Winter, because the last
+// 131yd to the gunship is run with the aura already gone. Without it the rung was
+// a pressure valve that moved a bot a few yards and disarmed, and the party split
+// at every wall — see the block comment on DcHorStayAheadAction.cpp.
+//
+// Free on every other map — the first test is an integer compare on the map id.
+class DungeonClearHorStayAheadTrigger : public Trigger
+{
+public:
+    DungeonClearHorStayAheadTrigger(PlayerbotAI* botAI)
+        : Trigger(botAI, "dungeon clear hor stay ahead", 1)
+    {
+    }
+    bool IsActive() override;
+};
+
+// THE OCULUS ONLY: active for a member that sits on a drake, or whose party plan
+// (the flight driver's, DcOculusPlanView) has something for the riders to do.
+// Free on every other map — the first test is an integer compare on the map id.
+class DungeonClearOculusRiderTrigger : public Trigger
+{
+public:
+    DungeonClearOculusRiderTrigger(PlayerbotAI* botAI) : Trigger(botAI, "dungeon clear oc rider", 1) {}
+    bool IsActive() override;
+};
+
 // BLACKWING LAIR ONLY, and only for ONE member of the raid: the bot the leader's
 // Razorgore driver elected to take the Orb of Domination.
 //
@@ -697,9 +752,20 @@ public:
 // the boss a tick before the bar came up keeps auto-attacking it off GetVictim()
 // with no further target pick involved.
 //
-// TANKS ARE EXEMPT, by the same reasoning as the registry's Tank carve-out: the
-// encounters that bar a creature are the ones where somebody must still HOLD it.
-// A freed Razorgore between mind controls has to be tanked by someone.
+// TANKS ARE EXEMPT PER ROW, NOT WHOLESALE, and the distinction is the row's own
+// `alsoTank` flag — which already means exactly "the bar reaches the tank's pick
+// too". A row WITHOUT it (Razorgore) is an encounter where somebody must still
+// HOLD the barred creature, and the tank keeps it. A row WITH it is an encounter
+// that wants NO HOLDER at all, and the tank drops it like everyone else.
+//
+// Halls of Reflection's Lich King is what forced the change. He is a fully legal
+// target — unit_flags 0, no immunities — so stock assist triggers acquire him
+// within a second of the escape gossip; the exclusion pool stops a fresh PICK,
+// but only this rung can take him off a bot that already holds him, and under the
+// old blanket exemption a tank that acquired him in that first tick kept him for
+// the rest of the escape. That is not merely wasted damage (he heals to 75%
+// below 70): a held victim makes DcCombatFlag::IsEngaged true for the party and
+// freezes every MayDrive rung while he walks at them.
 //
 // Free on every map with no rows — HasRowsFor is a scan of a table with one entry
 // in it, keyed on the map.

@@ -1,5 +1,3 @@
-> **The fixes made in this module have been implemented at https://corelegacy.gg**
-
 # mod-dungeon-clear
 
 Autonomous dungeon-clearing mode for **mod-playerbots** tank bots, packaged as a
@@ -118,7 +116,13 @@ Caverns, Uldaman, Sunken Temple, Razorfen Downs, Scarlet Monastery, Zul'Farrak,
 Blackrock Depths, Scholomance, Stratholme, and Dire Maul; and in Burning
 Crusade: Hellfire Ramparts, Blood Furnace, Shattered Halls, Slave Pens,
 Underbog, Steamvault, Sethekk Halls, Mechanar, Arcatraz, Black Morass, Old
-Hillsbrad, and Magisters' Terrace. Coverage continues to expand.
+Hillsbrad, and Magisters' Terrace; and in Wrath of the Lich King: Utgarde Keep,
+the Nexus, Azjol-Nerub, Ahn'kahet, Drak'Tharon Keep, the Violet Hold, Gundrak,
+Halls of Stone, Halls of Lightning, Utgarde Pinnacle, the Culling of Stratholme,
+Trial of the Champion, Pit of Saron, and Halls of Reflection. Coverage continues
+to expand. (Trial of the Champion's joust itself is fought by mod-playerbots'
+`wotlk-toc` strategy; mod-dungeon-clear musters the mounted party and starts
+each phase.)
 
 Faction-specific events run only for the relevant side, and heroic-only events
 never fire on a normal run. If an event cannot complete (for example, a scripted

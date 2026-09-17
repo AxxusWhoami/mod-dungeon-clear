@@ -126,6 +126,13 @@ namespace DcBossStandDown
         if (name == "dungeon clear hold fire")
             return ActionVerdict::Stock;
 
+        // The Oculus rider rung. The Eregos fight IS the riders' — every station, the
+        // pull and the landing afterwards are this rung — so the stand-down that
+        // silences every other DC rung for that fight must not silence it. Its own
+        // trigger's first test is map 578.
+        if (name == "dungeon clear oc rider")
+            return ActionVerdict::Stock;
+
         // THE OUT-OF-LOS ASSIST, exempt as a PAIR with `drop target` below —
         // either half alone is inert, so both or neither.
         //
@@ -166,10 +173,36 @@ namespace DcBossStandDown
         return ActionVerdict::Defer;
     }
 
+    // THE FIVE-MAN TABLE. A 5-man boss fight is DC's own to drive — except where
+    // there is nothing on the ground to drive: The Oculus's Ley-Guardian Eregos is
+    // fought entirely from the drakes, with no tank, no pull and no camp, and a DC
+    // recovery or combat rung firing during it can only get in the riders' way.
+    // Each row names the boss and the instance guid slot that resolves him (the
+    // script-state signal is unusable there: instance_oculus never calls
+    // SetBossState).
+    struct TableRow
+    {
+        uint32 mapId;
+        uint32 bossEntry;
+        uint32 guidSlot;
+    };
+
+    inline constexpr TableRow kTable[] = {
+        { 578, 27656, 3 },  // The Oculus — Ley-Guardian Eregos (DATA_EREGOS)
+    };
+
+    inline TableRow const* FindTableRow(uint32 mapId)
+    {
+        for (TableRow const& r : kTable)
+            if (r.mapId == mapId)
+                return &r;
+        return nullptr;
+    }
+
     // Is the stand-down currently holding DC back for `bot`'s run?
     //
-    // False everywhere outside raid maps — 5-man boss fights are DC's own to
-    // drive. On a raid map the verdict is the LEADER's, evaluated at most once
+    // False everywhere outside raid maps and the table above — 5-man boss fights
+    // are DC's own to drive. On such a map the verdict is the LEADER's, evaluated at most once
     // per tick window and read cross-bot by every member (one check in the
     // combat multiplier gates every DC combat action; the recovery ladders and
     // the phantom-combat breaker consult it directly).

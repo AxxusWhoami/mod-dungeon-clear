@@ -192,6 +192,132 @@ namespace DcEventDoorRegistry
             case 191325:  // Halls of Lightning — Volkhan Door (opens on Volkhan's death)
             case 191326:  // Halls of Lightning — Ionar Door (opens on Ionar's death)
                 return true;
+
+            // UTGARDE PINNACLE (575) — the two portcullises, and the cleanest
+            // example on record of a door that is not a door problem.
+            //
+            //   192173 Doodad_VR_Portcullis01 (477.5, -477.2, 103.1) — opens on
+            //     SetData(DATA_SKADI_THE_RUTHLESS, DONE). It joins the room north
+            //     of Skadi's hall to the hall itself.
+            //   192174 Doodad_VR_Portculliswithchain01 (445.1, -325.5, 101.0) —
+            //     opens on SetData(DATA_KING_YMIRON, DONE). It is the LAST BOSS'S
+            //     EXIT, so it is shut for the entire run and nothing in a correct
+            //     clear ever waits on it.
+            //
+            // Both spawn state 1 (shut) with lockId 0 and autoCloseTime 0, and the
+            // instance C++ is their sole authority — smart_scripts source_type 1
+            // has zero rows for map 575, and the script contains no AddDoor, no
+            // DoorData[], no SetBossState and no DoUseDoorOrButton. HandleGameObject
+            // is called exactly five times in the whole dungeon, twice of them in
+            // OnGameObjectCreate to re-open on reload. So neither door is ever
+            // CLOSED by a script: they spawn shut and are opened once, permanently,
+            // and there is no IsSelfClearing case to consider.
+            //
+            // A bot must never click either. Both are lock-free
+            // GAMEOBJECT_TYPE_DOORs, so BotCanOpenDoorLikePlayer would happily
+            // open one — and force-opening 192173 hands the party Ymiron's room
+            // with Skadi alive (he stays UNIT_FLAG_NOT_SELECTABLE regardless, so
+            // the reward is a walk to a boss that cannot be attacked), while
+            // force-opening 192174 opens nothing the run needs at all.
+            //
+            // DELIBERATELY NOT IsNavigationIgnored, and that is the interesting
+            // half. Unlike the Molten Core props and the Halls of Stone Sky Room
+            // Floor, these two ARE doors: the party really is stopped by them and
+            // the at-boss stand-down needs to see them. With the roster patched
+            // (see UtgardePinnacleEvents.cpp) the designed legs clear 192174 by
+            // 43yd at worst and 192173 by 32.9yd at worst, except the post-Skadi
+            // leg to Ymiron which passes 192173 at 3.1yd with it already open. A
+            // run that DOES pause on one of these has regressed somewhere else —
+            // 192174 means the route reverted to the entrance-hall shortcut,
+            // 192173 means the gauntlet approach — and hiding them from navigation
+            // would mask that instead of preventing it.
+            case 192173:  // Utgarde Pinnacle — Skadi's Door (opens on Skadi's death)
+            case 192174:  // Utgarde Pinnacle — Ymiron's Door (opens on Ymiron's death)
+                return true;
+
+            // PIT OF SARON (658) — the Ice Wall, and a row authored from a
+            // MEASUREMENT rather than from a resemblance.
+            //
+            // 201885 Ice Wall (932.27, -80.67, 591.68) is a real
+            // GAMEOBJECT_TYPE_DOOR with lockId 0 and autoCloseTime 0, spawned
+            // state 1 (SHUT) and opened ONCE, permanently, by
+            // instance_pit_of_saron the moment Garfrost and Ick are both DONE —
+            // from SetData on either boss, and again from OnGameObjectCreate so a
+            // reload re-opens it. There is no auto-close and therefore no
+            // IsSelfClearing case.
+            //
+            // It is on the DESIGNED LEG, not beside it: the wave-2 ambush is
+            // fought on the ground it stands in, ~9yd from the near spawn line, so
+            // the authored route passes well inside DungeonClearBlockingDoorValue's
+            // 12yd same-floor fallback band.
+            //
+            // A BOT MUST NEVER CLICK IT. Lock-free type-0 doors are exactly what
+            // BotCanOpenDoorLikePlayer will happily open, and this one is the
+            // instance script's sole property.
+            //
+            // DELIBERATELY NOT IsNavigationIgnored, for the Utgarde Pinnacle
+            // reason. By the time anything in this module reaches it the wall is
+            // already open — the gauntlet's own activation predicate requires both
+            // bosses DONE — so the row is belt-and-braces, and a run that DOES
+            // pause here has regressed somewhere the module should be told about.
+            // Hiding the door from navigation would mask that instead of
+            // preventing it.
+            case 201885:  // Pit of Saron — Ice Wall (opens on Garfrost + Ick)
+                return true;
+
+            // --- Halls of Reflection (668) --------------------------------
+            //
+            // FOUR DOORS, all of them the instance's alone, and one of them is
+            // the reason this map needs the rows at all.
+            //
+            // GO 201976, the FRONT DOOR, is a real DOOR_TYPE_ROOM the party
+            // stands behind for nine minutes on purpose. instance_halls_of
+            // _reflection shuts it at the end of the intro and again for EVERY
+            // wave, and re-opens it when a wave wipes or when Marwyn dies. So it
+            // is shut for most of the first two thirds of the run with the whole
+            // party on the inside — and the one thing the module must never do
+            // there is treat it as a corridor blocker and auto-pause the run in
+            // front of it, or click it and fight the script for the state.
+            //
+            // DELIBERATELY NOT IsNavigationIgnored, for the Pit of Saron reason:
+            // the party never needs to path THROUGH any of these, so a run that
+            // does pause at one has regressed somewhere the module should be
+            // told about, and hiding them from navigation would mask that rather
+            // than prevent it.
+            case 201976:  // front door (shuts for the intro's end and every wave)
+            case 197341:  // the Arthas door (opens on Marwyn's death)
+            case 197342:  // the door before the throne (spawned open, never scripted)
+            case 201385:  // Ice Wall (SUMMONED at an Ice Wall Target; opens on WallCompleted)
+            // The Culling of Stratholme (map 595) — the two objects the instance
+            // owns. Both are GAMEOBJECT_TYPE_DOOR, both spawned shut, and neither
+            // is ever clickable by anybody:
+            //
+            //   188686 the TOWN HALL BOOKCASE, the secret passage to the last
+            //     third of the dungeon. Opened by exactly two lines of the core —
+            //     npc_arthasAI's waypoint-36 handler, and ReorderInstance for a
+            //     state at or past KILLED_EPOCH — and the intended flow is that
+            //     the party follows Arthas to it and he opens it. A bot Use()
+            //     would toggle the server state with the client still drawing it
+            //     shut, AND would do so while Arthas is still walking, which is the
+            //     one thing this event must not race. ALSO navigation-ignored
+            //     below; see the row there for why one row is not enough.
+            //
+            //   191788 the CITY ENTRANCE GATE (the exit). Opened only when the
+            //     counter reaches FINISHED, after Mal'ganis. Never on the critical
+            //     path — the run is over by then — so this row exists purely so a
+            //     stray door-blocked walk-in can never single it out.
+            case 188686:  // CoS — Town Hall bookcase (opens at Arthas's waypoint 36)
+            case 191788:  // CoS — City Entrance Gate (opens at PROGRESS_FINISHED)
+            // Trial of the Champion (map 650) — the four arena gates. All four
+            // are opened and shut by instance_trial_of_the_champion alone (the
+            // champions' and soldiers' entrances, the Knight's exit, every
+            // cleanup), and none is ever the party's to open. Also
+            // navigation-ignored below.
+            case 195647:  // ToC — Main Gate (north wall; the soldiers come through it)
+            case 195648:  // ToC — East Portcullis
+            case 195649:  // ToC — South Portcullis
+            case 195650:  // ToC — North Portcullis (the entrance; shuts at progress 1)
+                return true;
             default:
                 return false;
         }
@@ -265,6 +391,96 @@ namespace DcEventDoorRegistry
             // which is what opens the real Main Chambers Door (183049).
             case 184125:  // Hydromancer Thespia's panel
             case 184126:  // Mekgineer Steamrigger's panel
+                return true;
+            // Halls of Reflection (map 668) — the Frostmourne Altar. The
+            // Steamvault shape again, and the most expensive version of it yet:
+            // a decorative DAIS whose template is GAMEOBJECT_TYPE_DOOR
+            // (displayId 9294, startOpen 0, lock 0), spawned state 1 and left
+            // there forever. instance_halls_of_reflection carries it in
+            // objectData purely so GetGameObject can find it — there is no
+            // HandleGameObject, no SetGoState, no doorData row anywhere in the
+            // core, and the only altar code path at all is the glow spell cast
+            // on the altar bunny. So IsDoorClosed reads it shut on every tick
+            // of every run, permanently, and nothing will ever open it.
+            //
+            // It blocks nothing — the party fights all three altar waves
+            // standing around it — but Leg A of the authored route begins at
+            // CenterPos, which is 0.13yd in xy from the altar's own origin, so
+            // the corridor's FIRST leg transits its footprint the instant the
+            // route to the Frostsworn General is seeded. Lock-free and not
+            // IsLockFreeClickable, so BotCanOpenDoorLikePlayer refuses, and the
+            // walk-in park lands "at door (0.0yd along path)" on tick one and
+            // falls straight through to the auto-pause.
+            //
+            // That is unconditional, and it ended ALL TEN runs of plan
+            // tp-20260907-212113-1 at 3/6 bosses, every one of them within a
+            // second of Marwyn dying and none of them ever reaching the Arthas
+            // door: tr-20260907-212118-1/-2 and -212119-3/-4/-5/-6/-7/-8/-9/-10,
+            // each flagging the same GUID 0xf1100315fc000003 and auto-pausing
+            // on "a closed door is blocking the path".
+            //
+            // IsNavigationIgnored and NOT IsScriptOnly, for the Chromaggus
+            // reason above: IsScriptOnly suppresses only the CLICK, and it is
+            // the auto-pause underneath it that actually kills the run.
+            case 202236:  // Halls of Reflection — Frostmourne Altar
+            // ...and its TWIN, which is why the altar row alone was not enough.
+            // GO 202302 'Frostmourne' — the sword — is a SECOND
+            // GAMEOBJECT_TYPE_DOOR spawned at (5309.36, 2006.55), 0.03yd from
+            // the altar's own origin and on the same first leg. Whitelisting
+            // only the altar just handed the flag to the sword: plan
+            // tp-20260907-214408-1 repeated tp-20260907-212113-1 exactly — all
+            // ten runs paused at 3/6 bosses seconds after Marwyn died, this time
+            // flagging GUID 0xf11003163e000002 entry 202302.
+            //
+            // Unlike the altar the sword IS scripted — but it is scripted SHUT.
+            // instance_halls_of_reflection's OnGameObjectCreate closes it, the
+            // intro opens it for the cutscene, and EVENT_INTRO_LK_4_2/4_3 close
+            // it again and SetPhaseMask(2) it out of the party's phase. That
+            // chain runs on the SKIPPED intro too — it is what spawns Falric —
+            // so from the end of the intro onward the sword is shut and phased
+            // away forever, blocking nothing and opening never.
+            //
+            // The phase is the real tell, and the scan now skips out-of-phase
+            // gameobjects for exactly that reason (see the InSamePhase guard in
+            // DungeonClearBlockingDoorValue). This row stays anyway: it is the
+            // cheap, map-specific statement of a fact the generic guard only
+            // implies, and it holds even for the ticks BEFORE the intro phases
+            // the sword out, when it is in phase and still unopenable.
+            case 202302:  // Halls of Reflection — Frostmourne (the sword)
+            // The Culling of Stratholme (map 595) — the TOWN HALL BOOKCASE, and
+            // this is the Halls of Reflection Frostmourne lesson applied before it
+            // cost a run rather than after.
+            //
+            // 188686 at (2473.27, 1121.36, 149.96) is an interact-THROUGH gate in
+            // the fullest sense: the party's job at it is to have talked to Arthas
+            // forty yards earlier, and ARTHAS is what opens it — his waypoint-36
+            // handler, about six seconds after he walks up. So for those six
+            // seconds a shut TYPE_DOOR is standing directly on the party's path
+            // with the escort walking INTO it.
+            //
+            // IsScriptOnly alone does not cover that. It only stops the bot
+            // CLICKING the door; the blocking-door value still flags it, and the
+            // auto-pause underneath that is what ends the run — in front of a door
+            // that is about to open on its own. A paused run then cannot drive the
+            // event that would open it, which is the same deadlock shape nine
+            // Blackwing Lair runs died of at Chromaggus's cage.
+            //
+            // So it needs BOTH rows, and the reason it needs both is the reason
+            // Thrall's prison door and the Chromaggus portcullis do.
+            case 188686:  // CoS — Town Hall bookcase (Arthas opens it at waypoint 36)
+                return true;
+            // Trial of the Champion (map 650) — the four arena gates, and here the
+            // row is about WHERE THEY STAND, not about passing through them. The
+            // run never leaves the bowl, so no route needs any of them open; but
+            // the North Portcullis is 2.6yd from where the party lands and shuts
+            // behind it at progress 1, and the Main Gate is 17yd behind the
+            // soldier line. A shut TYPE_DOOR that close to the fighting is exactly
+            // what the blocking-door value flags and the auto-pause halts on — in
+            // front of a door the run has no use for.
+            case 195647:  // ToC — Main Gate
+            case 195648:  // ToC — East Portcullis
+            case 195649:  // ToC — South Portcullis
+            case 195650:  // ToC — North Portcullis (the entrance)
                 return true;
             // The Violet Hold (map 608) — the six Activation Crystals. Like the
             // Steamvault access panels these are wall CONTROLS, not doors, but
@@ -441,6 +657,33 @@ namespace DcEventDoorRegistry
             case 186691:  // Doodad_VR_ForgeFire_Third  (opens on forge master 3)
             case 186692:  // Doodad_VR_ForgeFire_First  (opens on forge master 1)
             case 186693:  // Doodad_VR_ForgeFire_Second (opens on forge master 2)
+                return true;
+            // UTGARDE PINNACLE (575) — Svala's mirror, 191745
+            // Doodad_Utgarde_Mirror_FX01 at (296.4, -357.0, 91.5).
+            //
+            // A GAMEOBJECT_TYPE_DOOR that is not a door in any sense: lock 0,
+            // autoCloseTime 0, spawned state 0 (OPEN), and toggled BOTH WAYS by
+            // boss_svala as pure visual FX — SetGoState(GO_STATE_READY) when the
+            // areatrigger starts the intro, back to ACTIVE when she dies. It leads
+            // nowhere; the arena has one entrance and it is the ramp to the north.
+            //
+            // MEASURED, NOT ASSUMED, and the measurement is why this row exists.
+            // The authored Leg B (AT 5140 -> Svala) passes within 7.35yd of it and
+            // ENDS 11yd from it on her platform — the party fights the whole
+            // encounter beside a slab that is READY, i.e. shut by the
+            // collision-truth test, for the entire 72-second intro. That is inside
+            // DungeonClearBlockingDoorValue's 12yd same-floor fallback band, so a
+            // GO-LOS block along the leg's last segment would flag it and auto-
+            // pause the run on the boss's own doorstep. t/TestUtgardePinnacle pins
+            // the 7.35yd so a re-authored leg re-opens the question rather than
+            // silently relying on this row.
+            //
+            // This is the Ahn'kahet prison-apparatus shape below rather than the
+            // Utgarde Keep forge-wall shape above: the prop is not beside the route,
+            // it is ON the objective. IsScriptOnly would be the wrong tool for the
+            // same reason it is wrong for the forge walls — it only refuses the
+            // CLICK, and the auto-pause is what kills the run.
+            case 191745:  // Utgarde Pinnacle — Svala's mirror (FX, never a passage)
                 return true;
             // Ahn'kahet: The Old Kingdom (map 619) — Prince Taldaram's prison
             // apparatus. Three GAMEOBJECT_TYPE_DOOR entries, all lock 0,

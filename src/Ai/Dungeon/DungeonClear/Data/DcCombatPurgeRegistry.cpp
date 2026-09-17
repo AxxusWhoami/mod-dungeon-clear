@@ -74,8 +74,24 @@ namespace
     // looks identical to a freeze from where it stands. An Always row here would
     // despawn the adds mid-encounter in the runs that were WINNING. Evading is the
     // state that only happens once the fight is already over.
+    //
+    // The Oculus (578) — Azure Ring Guardian (27638) and Greater Ley-Whelp (28276).
+    //
+    // Both FLY, and nothing on foot can reach them. The Guardians are 43 static
+    // pickets hovering between the rings (wander 5, detection 20): one that
+    // notices a party on an island's rim flags it into combat from twenty yards
+    // off the edge and hovers there, holding it for ever — no rest, no muster,
+    // and the driver refuses to lift off while anyone is engaged. Always: the
+    // drakes that could shoot it down are exactly what that flag grounds.
+    //
+    // The whelps are Eregos's adds (DoZoneInCombat 300) and are fought from the
+    // drakes during his encounter. Evading only, for the Slad'ran reason: an
+    // Always row would despawn live adds out of a fight the riders are winning;
+    // an evading whelp is one left over after it.
     DcCombatPurgeRow const kRows[] =
     {
+        { 578, 27638, DcCombatPurgeWhen::Always },   // The Oculus — Azure Ring Guardian (flying picket, unreachable on foot)
+        { 578, 28276, DcCombatPurgeWhen::Evading },  // The Oculus — Greater Ley-Whelp (Eregos add, outlives his evade)
         { 604, 29982, DcCombatPurgeWhen::Always },   // Gundrak — Drakkari Raider (rhino passenger, ejected into the water at path point 3)
         { 604, 29680, DcCombatPurgeWhen::Evading },  // Gundrak — Slad'ran Viper (boss summon, outlives the boss's evade)
         { 604, 29713, DcCombatPurgeWhen::Evading },  // Gundrak — Slad'ran Constrictor (boss summon, outlives the boss's evade)

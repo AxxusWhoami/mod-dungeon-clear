@@ -304,6 +304,25 @@ void DungeonClearStrategy::InitTriggers(std::vector<TriggerNode*>& triggers)
         "dungeon clear hazard vacate",
         { NextAction("dungeon clear hazard vacate", DcRel::HazardVacate) }));
 
+    // Halls of Reflection only: while the escape is running, step FORWARD out of
+    // the Lich King's ring rather than radially away from it. Registered in BOTH
+    // engines like the vacate it sits above — the escape is a permanent combat
+    // flag, but a bot whose last add just died can spend a tick on the non-combat
+    // engine, and that is exactly the tick a bot 18yd behind him must not spend
+    // standing still. Inert everywhere else: the trigger's first test is the map
+    // id. See DungeonClearHorStayAheadTrigger.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear hor stay ahead",
+        { NextAction("dungeon clear hor stay ahead", DcRel::HorStayAhead) }));
+
+    // The Oculus only: the rider rung. Registered in BOTH engines — a rider never
+    // reaches the combat engine (the drake seat has no CAN_ATTACK), and a member
+    // mustering on foot can be on either. Inert everywhere else: the trigger's
+    // first test is the map id. See DungeonClearOculusRiderTrigger.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear oc rider",
+        { NextAction("dungeon clear oc rider", DcRel::OcRider) }));
+
     // Razorgore's orb runner (Blackwing Lair only, one elected member). Registered
     // in BOTH engines: the walk to the ledge starts before the raid pulls and has
     // to survive the pull, and the click itself can land either side of the combat
@@ -536,6 +555,24 @@ void DungeonClearCombatStrategy::InitTriggers(std::vector<TriggerNode*>& trigger
     triggers.push_back(new TriggerNode(
         "dungeon clear hazard vacate",
         { NextAction("dungeon clear hazard vacate", DcRel::HazardVacate) }));
+
+    // Halls of Reflection only: while the escape is running, step FORWARD out of
+    // the Lich King's ring rather than radially away from it. Registered in BOTH
+    // engines like the vacate it sits above — the escape is a permanent combat
+    // flag, but a bot whose last add just died can spend a tick on the non-combat
+    // engine, and that is exactly the tick a bot 18yd behind him must not spend
+    // standing still. Inert everywhere else: the trigger's first test is the map
+    // id. See DungeonClearHorStayAheadTrigger.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear hor stay ahead",
+        { NextAction("dungeon clear hor stay ahead", DcRel::HorStayAhead) }));
+
+    // The Oculus only: the rider rung, combat side. See the non-combat copy; the
+    // stand-down exempts it by name (DcBossStandDown::ClassifyAction), because the
+    // Eregos fight is fought entirely from this rung.
+    triggers.push_back(new TriggerNode(
+        "dungeon clear oc rider",
+        { NextAction("dungeon clear oc rider", DcRel::OcRider) }));
 
     // Razorgore's orb runner (Blackwing Lair only, one elected member). Registered
     // in BOTH engines: the walk to the ledge starts before the raid pulls and has

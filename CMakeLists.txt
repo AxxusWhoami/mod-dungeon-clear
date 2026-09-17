@@ -15,8 +15,72 @@
 
 AC_ADD_SCRIPT("${CMAKE_CURRENT_LIST_DIR}/src")
 
+# New files added: Data/Events/OculusEvents.cpp, Overrides/OculusDriver.cpp,
+#   Action/DcOculusRiderAction.cpp, Util/DcFlightLeg.{h,cpp}, Util/DcOculusPlan.h,
+#   Util/DcOculusDriverDecision.h, Util/DcOculusFlightDecision.h
+#   (The Oculus, map 578 — four rings of navmesh islands in open air, reached by
+#    player-owned flying drakes. A portal objective, six island clears and an
+#    Eregos objective; a conditional flight driver, hook 38, that musters, flies
+#    and lands the party; and a per-member rider rung that gets each bot its
+#    essence, mounts it, flies its drake on a lane and steps off over mesh. The
+#    first thing in the module that moves anything through the air.)
+
+# New files added: Data/Events/TrialOfTheChampionEvents.cpp,
+#   Overrides/TrialOfTheChampionDriver.cpp, Util/DcTocDriverDecision.h
+#   (Trial of the Champion, map 650 — greenfield before this: every run failed at
+#    setup with "no boss roster for this map", because all three encounters are
+#    cast-spell credits on script summons and two of the bosses never die. Three
+#    objectives held on the rewinding DATA_INSTANCE_PROGRESS counter, and one
+#    conditional driver, hook 37, that musters the mounted party, clicks the
+#    announcer from horseback and pulls the Argent side packs.)
+
+# New files added: Data/Events/CullingOfStratholmeEvents.cpp,
+#   Overrides/CullingOfStratholmeDriver.cpp, Util/DcCosWaveDecision.h
+#   (The Culling of Stratholme, map 595 — greenfield before this: no roster, no
+#    events, and every run failing at setup with "no boss roster for this map",
+#    because all four encounters are script TempSummons with no `creature` row for
+#    BossSpawnIndex's join to find. Seven objectives plus a HEROIC eighth for the
+#    Infinite Corruptor; three Arthas escort legs driven entirely off the monotonic
+#    DATA_ARTHAS_EVENT counter and his gossip flag; and one conditional controller
+#    for the ten waves, whose four spawn clusters are up to 264yd apart with no
+#    movement script, so the party must be walked to each of them. Also adds the
+#    UseItemAt event step for the five plagued grain crates — see
+#    Data/DungeonEventRegistry.h.)
+
 AC_ADD_CONFIG_FILE("${CMAKE_CURRENT_LIST_DIR}/conf/mod_dungeon_clear.conf.dist")
 
+# New files added: Util/DcDungeonAccess.{h,cpp}
+#   (making a throwaway pool bot ELIGIBLE for the destination. Player::TeleportTo
+#    refuses a far teleport silently in two places — the
+#    dungeon_access_requirements attunement rows (Pit of Saron and Halls of
+#    Reflection chain off each other, every TBC heroic wants its key
+#    achievement) and the death-knight Acherus lock — and both refusals surface
+#    only as a setup stage timing out. This satisfies each gate (quest marked
+#    rewarded, achievement/item granted, Death Gate learned) instead of
+#    bypassing PlayerCannotEnter wholesale.)
+# New files added: Util/DcBotProvisioning.{h,cpp}
+#   (the order-sensitive PlayerbotFactory sequence — strip, Randomize at the
+#    wanted level, force the spec and re-gear/re-glyph/re-enchant for it, pet,
+#    ammo, ResetStrategies — lifted verbatim out of DcTestRunJob so the RDF
+#    queue fill rolls its bots through exactly the same pass. Three orderings
+#    in it each cost a live run to find; a second copy would drift.)
+# New files added: DungeonQueueFill/DcDungeonQueueFillPlanner.{h,cpp},
+#   DungeonQueueFill/DcDungeonQueueFillJob.{h,cpp},
+#   DungeonQueueFill/DcDungeonQueueFillManager.{h,cpp},
+#   DungeonQueueFill/DcDungeonQueueFillHooks.cpp
+#   (RDF INSTANT QUEUE FILL. A real player clicks Find Group; bots with the
+#    roles the party is missing queue for the same dungeon through the same
+#    queue, and the STOCK matchmaker pairs them — the player gets the ordinary
+#    Dungeon Found popup. No core change: PLAYERHOOK_CAN_JOIN_LFG is a pure
+#    observer that always returns true, and the job reads the AUTHORITATIVE
+#    post-validation dungeon set and roles back out of LFGMgr only once the
+#    queue has settled into LFG_STATE_QUEUED, so RBAC/deserter/cooldown/lock
+#    checks have all already run. The planner half is engine-free and gtested.)
+# New files added: Util/DcProvisionBudget.{h,cpp}
+#   (module-root src/Util/ — the realm-wide "one PlayerbotFactory::Randomize per
+#    world tick" ration, hoisted out of DcTestRunManager::Tick's local bool so
+#    the `.dc test` harness and the RDF queue fill share one budget instead of
+#    each rationing itself and rolling two factories in a tick),
 # New files added: Value/DungeonClearGroundHazardsValue.{h,cpp} (live
 #   persistent-area-aura ground pools — DynamicObjects, not creatures — near the
 #   bot; the DcHazard half that covers Scholomance's Cloud of Disease),
@@ -837,3 +901,91 @@ AC_ADD_CONFIG_FILE("${CMAKE_CURRENT_LIST_DIR}/conf/mod_dungeon_clear.conf.dist")
 #    and ToC's champions — the other creditType-1 dungeons MakeBossWithBit was
 #    written for — the Tribunal has NO creature at all to anchor or target, so it
 #    is authored as an objective whose event owns completion.)
+
+# New files added: Data/Events/UtgardePinnacleEvents.cpp,
+#   Overrides/UtgardePinnacleDriver.cpp, t/TestUtgardePinnacle.cpp
+#   (Utgarde Pinnacle, map 575 — an entirely unauthored dungeon, and the first
+#    one in the module whose ROSTER, not its geometry, is the defect. Svala's
+#    instance_encounters credit entry (26668) has no `creature` spawn row
+#    anywhere in the DB, because boss_svala.cpp UpdateEntry()s into it ~34s into
+#    the intro cinematic — so BossSpawnIndex::Build's creditEntry -> spawn join
+#    matches nothing and drops the FIRST boss silently, leaving a 3-row roster
+#    for a 4-boss dungeon. tr-20260902-083808-1 then targeted Palehoof, took the
+#    696yd door-blind shortcut A* offers, and ended `paused_timeout` against two
+#    portcullises that only open on the deaths of bosses three and four.
+#    One MakeBossWithBit row, three objectives (areatrigger 5140 / the Stasis
+#    Generator / areatrigger 4991), six authored legs, two IsScriptOnly doors,
+#    and hooks 25-28 — of which 27 is the only genuinely new mechanism the module
+#    has needed for a while: Skadi's phase 1 cannot be damaged at all (Grauf is
+#    IMMUNE_TO_PC and she is NOT_SELECTABLE), and the encounter is won by clicking
+#    a Harpoon Launcher three times, each shot landing 35% of the drake's maximum
+#    health from a World Trigger creature rather than from a player.)
+
+# New files added: Data/Events/PitOfSaronEvents.cpp,
+#   Overrides/PitOfSaronDriver.cpp, Util/DcPosGauntletDecision.h,
+#   t/TestPitOfSaron.cpp, t/TestPitOfSaronRouteProbe.cpp
+#   (Pit of Saron, map 658 — the Utgarde Pinnacle roster defect one step worse,
+#    because here it does not stall the run, it makes the run SUCCEED. Scourgelord
+#    Tyrannus (36658) has kill-credit DungeonEncounter rows on both difficulties
+#    and NO `creature` spawn anywhere: he is created at runtime as Rimefang's
+#    vehicle accessory (vehicle_template_accessory 36661 -> 36658), so
+#    BossSpawnIndex::Build's spawn join drops him and the derived roster is two
+#    bosses for a three-boss dungeon — against which encounterMask 0x3 reads
+#    "all cleared". tr-20260907-100813-1 is that run: reported success, 2/2, 8m01s,
+#    with a third of the dungeon unwalked.
+#    One MakeBossWithBit row is the fix; everything else here is what is on the
+#    other side of it. Krick and Tyrannus are separated by a FOUR-AREATRIGGER,
+#    TWO-WAVE, STRICTLY-ORDERED GAUNTLET whose every gate is refused SILENTLY out
+#    of turn — gate 1 additionally requires the orchestrator (36794) to have flown
+#    85-100 seconds of Krick outro into position, which DC's own advance beats to
+#    the trigger by a wide margin. So: one conditional in-combat driver (hook 29,
+#    with its FSM as the pure kernel Util/DcPosGauntletDecision.h), one anchored
+#    ledge gate (hook 30) whose objective anchor sits deliberately 22yd OUTSIDE
+#    areatrigger 5633's sphere so arriving cannot fire it, two authored legs with
+#    NO_STOP across the gauntlet and the icicle tunnel, and one IsScriptOnly door.
+#    Both hooks forge their own CMSG_AREATRIGGER, which is level-triggered where
+#    the test harness's relay is edge-triggered — the property that makes an early
+#    crossing cost nothing.
+#    NOT fixed here, and it is the difference between reaching Tyrannus and
+#    beating him: mod-playerbots' `wotlk-pos` TyrannusAction spreads ranged 10yd
+#    and does nothing about Overlord's Brand (69172), whose branded healer heals
+#    the boss for 5.5x. That is combat rotation and belongs on a mod-playerbots
+#    branch; DC has no seam that suppresses a bot's own heals.)
+
+# New files added: Data/Events/HallsOfReflectionEvents.cpp,
+#   Overrides/HallsOfReflectionDriver.cpp, Util/DcHorWaveDecision.h,
+#   Util/DcHorEscapeDecision.h, Action/DcHorStayAheadAction.cpp,
+#   t/TestHallsOfReflection.cpp, t/TestHallsOfReflectionRouteProbe.cpp
+#   (Halls of Reflection, map 668 — the first dungeon in this module where DC's
+#    pull/advance pipeline is the WRONG TOOL rather than a tool that needs help.
+#    There is no trash to clear and no boss to pull: Falric, Marwyn and all 34
+#    wave mobs pre-spawn invisible, NOT_SELECTABLE and SetImmuneToAll, and the
+#    instance activates them a wave at a time, on the FARTHEST player. Left to
+#    itself the clear walks the tank onto Marwyn's invisible, immune spawn and
+#    stands there — tr-20260907-100815-2, 5m38s, encounterMask 0x0, aborted by
+#    hand. Thirteen earlier attempts never got through the door at all (the
+#    24710/24712 attunement gate, fixed by 10fc340).
+#    So: TWO conditional in-combat drivers, which is one more than any other map
+#    has, and between them they own roughly three quarters of the run. Hook 32
+#    holds the altar from wave 1 to Marwyn's death — mostly by REFUSING, because
+#    the map's 70.5yd leash wipes the whole event and respawns every dead mob,
+#    and a bot that releases is locked out until the survivors wipe. Hook 35
+#    drives the escape, whose only real difficulty is geometry: four ice walls on
+#    an absolute clock, a Lich King who never pauses, a 10yd 7068-per-second ring
+#    and a 10 000-damage zap plus knockback for anyone who falls behind him along
+#    a path that runs -x -y. Both FSMs are pure kernels (Util/DcHorWaveDecision.h,
+#    Util/DcHorEscapeDecision.h).
+#    The roster row is the Nexus Frozen Commander shape, not the Pit of Saron
+#    one: "Escaped from Arthas" has DungeonEncounter.dbc rows 843/844 and NO
+#    instance_encounters row, so there is no credit entry AND no kill bit
+#    anywhere — completion is the instance's own boss-state slot, and
+#    encounterMask 0x3 is the EXPECTED final mask on a cleared run.
+#    Two module-wide changes come out of this map. The hold-fire rung's blanket
+#    tank exemption is now per-row, keyed on DcTargetExclusionRow::alsoTank,
+#    because the escape's Lich King (36954, unit_flags 0, no immunities) must
+#    have NO holder at all: he heals to 75% below 70, and one bot holding him as
+#    a victim makes DcCombatFlag::IsEngaged true for the party and freezes every
+#    MayDrive rung while he walks at them. And DungeonClearHorStayAheadAction
+#    (DcRel::HorStayAhead, 56) is a new per-bot survival rung that moves FORWARD
+#    rather than radially away — the generic hazard vacate's away-from-emitter
+#    bearing is the one direction that makes the zap rule worse.)

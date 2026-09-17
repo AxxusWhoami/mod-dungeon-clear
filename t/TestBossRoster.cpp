@@ -50,6 +50,14 @@ TEST(BossRosterRegistryTest, HasPatchOnlyForPatchedMaps)
     EXPECT_TRUE(BossRosterRegistry::HasPatch(546));   // Underbog — drop objective
     EXPECT_TRUE(BossRosterRegistry::HasPatch(576));   // The Nexus — sphere objectives
     EXPECT_TRUE(BossRosterRegistry::HasPatch(600));   // Drak'Tharon Keep — the cast-spell-credit boss
+    EXPECT_TRUE(BossRosterRegistry::HasPatch(595));   // Culling of Stratholme — objectives-only
+                                                      // (the derived list is EMPTY: all four
+                                                      // encounters are script TempSummons)
+    EXPECT_TRUE(BossRosterRegistry::HasPatch(650));   // Trial of the Champion — objectives-only
+                                                      // (every boss a summon, every credit a
+                                                      // cast-spell, two bosses never die)
+    EXPECT_TRUE(BossRosterRegistry::HasPatch(578));   // The Oculus — Eregos 54yd above mesh,
+                                                      // Varos/Urom re-anchored, flight objectives
     EXPECT_FALSE(BossRosterRegistry::HasPatch(0));
     EXPECT_FALSE(BossRosterRegistry::HasPatch(34));   // Stockades — no patch
 }

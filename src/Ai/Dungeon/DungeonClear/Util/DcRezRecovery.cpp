@@ -5,6 +5,7 @@
 
 #include "DcRezRecovery.h"
 
+#include "Ai/Dungeon/DungeonClear/Data/Events/DungeonEventTables.h"
 #include "Ai/Dungeon/DungeonClear/DcPullContext.h"
 #include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 #include "Ai/Dungeon/DungeonClear/Settings/DcSettings.h"
@@ -316,6 +317,12 @@ namespace
             in.wipeFractionPct = DcSettings::GetUInt(bot, "RaidWipeFractionPct");
             in.regroupOnWipe = true;
         }
+        // Five-man maps that regroup on a FULL wipe like a raid does. The Oculus: an
+        // Eregos wipe is the most likely failure in the dungeon, it happens in the
+        // air where no body can be reached, and dead bosses stay dead — ending the
+        // run on the first one would make a battery measure nothing but that.
+        else if (bot->GetMapId() == DcOculus::MAP_ID)
+            in.regroupOnWipe = true;
         // Raid corpse piles get more clock: even in parallel, waves of raises
         // (each adding rezzers back) and the drinking between them take real
         // time. Scale by the corpses beyond the first, capped at twice the
@@ -609,6 +616,19 @@ namespace DcRezRecovery
         if (!row)
             return false;
 
+        // THE OCULUS REGROUPS AT THE PORTAL LANDING, not the entrance. The entrance
+        // floor is an island of its own: a party revived there would have to re-cross
+        // the Nexus Portal, whose objective has already latched, and walk to Drakos's
+        // ring for the givers anyway. The landing is where the portal's own spell puts
+        // a player, beside the givers and the lift-off pad.
+        float destX = row->x, destY = row->y, destZ = row->z, destO = row->o;
+        if (map->GetId() == DcOculus::MAP_ID)
+        {
+            destX = DcOculus::PORTAL_LAND_X;
+            destY = DcOculus::PORTAL_LAND_Y;
+            destZ = DcOculus::PORTAL_LAND_Z;
+        }
+
         LOG_INFO("playerbots.dungeonclear",
                  "[DC:{}] raid wipe -> reviving the raid at the {} entrance and "
                  "continuing the run", owner->GetName(), row->name);
@@ -644,7 +664,7 @@ namespace DcRezRecovery
                 member->ResurrectPlayer(1.0f, /*applySickness*/ false);
                 member->SpawnCorpseBones();
             }
-            member->TeleportTo(row->mapId, row->x, row->y, row->z, row->o);
+            member->TeleportTo(row->mapId, destX, destY, destZ, destO);
         };
 
         if (group)

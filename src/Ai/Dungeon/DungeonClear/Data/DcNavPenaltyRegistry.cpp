@@ -75,7 +75,51 @@ namespace
     // makes the router prefer the open floor around it, never strands anyone.
     // costMult 40 (a spot a real player can't be, same class as the LBRS/Sethekk
     // shortcut rows above).
-    constexpr std::array<DcNavPenaltyVolume, 9> kVolumes = {{
+    //
+    // Pit of Saron (map 658) — the north bridge between Krick's arena and the
+    // ambush ramp, the shortcut that makes the tank climb out of the arena's
+    // south-east corner instead of walking round to the ramp's foot.
+    //
+    // MEASURED AGAINST THE MAP'S OWN MMTILES, not eyeballed. The arena floor
+    // (z~510-522) and the ramp that climbs east to Tyrannus (z~522-565) are
+    // separated by a chasm for the whole stretch y 64..94, and EXACTLY THREE
+    // walkable links cross it:
+    //     y 84.5   (862.20, 84.53, 517.34) -> (869.07, 84.27, 520.91)   +3.6yd
+    //     y 76.8   (865.87, 76.75, 524.31) -> (869.69, 75.11, 527.40)   +3.1yd
+    //     y 52.9   (861.93, 52.93, 517.07) -> (871.13, 58.27, 522.07)   +5.0yd
+    // The last one is the ramp's real foot, the ground the party walks after
+    // gate 1 (anchors 6 -> 7 of Leg A). The y 84.5 link opens onto a dead-end
+    // tongue. The y 76.8 link is the bad one: A* takes it, and the corridor it
+    // produces — arena -> (862.2, 84.5) -> (861.5, 79.3) -> (865.9, 76.8) ->
+    // (872.8, 74.1, 528.87) -> east up the ramp — is 145yd against 189yd for
+    // the way round, so the search prefers it by 44yd every time.
+    //
+    // IT IS ALREADY DOCUMENTED, from the other end: the Leg A header in
+    // PitOfSaronEvents notes that "the corridor A* actually prefers between
+    // Krick and the ledge climbs the ramp at y ~ 76". The anchors were authored
+    // to walk round it; this row is what stops everything that does NOT follow
+    // the anchors — stragglers, recovery paths, the StridedPathfinder fallback —
+    // from taking it and clipping the party through the arena wall.
+    //
+    // THE BOX IS SMALL BECAUSE IT ONLY HAS TO CUT ONE LINK. x 862..873,
+    // y 71..81, z 520..531 covers the y 76.8 crossing and nothing else:
+    //   - four navmesh polys fall inside it, all of them the bridge itself;
+    //   - hard-removing every one of them leaves ZERO walkable polys cut off
+    //     from the arena (marooned = 0), and that still holds under the stricter
+    //     "ban a poly if ANY corner is inside" reading of the StridedPathfinder
+    //     point screen, which bans 10 polys and still maroons nothing;
+    //   - no point of the intended route is taxed. The nearest legitimate
+    //     corridor point is (860.00, 69.40, 518.47), outside on all three axes,
+    //     and anchors 3..8 (846.6/84.7 through 882.6/57.5) are all clear.
+    // Z FLOOR 520 IS LOAD-BEARING: the descent from the arena to gate 1 runs
+    // z 517..519 directly under the west half of the box, so a ceiling above it
+    // is what keeps the way round untaxed.
+    //
+    // Verified reroute: Ick -> the top of the ambush ramp goes 145yd -> 189yd
+    // and now crosses at (861.93, 52.93) -> (871.13, 58.27), i.e. the ramp foot
+    // by gate 1. Ick -> gate 1 (88yd) and gate 1 -> ramp top (100yd) are
+    // unchanged. costMult 40, the shortcut class.
+    constexpr std::array<DcNavPenaltyVolume, 10> kVolumes = {{
         { 229, -134.0f, -406.0f, 33.0f, -118.0f, -374.0f, 56.0f, 40.0f },
         { 229,  -65.5f, -384.0f, 49.4f,  -60.5f, -377.0f, 54.2f, 40.0f },
         { 556,   25.0f,  150.0f, -5.0f,   68.0f,  248.0f, 30.0f, 40.0f },
@@ -85,6 +129,7 @@ namespace
         { 552,  242.3f,  -83.3f, 10.5f,  286.3f,  -39.3f, 34.5f,  8.0f },
         { 552,  314.5f,    5.4f, 36.4f,  358.5f,   49.4f, 60.4f,  8.0f },
         { 552,  373.4f,   -3.8f, 36.3f,  417.4f,   40.2f, 60.3f,  8.0f },
+        { 658,  862.0f,   71.0f, 520.0f,  873.0f,   81.0f, 531.0f, 40.0f },
     }};
 
     // ---- polygonal no-go regions ----------------------------------------

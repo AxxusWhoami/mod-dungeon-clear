@@ -505,10 +505,21 @@ namespace
     }
 }
 
-bool DungeonPathFollower::Resnap(Player* bot, ChunkedPathfinder::Result const& path, DungeonFollowerState& state)
+bool DungeonPathFollower::Resnap(Player* bot, ChunkedPathfinder::Result const& path,
+                                 DungeonFollowerState& state, bool* movedOut)
 {
+    if (movedOut)
+        *movedOut = false;
+
     if (!bot || path.segments.empty() || state.segmentIdx >= path.segments.size())
         return false;
+
+    // Displacement is reported separately from success — see the header. The
+    // cursor is a candidate of its own search, so "found an anchor" and "moved
+    // the cursor" are genuinely two facts, and every livelock in this file's
+    // history came from a rung treating the first as if it were the second.
+    uint32 const beforeSeg = state.segmentIdx;
+    uint32 const beforePt  = state.pointIdx;
 
     // Gather a window of polyline points AT OR AHEAD of the current cursor, then
     // pick the one closest to the bot in 3D that the bot can actually see in a
@@ -527,8 +538,36 @@ bool DungeonPathFollower::Resnap(Player* bot, ChunkedPathfinder::Result const& p
     // search to the cursor and forward eliminates the backtrack: the bot is
     // standing among the points it just swept past, so the nearest forward point
     // is right where it is, and the resume goes the way we're headed.
-    return PickNearestVisibleForward(bot, path, FlatIndex{state.segmentIdx, state.pointIdx},
-                                     RESNAP_WINDOW, state);
+    if (!PickNearestVisibleForward(bot, path, FlatIndex{state.segmentIdx, state.pointIdx},
+                                   RESNAP_WINDOW, state))
+        return false;
+
+    if (movedOut)
+        *movedOut = state.segmentIdx != beforeSeg || state.pointIdx != beforePt;
+    return true;
+}
+
+bool DungeonPathFollower::SkipPassedPoint(ChunkedPathfinder::Result const& path,
+                                          DungeonFollowerState& state, G3D::Vector3& skipped)
+{
+    if (path.segments.empty() || state.segmentIdx >= path.segments.size())
+        return false;
+
+    std::optional<G3D::Vector3> const cur = PointAt(path, state.segmentIdx, state.pointIdx);
+    if (!cur.has_value())
+        return false;
+
+    // Never skip the last point of a jump segment — that leg is a MoveJump the
+    // caller still has to drive, and its geometry is not a walked-past hop.
+    PathSegment const& seg = path.segments[state.segmentIdx];
+    if (IsJumpSegment(seg) && IsLastPointOfSegment(seg, state.pointIdx))
+        return false;
+
+    skipped = *cur;
+    if (!AdvanceCursor(path, state.segmentIdx, state.pointIdx))
+        return false;  // route exhausted — let the hop-done ladder own it
+    state.offPathTicks = 0;
+    return true;
 }
 
 // Where on a FRESHLY BUILT route does the bot stand? Called once per install

@@ -50,10 +50,9 @@ namespace
             return;
 
         WorldPacket data;
-        ChatHandler::BuildChatPacket(data, CHAT_MSG_PARTY, LANG_ADDON,
-                                     player->GetGUID(), player->GetGUID(),
-                                     std::string_view(payload),
-                                     CHAT_TAG_NONE);
+        ChatHandler::BuildChatPacket(data, CHAT_MSG_PARTY, LANG_ADDON, player->GetGUID(),
+                                     ObjectGuid::Empty, payload, CHAT_TAG_NONE,
+                                     player->GetName());
 
         ServerFacade::instance().SendPacket(player, &data);
     }

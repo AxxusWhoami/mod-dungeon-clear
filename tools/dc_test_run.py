@@ -94,6 +94,18 @@ SIGNALS = [
     ("death / rez", ["post-combat rez", "died", "wipe", "resurrect"]),
     ("event", ["event-step", "event fired", "event force", "TeleportParty"]),
     ("rest", ["smart rest", "drinking", "eating", "low mana"]),
+    # Trial of the Champion's driver. The progress line is the run's timeline
+    # (0 -> 9, with rewinds on a full wipe); a long dwell at 4 is the trample failing.
+    ("ToC progress", ["DcToc progress="]),
+    ("ToC click / pull", ["ToC — progress", "idle Argent soldier", "pulling it back"]),
+    ("ToC WARN", ["black knight evaded", "has been on foot for"]),
+    # The Oculus's flight driver. The DcOc line is the ascent's timeline (site,
+    # cc=k/10, mounted, landed, phase); the rider rows are each member's essence,
+    # mount, leg and dismount. A "dropped ground target" WARN is the rider-kill
+    # trap being headed off; a rider death with killer == self is it firing.
+    ("Oculus ascent", ["DcOc ring="]),
+    ("Oculus rider", ["DcOc essence", "DcOc mount", "DcOc leg ", "DcOc dismount", "DcOc land"]),
+    ("Oculus WARN", ["DcOc WARN"]),
 ]
 
 
@@ -650,8 +662,16 @@ def render_combat_blame(members):
                 flags.append("SUPPRESSED")
             if not c.get("canAttackMe"):
                 flags.append("CANNOT-ATTACK-ME")
+            # A trigger creature is an invisible script helper no bot can target,
+            # so it can never be killed and the fight it holds has no end state.
+            # Absent on schema <= 11 records, where such a holder scored LEGIT --
+            # tr-20260902-121659-12/-13 are the reference pre-fix records.
+            if c.get("trigger"):
+                flags.append("TRIGGER")
             if c.get("pvp"):
                 flags.append("pvp-ref")
+            if is_under_mesh(c):
+                flags.append("UNDER-MESH")
             # "-" is not "unreachable": the pathfind is skipped for a holder
             # already excluded by a cheaper guard (dead / other map / evading).
             if not c.get("reachChecked", True):
@@ -659,14 +679,80 @@ def render_combat_blame(members):
             else:
                 path = "reach" if c.get("reachable") else "UNREACH"
             rows.append([c.get("name", ""), c.get("entry", ""),
-                         f"{c.get('dist',-1):.1f}yd", f"{c.get('hp',0)}%", path,
+                         f"{c.get('dist',-1):.1f}yd", floor_cell(c), f"{c.get('hp',0)}%", path,
                          "LEGIT" if c.get("legitimate") else "phantom",
                          c.get("victim") or "-", " ".join(flags)])
         out += ["    " + line
-                for line in table(rows, ["holder", "entry", "dist", "hp", "path",
+                for line in table(rows, ["holder", "entry", "dist", "z/mesh", "hp", "path",
                                          "verdict", "fighting", "flags"])]
         if refs > len(holders):
             out.append(f"      (+{refs - len(holders)} more refs not shown)")
+    return out
+
+
+# Mirror of DcDiag::kUnderMeshYd (DcDiagSnapshot.h). Change the two together.
+UNDER_MESH_YD = 3.0
+
+
+def is_under_mesh(obj):
+    f = obj.get("floor")
+    return bool(f and f.get("meshOk") and obj.get("z", 0) < f.get("meshZ", 0) - UNDER_MESH_YD)
+
+
+def floor_cell(obj):
+    """'z/meshZ' for a probed row, '' for one written before the probe existed
+    (or not probed), so an old record never shows a fabricated floor."""
+    f = obj.get("floor")
+    if not f:
+        return ""
+    mesh = f"{f.get('meshZ', 0):.1f}" if f.get("meshOk") else "none"
+    return f"{obj.get('z', 0):.1f}/{mesh}"
+
+
+def render_escort(d):
+    """The active EscortCreature step: the driver's own search next to every
+    copy of the escortee on the map. Absent unless an escort step was active
+    at capture — including on every record written before the block existed."""
+    e = d.get("escort")
+    if not e:
+        return []
+    age = e.get("deadAirMs", -1)
+    out = [f"  escort        : event {e.get('eventId')} '{e.get('eventName','')}' "
+           f"step {e.get('stepIndex')} · escortee {e.get('entry')} · "
+           f"driver search {e.get('searchRadius',0):.0f}yd -> "
+           + ("SEES him" if e.get("driverSees") else "SEES NOBODY"),
+           f"                  dead-air {'never stamped' if age < 0 else f'{age/1000:.1f}s'}"
+           + (f" · instance data[{e.get('instanceDataId')}]={e.get('instanceData')} "
+              f"(done at >= {e.get('instanceDataMin')})" if e.get("instanceDataId", -1) >= 0 else "")]
+    copies = e.get("copies") or []
+    if not copies:
+        out.append("                  NO copy of the escortee anywhere on the map")
+        return out
+    rows = []
+    for c in copies:
+        flags = []
+        if not c.get("alive"):
+            flags.append(f"DEAD(state {c.get('deathState')})")
+        if not c.get("inWorld"):
+            flags.append("NOT-IN-WORLD")
+        if not c.get("updateNeeded"):
+            flags.append("NOT-UPDATED")
+        if not c.get("gridLoaded"):
+            flags.append("GRID-UNLOADED")
+        if not c.get("seenByGridScan"):
+            flags.append("GRID-BLIND")
+        for k, tag in (("moving", "moving"), ("inCombat", "combat"),
+                       ("evading", "EVADING"), ("gossipFlag", "gossip")):
+            if c.get(k):
+                flags.append(tag)
+        rows.append([c.get("guid", ""), c.get("spawnId") or "summon",
+                     f"({c.get('x',0):.1f},{c.get('y',0):.1f},{c.get('z',0):.1f})",
+                     f"({c.get('homeX',0):.1f},{c.get('homeY',0):.1f})",
+                     f"{c.get('distToTank',-1):.1f}", c.get("faction", ""), " ".join(flags)])
+    out += ["    " + line for line in table(rows, ["guid", "spawnId", "pos", "home",
+                                                     "distTank", "faction", "flags"])]
+    if e.get("copyCount", len(copies)) > len(copies):
+        out.append(f"      (+{e['copyCount'] - len(copies)} more copies not shown)")
     return out
 
 
@@ -735,13 +821,16 @@ def render_diag(rec):
                  "alive" if m.get("alive") else "DEAD",
                  f"{m.get('hp',0)}%", f"{m.get('mp',0)}%",
                  f"{m.get('distToTank',0):.1f}",
+                 floor_cell(m),
                  "combat" if m.get("inCombat") else "",
                  m.get("victim", ""),
                  ("dc" if m.get("dcStrategy") else "-") + "/" + ("cbt" if m.get("dcCombatStrategy") else "-"),
                  m.get("botState", ""),
                  tick_cell(m.get("dcTickAgeMs")),
-                 "" if m.get("online") else "OFFLINE"] for m in members]
-        out += table(rows, ["name", "guid", "state", "hp", "mp", "distTank", "", "victim",
+                 " ".join(x for x in ("" if m.get("online") else "OFFLINE",
+                                      "UNDER-MESH" if is_under_mesh(m) else "") if x)]
+                for m in members]
+        out += table(rows, ["name", "guid", "state", "hp", "mp", "distTank", "z/mesh", "", "victim",
                             "strat", "engine", "dcTick", ""])
         out += render_combat_blame(members)
 
@@ -753,6 +842,7 @@ def render_diag(rec):
                 for o in roster]
         out.append("  objective roster:")
         out += table(rows, ["#", "kind", "name", "entry", "status", "via", "enc", ""])
+    out += render_escort(d)
     return out
 
 

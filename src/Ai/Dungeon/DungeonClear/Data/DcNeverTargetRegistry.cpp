@@ -264,6 +264,53 @@ namespace
         { 469, 14023 },  // Blackwing Lair — Corrupted Green Whelp  (see the class-3 note above)
         { 469, 14024 },  // Blackwing Lair — Corrupted Blue Whelp
         { 469, 14025 },  // Blackwing Lair — Corrupted Bronze Whelp
+
+        // --- Halls of Reflection (668) ------------------------------------
+        //
+        // FOUR ROWS, and only the first of them is load-bearing. This registry
+        // answers "is killing this progress" and only filters the CLEAR's own
+        // scans; the stock combat engine is untouched. For the Lich King that is
+        // NOT enough on its own — he is a fully legal target that stock assist
+        // triggers acquire by themselves — which is why he also carries a
+        // windowed DcTargetExclusionRegistry row with alsoTank. This row is the
+        // other half: it keeps the clear's FarTargets / RoomTrash / BlockingTrash
+        // scans from ever proposing him in the first place, so nothing walks the
+        // party toward him and nothing marks him.
+        //
+        // The other three are dead-row insurance of the kind the Halls of Stone
+        // note above argues against, with one difference that earns them: they
+        // are all NAMED CREATURES STANDING ON THE PARTY'S PATH, and their flags
+        // change during the run. The intro Lich King is immune while he walks in
+        // and then despawns; Uther stands on the altar the party camps on for
+        // nine minutes; the Ice Wall Targets sit exactly where the escape's
+        // stand points are. A flag test that is right today is a thinner
+        // guarantee than a row for a creature killing which can never be
+        // progress under any circumstances.
+        { 668, 36954 },  // Halls of Reflection — the Lich King (escape; he heals to 75% and
+                         //   holding him freezes the party's movement — see the exclusion row)
+        { 668, 37226 },  // Halls of Reflection — the intro Lich King (RP; immune and passive)
+        { 668, 37225 },  // Halls of Reflection — Uther (RP ghost on the altar the party camps)
+        { 668, 37014 },  // Halls of Reflection — Ice Wall Target (invisible world trigger)
+
+        // --- Trial of the Champion (650) ------------------------------------
+        //
+        // Both are summons that land in the middle of a fight, and neither passes
+        // the flag filters that hide a helper: checked against creature_template,
+        // not assumed.
+        //
+        // 35614 DESECRATION STALKER is the Novos Summon Target shape — a trigger
+        // by flags_extra (128) only, with unit_flags 0 and faction 14, so
+        // IsPossibleTarget accepts it. It spawns UNDER a player for 15 seconds, so
+        // to the clear's scans it is the nearest hostile on the map at 0yd. Killing
+        // it is not progress; leaving it is (see its hazard emitter).
+        //
+        // 35311 FOUNTAIN OF LIGHT, the Argent Priestess's healing fountain:
+        // unit_flags PACIFIED only, faction 16. Killing it is fine, and the stock
+        // combat engine still will if it comes to that — but it outlives the pack
+        // that summoned it, and the clear must not walk the party across the bowl
+        // after a fountain between soldier packs.
+        { 650, 35614 },  // Trial of the Champion — Desecration Stalker (the Black Knight's ground hazard)
+        { 650, 35311 },  // Trial of the Champion — Fountain of Light (the Priestess's summon)
     };
 }
 

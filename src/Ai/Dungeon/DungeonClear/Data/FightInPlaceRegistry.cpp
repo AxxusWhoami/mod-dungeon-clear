@@ -101,6 +101,19 @@ namespace
         // The zone is the boundary verbatim — the room holds only Sjonnir and his
         // summons, so there is nothing else in it a pull-to-camp would want.
         { 599, 1206.56f, 1341.42f, 579.94f, 753.96f },
+        // Halls of Reflection — the Frostsworn General's corridor. He evades if
+        // dragged more than 30yd from his home at (5413.92, 2116.50), and an
+        // evade here is not a retry: he despawns his five Spiritual Reflections
+        // with him and the party has to walk back and re-aggro a boss whose death
+        // is the ONLY thing that arms the throne-room areatrigger. A run that
+        // cannot start the escape cannot finish.
+        //
+        // The box is his home +/- 25yd, which is inside his own 30yd radius with
+        // five yards of margin for the drag the pull would have to complete before
+        // the check bit. It contains nothing else: the corridor between the Arthas
+        // door and the ramp holds him and the reflections and no other spawn, so
+        // there is nothing in it an advanced pull would legitimately want to drag.
+        { 668, 5388.92f, 5438.92f, 2091.50f, 2141.50f },
     };
 }
 

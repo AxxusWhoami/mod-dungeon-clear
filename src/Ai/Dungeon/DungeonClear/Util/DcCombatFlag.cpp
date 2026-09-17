@@ -216,12 +216,22 @@ namespace DcCombatFlag
             // Cheap, too — this runs before the per-reference pathfind.
             if (p->GetExactDistSq(other) > DC_ENGAGEMENT_RADIUS * DC_ENGAGEMENT_RADIUS)
                 continue;  // left behind by geometry -> not a fight, whatever the mesh says
+            // A holder nothing in the party can ever ATTACK is not a fight at all —
+            // see DungeonClearMath::IsUnresolvableCombatHolder for why this is the
+            // trigger flag and not the selectable one. Placed ahead of the pathfind
+            // deliberately: it is a creature-template flag read, and the
+            // reachability answer for a trigger parked on top of us is always
+            // "yes", so asking that first only pays for a pathfind to reach the
+            // wrong verdict.
+            Creature* const holder = other->ToCreature();
+            if (DungeonClearMath::IsUnresolvableCombatHolder(holder != nullptr,
+                                                            holder && holder->IsTrigger()))
+                continue;  // unkillable script helper -> a flag with no way out
             if (!DcEngageGeometry::IsReachable(p, other->GetPositionX(),
                                                other->GetPositionY(), other->GetPositionZ()))
                 continue;  // unreachable -> the phantom holder
-            if (Creature* const c = other->ToCreature())
-                if (c->AI() && !c->AI()->CanAIAttack(p))
-                    continue;  // its own script forbids it touching us -> phantom too
+            if (holder && holder->AI() && !holder->AI()->CanAIAttack(p))
+                continue;  // its own script forbids it touching us -> phantom too
             // Keep scanning so nearestDist is the CLOSEST such holder: every caller
             // asks a distance question of whichever holder is most nearly on top of
             // us, not of whichever the map happened to enumerate first.
@@ -304,6 +314,16 @@ namespace DcCombatFlag
         DcApproachState& appr = context->GetValue<DcApproachState&>(DcKey::ApproachState)->Get();
         return DungeonClearMath::MayDriveWhileFlagged(
             bot->IsInCombat(), AnyPartyEngagement(bot), getMSTime(),
+            DC_FLAGGED_NO_ENGAGE_GRACE_MS, appr.flaggedNoEngageSinceMs);
+    }
+
+    bool MayDriveEvent(Player* bot, AiObjectContext* context, bool drivesInCombat)
+    {
+        if (!bot || !context)
+            return false;
+        DcApproachState& appr = context->GetValue<DcApproachState&>(DcKey::ApproachState)->Get();
+        return DungeonClearMath::EventDueGateOpen(
+            drivesInCombat, bot->IsInCombat(), AnyPartyEngagement(bot), getMSTime(),
             DC_FLAGGED_NO_ENGAGE_GRACE_MS, appr.flaggedNoEngageSinceMs);
     }
 

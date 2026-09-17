@@ -378,10 +378,38 @@ bool DungeonClearRazorgoreCampAction::Execute(Event /*event*/)
 namespace
 {
     // Is `u` a creature this bot is barred from damaging right now?
+    //
+    // THE TANK QUESTION IS ASKED PER ROW, NOT PER RUNG, and that is the whole of
+    // the widening this function carries.
+    //
+    // This rung used to exempt tanks WHOLESALE — one `if (IsTank) return false`
+    // above — on Razorgore's reasoning: the encounters that bar a creature are the
+    // ones where somebody must still HOLD it, and a freed Razorgore between mind
+    // controls has to be tanked by someone. That reasoning is correct for a row
+    // whose `alsoTank` is FALSE, which is exactly what that flag already means:
+    // "the bar does not reach the tank's pick".
+    //
+    // It is wrong, and expensively so, for a row that DOES set alsoTank. Such a
+    // row is saying there must be NO HOLDER — Blackwing Lair's drake hall (a tank
+    // that answers a boss two rooms ahead walks the raid there) and, the case that
+    // forced this, Halls of Reflection's Lich King during the escape. He is a
+    // fully legal target with unit_flags 0 and no immunities, he heals himself to
+    // 75% below 70 so the damage is pure waste, and one bot holding him as a
+    // victim makes DcCombatFlag::IsEngaged true for the whole party — which
+    // freezes every MayDrive rung while he walks at them. The exclusion pool keeps
+    // the tank from PICKING him; only this rung can take him back off a tank that
+    // acquired him in the tick before the bar came up, and under the wholesale
+    // exemption it never did.
+    //
+    // So the flag is the answer to both questions. IsExcluded's `forTank`
+    // parameter already filters to alsoTank rows; passing the bot's own role
+    // through means a tank drops precisely the targets whose rows say nobody may
+    // hold them, and keeps holding everything else exactly as before.
     bool BarredRightNow(Player* bot, Unit* u)
     {
         return u && u->IsAlive() &&
-               DcTargetExclusionRegistry::IsExcluded(bot, bot->GetMapId(), u->GetEntry());
+               DcTargetExclusionRegistry::IsExcluded(bot, bot->GetMapId(), u->GetEntry(),
+                                                     /*forTank*/ PlayerbotAI::IsTank(bot));
     }
 }
 
@@ -390,16 +418,13 @@ bool DungeonClearHoldFireTrigger::IsActive()
     if (!bot || bot->isDead() || !botAI)
         return false;
 
-    // Map first. One scan of a one-row table on every other map, and the answer
+    // Map first. One scan of a small table on every other map, and the answer
     // there is a flat no.
     if (!DcTargetExclusionRegistry::HasRowsFor(bot->GetMapId()))
         return false;
 
-    // The off-tank has to keep holding whatever everyone else is barred from — see
-    // the Tank carve-out in DungeonClearCombatStrategy::AppendTargetExclusions.
-    if (PlayerbotAI::IsTank(bot))
-        return false;
-
+    // NO BLANKET TANK EXEMPTION — it lives inside BarredRightNow now, keyed on the
+    // row's own alsoTank flag. See the note there.
     return BarredRightNow(bot, bot->GetVictim()) ||
            BarredRightNow(bot, AI_VALUE(Unit*, DcKey::Stock::CurrentTarget));
 }

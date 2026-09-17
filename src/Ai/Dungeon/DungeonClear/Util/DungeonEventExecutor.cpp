@@ -124,6 +124,20 @@ namespace
     // stalled at 3/5 plants). No candidate within the cap = "not loaded /
     // not spawned yet" -> keep walking to the anchor.
     constexpr float DC_EVENT_GO_ANCHOR_MATCH = 25.0f;
+    // UseItemAt arrival radius when the step doesn't override it. Tighter than a
+    // plain event MoveTo because the point of arriving is to be the nearest
+    // candidate for a spell that picks its own target by entry: the Culling of
+    // Stratholme's Grain Crate Helpers sit ON their crates and the nearest pair is
+    // 49yd apart, so 4yd leaves no ambiguity while staying comfortably inside
+    // spell 49590's own 8yd range.
+    constexpr float DC_EVENT_USEITEM_REACH = 4.0f;
+    // How close the step's RECEIPT gameobject must stand to the anchor to count as
+    // "this one is done". The receipt is summoned at the used object's exact
+    // position (the Plagued Grain Crate replaces the Suspicious one in place), so
+    // this only has to absorb the summon's own rounding — and must stay far below
+    // the spacing between two of the step's anchors, or crate N would latch on
+    // crate N-1's receipt. 5yd against a 49yd minimum spacing.
+    constexpr float DC_EVENT_USEITEM_LATCH = 5.0f;
     // How far out a Gossip step ACQUIRES its (unique) NPC in order to walk to it.
     // Deliberately wide: the freed crew can settle well beyond the gossip range
     // (the ZulFarrak crew descend to the temple floor), and the approach must
@@ -179,6 +193,12 @@ namespace
             if (member->GetMapId() != leader->GetMapId())
                 continue;
             if (!GET_PLAYERBOT_AI(member))  // only relocate bots, never a human
+                continue;
+            // Never a rider: NearTeleportTo ejects a passenger and leaves the vehicle
+            // where it stood. On The Oculus that is a bot dropped into the air above
+            // the landing, with no parachute inside an instance. Same guard as
+            // DcStrandedRecovery.
+            if (member->GetVehicle())
                 continue;
             if (member->GetExactDist(lx, ly, lz) <= DC_JUMP_STRANDED_DIST)
                 continue;                   // already across
@@ -398,10 +418,11 @@ bool DungeonEventExecutor::SelectGossip(Player* bot, Creature* npc, int32 option
         bot->GetSession()->HandleGossipSelectOptionOpcode(select);
     };
 
-    // Capture the id BEFORE selecting: the select rebuilds PlayerTalkClass's menu
-    // in place (opening a submenu), so `menu.GetMenuId()` would already read the
-    // submenu's id afterward.
+    // Capture the id AND the option's action BEFORE selecting: the select rebuilds
+    // PlayerTalkClass's menu in place (opening a submenu), so reading either
+    // afterward would already describe the submenu.
     uint32 lastMenuId = menu.GetMenuId();
+    uint32 lastAction = menu.GetMenuItemAction(gossipListId);
     sendSelect(lastMenuId, gossipListId);
 
     // DRILL DOWN through submenus: some scripted NPCs put the option that fires
@@ -409,20 +430,46 @@ bool DungeonEventExecutor::SelectGossip(Player* bot, Creature* npc, int32 option
     // post-Skarloc: menu 7830 -> 7829 -> 7831, and only 7831's option triggers his
     // DoAction). A single select would just open the next submenu into
     // PlayerTalkClass and never reach the terminal option — so keep selecting
-    // option 0 of whatever menu is now open until it CLOSES (the terminal select
-    // ClearGossipMenuFor's it). Bounded, and bails if the menu stops changing, so a
-    // self-referential menu can't loop. A plain single-level gossip (the common
-    // case) closes on the first select and skips the loop entirely.
+    // option 0 of whatever menu is now open until the gossip ENDS. Bounded, and
+    // bails if the menu stops changing, so a self-referential menu can't loop. A
+    // plain single-level gossip (the common case) ends on the first select and
+    // skips the loop entirely.
+    //
+    // "A NEW SUBMENU OPENED" IS NOT A MENU-ID CHANGE. GossipMenu::_menuId is only
+    // ever written by Player::PrepareGossipMenu — the DB-driven path. A menu built
+    // in C++ with AddGossipItemFor + SendGossipMenuFor (SendGossipMenuFor takes an
+    // npcText id, not a menu id) leaves _menuId at whatever it already was, so a
+    // C++ submenu reads back with the SAME id as its parent and the old
+    // `GetMenuId() == lastMenuId` guard broke out before the terminal click ever
+    // went out. That is exactly Culling of Stratholme's Arthas at the Town Hall:
+    // menu 13125's one option runs GOSSIP_ACTION_INFO_DEF+2, which re-sends menu
+    // 13126, and only 13126's option fires ACTION_START_TOWN_HALL. Click 1 landed,
+    // the drill-down bailed, his gossip flag survived, and the escort driver
+    // re-clicked option 1 of the same menu ~4x/second for the rest of the run —
+    // 2305 clicks in tr-20260910-083416-9, 10/10 runs of tp-20260910-083410-1.
+    //
+    // So compare the OPTION's action as well as the menu id: a scripted submenu
+    // keeps the id and changes the action (DEF+2 -> DEF+3), a DB submenu changes
+    // the id, and a menu that re-sends itself unchanged matches on both and stops
+    // the loop. Sender-GUID emptiness is checked first because CloseGossipMenuFor
+    // clears it without clearing the items — several scripts (Arthas included)
+    // close without a ClearGossipMenuFor, so an item-count test alone would keep
+    // drilling into a menu the core has already stopped accepting selects for.
     for (int guard = 0; guard < 6; ++guard)
     {
         GossipMenu& sub = bot->PlayerTalkClass->GetGossipMenu();
+        if (sub.GetSenderGUID().IsEmpty())
+            break;  // the terminal option fired and closed the gossip
         uint32 subListId = 0;
         if (!ResolveGossipListId(sub, 0, subListId))
-            break;  // menu closed -> the terminal option fired
-        if (sub.GetMenuId() == lastMenuId)
+            break;  // menu emptied -> nothing left to select
+        uint32 const subMenuId = sub.GetMenuId();
+        uint32 const subAction = sub.GetMenuItemAction(subListId);
+        if (subMenuId == lastMenuId && subAction == lastAction)
             break;  // no new submenu opened -> nothing more to drill
-        lastMenuId = sub.GetMenuId();
-        sendSelect(sub.GetMenuId(), subListId);
+        lastMenuId = subMenuId;
+        lastAction = subAction;
+        sendSelect(subMenuId, subListId);
     }
     return true;
 }
@@ -1133,6 +1180,95 @@ StepResult DungeonEventExecutor::RunStep(Player* bot, AiObjectContext* context,
             return StepResult::Running;  // the lootState latch above confirms + advances
         }
 
+        case EventStepKind::UseItemAt:
+        {
+            // Use a quest item AT A PLACE and latch on the RECEIPT the mechanic
+            // leaves behind. The Culling of Stratholme's five plagued grain crates:
+            // item 37888 casts 49590, whose effect-0 implicit target is
+            // TARGET_UNIT_NEARBY_ENTRY narrowed by a spell-implicit-target condition
+            // to an alive Grain Crate Helper (27827) within 8yd — the invisible
+            // NOT_SELECTABLE trigger standing on the crate. Its SpellHit counts the
+            // crate, deletes the Suspicious Grain Crate (190094) and summons a
+            // Plagued Grain Crate (190095) in its place for a DAY.
+            //
+            // So, unlike UseItemOnGO, there is nothing to aim at and nothing whose
+            // lootState to watch: the cast is an ordinary self-targeted item use and
+            // the RECEIPT GO is the success latch. See the kind's note for why all
+            // three of those differences matter.
+            if (step.itemId == 0 || step.goEntry == 0)
+                return StepResult::Done;  // mis-authored step: loud in review, not a stall
+
+            float const reach = step.radius > 0.0f ? step.radius : DC_EVENT_USEITEM_REACH;
+
+            // 1. THE LATCH, FIRST AND ALWAYS. Checking before anything else is what
+            //    makes the step idempotent: a rewind, a re-entered instance or a
+            //    second Drive after a combat gap all re-run a crate that is already
+            //    done and must cost nothing but this scan. Anchor-relative (never
+            //    bot-relative) so crate N cannot latch on crate N-1's receipt.
+            {
+                std::list<GameObject*> receipts;
+                bot->GetGameObjectListWithEntryInGrid(receipts, step.goEntry, 80.0f);
+                for (GameObject* g : receipts)
+                    if (g && g->GetExactDist(step.x, step.y, step.z) <= DC_EVENT_USEITEM_LATCH)
+                        return StepResult::Done;
+            }
+
+            // 2. Walk in. The anchor is the object's own position, so "arrived" is a
+            //    plain distance test — no LOS clause, because unlike a barrel in a
+            //    house the crates stand in the open on the road and the spell picks
+            //    its own target (the engine applies its own LOS to that pick).
+            if (bot->GetExactDist(step.x, step.y, step.z) > reach)
+            {
+                HopTo(bot, step.x, step.y, step.z);
+                return StepResult::Running;
+            }
+
+            // 3. Grant the item. A bot never ran Chromie's questline, and on this
+            //    fork her gossip's grant (spell 49591, a spell_dbc row) is the only
+            //    other source — so the step must not depend on it having landed.
+            Item* item = bot->GetItemByEntry(step.itemId);
+            if (!item)
+            {
+                bot->AddItem(step.itemId, 1);
+                item = bot->GetItemByEntry(step.itemId);
+                if (!item)
+                    return StepResult::Running;  // bags full this tick — retry
+            }
+
+            // 4. WAIT OUT THE ITEM'S OWN COOLDOWN. 37888 carries a 10s
+            //    spellcooldown, and a cast refused by it is refused SILENTLY — the
+            //    step would otherwise spam one per tick and read, from the log, as a
+            //    crate that simply never counted. Walking 48-81yd between crates
+            //    usually covers the wait; this makes that an optimisation rather
+            //    than an assumption.
+            if (step.spellId && bot->HasSpellCooldown(step.spellId))
+                return StepResult::Running;
+
+            // The item use (an instant cast here, but never assume) is already in
+            // flight — let it finish rather than interrupting it every tick.
+            if (bot->IsNonMeleeSpellCast(false))
+                return StepResult::Running;
+
+            LOG_INFO("playerbots.dungeonclear",
+                     "[dungeon-clear] {} event-step UseItemAt: use item {} (spell {}) at "
+                     "({:.1f},{:.1f},{:.1f}), waiting on receipt GO {}",
+                     bot->GetName(), step.itemId, step.spellId, step.x, step.y, step.z,
+                     step.goEntry);
+            // A feral-form druid leader cannot cast an item's spell at all
+            // (CheckShapeshift rejects it before the spell is ever resolved), so it
+            // would sit here spam-casting for the whole step timeout. See DcFormGate.
+            DcFormGate::DropBlockingForm(bot, item);
+            SpellCastTargets targets;
+            // Self-targeted, exactly like the UseItem step. The spell needs no
+            // explicit target — TARGET_UNIT_NEARBY_ENTRY is resolved by the engine —
+            // and Spell::InitExplicitTargets drops a unit target the spell's
+            // explicit-target mask does not ask for, so this is simply the shape a
+            // real client's "use item on nothing" sends.
+            targets.SetUnitTarget(bot);
+            bot->CastItemUseSpell(item, targets, 0, 0);
+            return StepResult::Running;  // the receipt latch above confirms + advances
+        }
+
         default:
             // Not yet implemented. Blocked makes an accidentally authored step
             // stall visibly rather than silently pass.
@@ -1232,15 +1368,10 @@ EventDriveOutcome DungeonEventExecutor::Drive(Player* bot, AiObjectContext* cont
     prog.instanceId = instanceId;
 
     // (Re)initialise on a new event — self-heals a stale value from a prior run.
+    // BeginEvent owns WHICH clocks are re-based; see it for why the escort ones
+    // are among them.
     if (prog.eventId != ev.id)
-    {
-        prog.eventId = ev.id;
-        prog.stepIndex = 0;
-        prog.attempts = 0;
-        prog.stepStartMs = now;
-        prog.maxStepIndex = 0;
-        prog.progressMs = now;
-    }
+        prog.BeginEvent(ev.id, now);
     // A gap since the last drive means this is a FRESH activation — a new run /
     // re-enter, or the event lapsed (condition went false) and re-fired — NOT a
     // tick-to-tick continuation. Restart from step 0 so the whole chain (e.g.
@@ -1470,9 +1601,11 @@ bool DungeonEventExecutor::IsPersistentAnchoredEventActive(AiObjectContext* cont
     // stepIndex >= 1 means the event has advanced past its first step, so this is
     // false until the tank has actually arrived and the event has begun running.
     //
-    // ...with one exception, because otherwise the FIRST step is unprotected and a
-    // leading MoveTo is the one step kind that walks the tank out of its own
-    // objective's arriveRadius by design. When its destination lies outside that
+    // ...with two exceptions, because otherwise the FIRST step is unprotected and
+    // there are two step shapes that walk the tank out of its own objective's
+    // arriveRadius BY DESIGN. The first is a leading MoveTo (the second is a
+    // leading Custom step on a stepsOwnMovement event — see further down). When its
+    // destination lies outside that
     // radius the event can never finish it: the executor HopTo's the tank out, the
     // at-objective trigger goes false on distance, the event stops being driven,
     // Advance hauls the tank back to the anchor, repeat. A MoveTo cannot
@@ -1498,9 +1631,43 @@ bool DungeonEventExecutor::IsPersistentAnchoredEventActive(AiObjectContext* cont
     // followers gather in, so it is capped by the anchor's measured walkable pad
     // (8.50 at this altar) and floored by the MoveTo's reach (8.26) — a 0.24yd
     // window whose only solutions park the party within centimetres of the drop.
-    bool const started =
-        prog.stepIndex >= 1 ||
-        (!ev->steps.empty() && ev->steps.front().kind == EventStepKind::MoveTo);
+    // ...AND THE SAME EXEMPTION FOR A LEADING Custom STEP ON A stepsOwnMovement
+    // EVENT, for the same reason one step further out. A MoveTo walks the tank out
+    // of its own arriveRadius by declaring a destination; a driver hook does it by
+    // *being* the movement — DungeonEvent::stepsOwnMovement is precisely the
+    // author's statement that this event's steps, not the per-tick
+    // StopBot(Hold), own where the tank stands (see DcObjectiveArriveAction, which
+    // reads the same flag to skip that hold). Such a hook is under exactly the
+    // deadlock described above whenever its walk leaves the radius.
+    //
+    // Live: tp-20260907-140341-2, Pit of Saron's Tyrannus's ledge, 6 of 10 runs
+    // stalled and a 7th (tr-…-12) only won on a retry. That event is ONE bare
+    // Custom step, so `stepIndex >= 1` is unreachable for its whole life — the
+    // index reaches 1 only on the tick the hook returns Done, which is the tick the
+    // event completes. The hook gathers on an anchor deliberately placed 73yd from
+    // areatrigger 5633's centre (22yd OUTSIDE its sphere, so that ARRIVING cannot
+    // trip it) and then walks the leader the 34.4yd in — against an arriveRadius of
+    // 6.0. Six yards along that walk the at-objective trigger goes false, the hook
+    // stops being ticked, Advance hauls the tank back to the anchor, repeat; the
+    // successful run's status timeline is three of those cycles
+    // ("Holding near Tyrannus's ledge" -> "En route to Tyrannus's ledge" x3) before
+    // it happened to get through. IsPullOwningEventDriving reads this same latch,
+    // so the pull system was not standing down on that leg either — which
+    // PitOfSaronEvents' own note ("the anchored path infers the stand-down from
+    // Persistent() alone") assumes it was.
+    //
+    // A Custom step cannot false-complete the way a KillCreature gate can when its
+    // creature is merely out of scan range: its completion is entirely the hook's
+    // own return value, evaluated from the hook's own reads. So counting it as
+    // "started" cannot pin the run on a half-started event, which is the failure
+    // the stepIndex >= 1 rule exists to prevent. The stepsOwnMovement conjunct
+    // keeps this narrow — a Custom step on an event that does NOT claim its own
+    // movement is still held to the arrival radius.
+    bool const startedFront =
+        !ev->steps.empty() &&
+        (ev->steps.front().kind == EventStepKind::MoveTo ||
+         (ev->steps.front().kind == EventStepKind::Custom && ev->stepsOwnMovement));
+    bool const started = prog.stepIndex >= 1 || startedFront;
     return prog.eventId == ev->id && started && prog.stepIndex < ev->steps.size();
 }
 
@@ -1527,6 +1694,21 @@ bool DungeonEventExecutor::IsPullOwningEventDriving(Player* bot, AiObjectContext
         return false;
     DungeonEvent const* ev = FindDueConditionalEvent(bot, context, map->GetId());
     return ev && ev->ownsThePull;
+}
+
+bool DungeonEventExecutor::PullOwningEventHoldsTheApproach(Player* bot, AiObjectContext* context)
+{
+    if (!bot || !context)
+        return false;
+
+    if (IsPersistentAnchoredEventActive(context))
+        return true;
+
+    Map* map = bot->GetMap();
+    if (!map)
+        return false;
+    DungeonEvent const* ev = FindDueConditionalEvent(bot, context, map->GetId());
+    return ev && ev->ownsThePull && !ev->yieldsTheApproach;
 }
 
 bool DungeonEventExecutor::ActiveEngageStep(AiObjectContext* context, uint32& outEntry,

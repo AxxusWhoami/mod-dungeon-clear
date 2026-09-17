@@ -128,7 +128,16 @@ namespace DcTestRunRecord
         //     list as an empty one reports "nothing was holding them" about the
         //     freezes this was added to explain.
         // 11: added size (requested party size; comp[] length is the actual).
-        std::uint32_t schema = 11;
+        // 12: added combatHolders[].trigger, and with it a CHANGE OF MEANING in
+        //     the sibling `legitimate` field: a CREATURE_FLAG_EXTRA_TRIGGER
+        //     holder now sinks the verdict, because no bot can target one and so
+        //     the party can never resolve the reference (see DungeonClearMath::
+        //     IsUnresolvableCombatHolder). Records at schema <= 11 scored those
+        //     holders LEGITIMATE — do not compare `legitimate` across the
+        //     boundary without checking the version first; tr-20260902-121659-12
+        //     and -13 are the reference pre-12 records where it reads LEGIT about
+        //     a Flame Breath Trigger that wedged the run for ten minutes.
+        std::uint32_t schema = 12;
         std::string runId;
         std::string planId;       // owning `.dc test plan`, "" for ad-hoc runs
         std::string dungeon;      // registry token

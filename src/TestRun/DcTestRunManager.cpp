@@ -433,12 +433,12 @@ void DcTestRunManager::Tick(uint32 diff)
 
     if (!_runs.empty())
     {
-        // One factory-provision roll per world tick across ALL runs; the
-        // rotating offset gives each run a fair first crack at the budget.
+        // One factory-provision roll per world tick realm-wide
+        // (DcProvisionBudget, re-armed once per tick by the module's global
+        // hook); the rotating offset gives each run a fair first crack at it.
         std::size_t const n = _runs.size();
-        bool provisionBudget = true;
         for (std::size_t k = 0; k < n; ++k)
-            _runs[(_provisionRR + k) % n]->Tick(diff, provisionBudget);
+            _runs[(_provisionRR + k) % n]->Tick(diff);
         _provisionRR = (_provisionRR + 1) % n;
 
         // Erase finished jobs, releasing their reserved guids first and handing

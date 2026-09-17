@@ -116,6 +116,7 @@ namespace
     // each still standing down on the raw flag, and each froze on it in turn.
     // See DcCombatFlag.h for the mechanism.
     using DcCombatFlag::MayDrive;
+    using DcCombatFlag::MayDriveEvent;
 
     // Trigger-side between-pulls gate. Thin wrapper over the shared
     // DcPartyState::IsBetweenPullsReady (one body for the trigger ladder and the
@@ -561,7 +562,7 @@ bool DungeonClearEventDueTrigger::IsActive()
 {
     if (!IsEnabled(context, bot))
         return false;
-    if (!bot || bot->isDead() || !MayDrive(bot, context))
+    if (!bot || bot->isDead())
         return false;
     // Leader drives events; followers stay on follow-tank.
     if (!DcLeaderSignal::IsDungeonClearLeader(bot))
@@ -574,7 +575,21 @@ bool DungeonClearEventDueTrigger::IsActive()
 
     // Hand the trigger and the action the SAME "which event is due" answer so
     // they can never disagree about whether to fire / what to drive.
-    return DungeonEventExecutor::FindDueConditionalEvent(bot, context, map->GetId()) != nullptr;
+    DungeonEvent const* const ev =
+        DungeonEventExecutor::FindDueConditionalEvent(bot, context, map->GetId());
+    if (!ev)
+        return false;
+
+    // THE GATE LAST, and not at all for a drivesInCombat event — resolving the
+    // event first is what makes that distinction available here. Standing this
+    // rung down on a fight is right for an event whose work happens BETWEEN
+    // pulls and fatal for one that IS the fight: a combat-FLAGGED bot with an
+    // empty attacker set runs the NON-combat engine, so the combat-engine copy
+    // of this rung, which already carries the exemption, never gets a tick to
+    // apply it and the driver goes dark entirely. Halls of Reflection's escape
+    // lost thirty seconds of wall 4 that way. Full account, and the run ids, in
+    // DungeonClearMath::EventDueGateOpen.
+    return MayDriveEvent(bot, context, ev->drivesInCombat);
 }
 
 bool DungeonClearEventDueCombatTrigger::IsActive()

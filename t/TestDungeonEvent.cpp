@@ -1113,6 +1113,41 @@ TEST(DungeonEventBuilderTest, KillCreatureEngageAndTimeout)
     EXPECT_EQ(e.steps[2].timeoutMs, 900000u);
 }
 
+// UseItemAt carries the item, its use-spell, the RECEIPT gameobject and the
+// anchor — and the GO means the opposite of what UseItemOnGO's does. There it is
+// the TARGET of the cast; here it is the object the mechanic leaves BEHIND, which
+// is what makes the step idempotent (the Culling of Stratholme's helper deletes
+// the Suspicious Grain Crate and summons a Plagued one in its place, so there is
+// no cast target to latch on afterwards).
+TEST(DungeonEventBuilderTest, UseItemAtCarriesTheItemSpellReceiptAndAnchor)
+{
+    DungeonEvent e = EventBuilder(1, 1, "e")
+                         .UseItemAt(/*itemId*/ 37888, /*spellId*/ 49590,
+                                    /*receiptGoEntry*/ 190095,
+                                    1579.42f, 621.45f, 99.73f)
+                         .Timeout(120000)
+                         .UseItemAt(37888, 49590, 190095, 1570.92f, 669.93f, 102.31f,
+                                    /*radius*/ 6.0f)
+                         .Build();
+    ASSERT_EQ(e.steps.size(), 2u);
+
+    EXPECT_EQ(e.steps[0].kind, EventStepKind::UseItemAt);
+    EXPECT_EQ(e.steps[0].itemId, 37888u);
+    EXPECT_EQ(e.steps[0].spellId, 49590u);
+    EXPECT_EQ(e.steps[0].goEntry, 190095u);
+    EXPECT_FLOAT_EQ(e.steps[0].x, 1579.42f);
+    EXPECT_FLOAT_EQ(e.steps[0].y, 621.45f);
+    EXPECT_FLOAT_EQ(e.steps[0].z, 99.73f);
+    // radius 0 => the executor's own default arrival reach.
+    EXPECT_FLOAT_EQ(e.steps[0].radius, 0.0f);
+    EXPECT_EQ(e.steps[0].timeoutMs, 120000u);
+
+    // An explicit radius overrides the default, and Timeout() tuned only the step
+    // it followed.
+    EXPECT_FLOAT_EQ(e.steps[1].radius, 6.0f);
+    EXPECT_EQ(e.steps[1].timeoutMs, 0u);
+}
+
 // SkipIfTargetMissing / WaitTargetStill flag the last-added step's gossip bits.
 TEST(DungeonEventBuilderTest, SkipIfTargetMissing)
 {
@@ -1441,4 +1476,62 @@ TEST(DungeonEventConditional, ZulFarrakZumrahWakeEventShape)
     EXPECT_EQ(e->steps[0].kind, EventStepKind::Custom);
     EXPECT_EQ(e->steps[0].hookId, 5u);
     EXPECT_TRUE(ObjectiveHookRegistry::Has(e->steps[0].hookId));
+}
+
+// --- DungeonEventProgress::BeginEvent -------------------------------------
+
+// THE REGRESSION GATE FOR tr-20260910-073715-4, where the Culling of Stratholme
+// Town Hall leg stalled on its FIRST tick instead of after the escort watchdog's
+// 15-second dead-air window.
+//
+// Drive re-bases the per-activation clocks whenever the event id changes, but the
+// two escort clocks used not to be among them. They are only ever stamped by
+// escort PROGRESS, never by entering an escort, so a run whose second escort leg
+// began eleven minutes after its first inherited an eleven-minute-old
+// escortProgressMs — already far past DC_ESCORT_DEAD_AIR_MS before the new leg had
+// looked at anything. The leg is entitled to its full grace; that is the whole
+// point of a dead-air window rather than a flat timeout.
+TEST(DungeonEventProgressTest, BeginEventRebasesTheEscortClocks)
+{
+    DungeonEventProgress p = Prog(/*eventId*/ 1, /*stepIndex*/ 3, /*stepStartMs*/ 1000);
+    // Leg one ran long and left both escort clocks stamped.
+    p.escortProgressMs = 1234;
+    p.escortCombatWedgeMs = 5678;
+
+    p.BeginEvent(/*newEventId*/ 2, /*now*/ 700000);
+
+    EXPECT_EQ(p.escortProgressMs, 0u)
+        << "the new event inherited the previous escort leg's dead-air clock — its"
+           " first tick that cannot see the escortee will stall immediately instead"
+           " of after the 15s window";
+    EXPECT_EQ(p.escortCombatWedgeMs, 0u)
+        << "the new event inherited the previous escort leg's combat-wedge clock,"
+           " so a fresh escortee could be force-evaded on its first in-combat tick";
+
+    // And it still does everything it did before.
+    EXPECT_EQ(p.eventId, 2u);
+    EXPECT_EQ(p.stepIndex, 0u);
+    EXPECT_EQ(p.attempts, 0u);
+    EXPECT_EQ(p.maxStepIndex, 0u);
+    EXPECT_EQ(p.stepStartMs, 700000u);
+    EXPECT_EQ(p.progressMs, 700000u);
+}
+
+// The clocks that OUTLIVE an event must survive it: instanceId is what detects a
+// re-entered instance (a Reset, not a BeginEvent), and lastDriveMs is the gap
+// detector that decides whether this activation is a continuation or a lapse.
+// Zeroing either here would turn every event change into a false fresh-instance
+// or false-lapse signal.
+TEST(DungeonEventProgressTest, BeginEventLeavesCrossEventStateAlone)
+{
+    DungeonEventProgress p = Prog(1);
+    p.instanceId = 42;
+    p.lastDriveMs = 9999;
+    p.relocationCombatHoldMs = 4321;
+
+    p.BeginEvent(2, 700000);
+
+    EXPECT_EQ(p.instanceId, 42u);
+    EXPECT_EQ(p.lastDriveMs, 9999u);
+    EXPECT_EQ(p.relocationCombatHoldMs, 4321u);
 }

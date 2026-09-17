@@ -19,7 +19,7 @@ and issue `SELECT`s only — they write nothing, to the DB or to disk.
 | `dc_test_run.py` | **everything known about one test run, by its id** — record, plan, live state, and the log lines sliced down to that run | run logs, `*.log` |
 | `dc_analytics.py` | ingests test-run JSONL logs into a queryable SQLite db | run logs |
 | `check_config_reads.py` | build guard: every tunable must be read via `DcSettings` | `src/` |
-| `check_determinism.sh` | determinism guard for the decision cores | build output |
+| `check_determinism.sh` | determinism guard for the decision cores (comments exempt) | `src/` |
 | `dc-feature.sh` | starts a feature in an isolated git worktree | git |
 
 `check_config_reads.py` and `check_determinism.sh` are CI/build-time guards, not

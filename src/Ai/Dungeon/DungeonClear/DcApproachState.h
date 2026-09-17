@@ -272,6 +272,45 @@ struct DcApproachState
     uint32 lastProgressSegmentIdx = 0;
     uint32 lastProgressPointIdx   = 0;
 
+    // THE reset authority for every recovery counter. Call once per advance
+    // tick; nothing else may clear these five.
+    //
+    // The recovery ladder is a set of counters that only ever increment on a
+    // FAILURE (a resnap that cured nothing, a rebuild that changed nothing, a
+    // nudge that bought no ground, a move that was refused). Each one exists to
+    // let a rung give up and escalate. Each one is therefore only as good as the
+    // rule that clears it — and this module has now shipped the same bug four
+    // times by clearing them on something that is not progress:
+    //
+    //   S1089  a Resnap that "succeeded" reset the ladder          (rung 1 pinned)
+    //   S1487  any tick that DISPLACED 0.5yd reset the ladder      (87/87 at rung 1)
+    //   S2227  a rejoin that refused still reset stuckCount        (3924 refusals, clear diag)
+    //   S2238  an off-path REBUILD reset the rejoin's refusals     (68 refusals, strike never fired)
+    //
+    // Every one of those is the same mistake with a different subject: treating
+    // "something happened" as "we got somewhere". Motion is not progress; an
+    // issued move is not an arrival; a rung reporting success is not a cure; and
+    // an episode ending is not an episode succeeding. The only fact that
+    // deserves to clear a give-up counter is NET PROGRESS TOWARD THE OBJECTIVE —
+    // nearer than this approach has ever been — which a shuttling, refusing or
+    // frozen bot can never produce and a travelling one produces every tick.
+    //
+    // So the rule is structural rather than a matter of care at each call site:
+    // the counters are private to this decision. A rung that wants to say "I
+    // fixed it" says it by moving the bot closer, and this watchdog notices.
+    // Returns true when progress was made (callers may log it).
+    bool NoteRecoveryProgress(float distToObjective, float minClose, uint32 nowMs)
+    {
+        if (!recoveryProgressWatch.TickClosing(distToObjective, minClose, nowMs))
+            return false;
+        stuckCount      = 0;
+        rebuildAttempts = 0;
+        resnapAttempts  = 0;
+        nudgeAttempts   = 0;   // a nudge that bought ground costs nothing
+        rejoinRefusals  = 0;
+        return true;
+    }
+
     // Full reset: every approach AND long-path-cache field. Used on dc on/off,
     // death, all-cleared, and every pull interrupt — the run-state teardown.
     void Reset() { *this = DcApproachState{}; }

@@ -219,6 +219,45 @@ namespace DcRel
     // the combat camp owners (60) and Hakkar (62-64), which never contend (the
     // summon isn't a fight; different map than Hakkar), and BELOW the terminal
     // death/chat bailouts (100). See DungeonClearHazardVacate{Trigger,Action}.
+    // HALLS OF REFLECTION ONLY, every member, BOTH engines: while the escape is
+    // running, step FORWARD along the path whenever this bot is inside the Lich
+    // King's Remorseless Winter ring or has fallen behind him.
+    //
+    // IT SITS ONE RUNG ABOVE HazardVacate (55) AND THAT IS THE WHOLE POINT. The
+    // ring IS a hazard and it IS registered as one — but the generic vacate
+    // retreats RADIALLY, directly away from the emitter, and on this encounter
+    // "away from him" is the worst available direction. The path runs -x -y, he
+    // follows the party down it, and every 2 seconds each player whose
+    // (p.x - lk.x) + (p.y - lk.y) exceeds 20 takes 10 000 damage and a KNOCKBACK
+    // THAT THROWS THEM FURTHER BEHIND — so a radial vacate fired on a bot that is
+    // already behind aims it deeper into a rule that then reinforces itself. This
+    // rung answers the same danger with the only move that works: toward the
+    // party's stand point, which is ahead of the leader and ahead of him.
+    //
+    // 56 clears every stock combat mover (MoveChase ~30), the DC role repositions
+    // (heal 41 / assist 35 / regroup 29) and the generic vacate it must
+    // pre-empt, while staying under the camp owners (60) — which never contend,
+    // because this map's two events carry OwnsThePull and there is no camp — and
+    // under the terminal bailouts (100). Inert everywhere else: the trigger's
+    // first test is the map id, its second the escape's boss state.
+    // See DungeonClearHorStayAhead{Trigger,Action}.
+    // THE OCULUS ONLY, every member, BOTH engines: the rider rung — gossip for an
+    // essence, mount, fly this member's drake on its lane, land, dismount, hold
+    // station on Eregos. Every member steers its OWN drake.
+    //
+    // 64.5 because of what it must beat and what must beat it. Above every DC
+    // rung a rider could otherwise be handed (the camp owners 60, the event
+    // driver 61, the hazard vacate 55) and above stock `occ drake attack` (15) —
+    // though it returns false whenever it has nothing to steer, so the drake's
+    // rotation still gets every idle tick. Below the phantom-combat hatch (65) and
+    // the terminal bailouts (100). Half a rung over HakkarSuppressorCombat (64)
+    // rather than on it, so the ladder carries no new tie.
+    //
+    // It is a plain Action, NOT a DcMovementAction: stock `wotlk-occ`'s
+    // OccFlyingMultiplier zeroes every MovementAction on a mounted bot. It drives
+    // the vehicle base's MotionMaster directly. See DungeonClearOculusRider{Trigger,Action}.
+    inline constexpr float OcRider                = 64.5f; // any role: the Oculus drake rider
+    inline constexpr float HorStayAhead           = 56.0f; // any role: forward, with the party and out of his ring
     inline constexpr float HazardVacate           = 55.0f; // any role: clear an unfightable hazard's pulse
     inline constexpr float AssistCampCombat       = 35.0f; // follower: onto the leader's pack
     // Leader-only, combat side of the KillCreature-engage objective. A stealthed

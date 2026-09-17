@@ -1725,3 +1725,142 @@ DungeonClear.TestRun.DriverCharacter = "Dcdriver"
 #
 
 DungeonClear.TestRun.DriverAccount = "dcdriver"
+
+###############################################################################
+#
+#   RDF INSTANT QUEUE FILL (DungeonClear.DungeonQueueFill.*)
+#
+#   When a real player uses the Dungeon Finder, provision bots with the roles
+#   the party is missing and queue them for the same dungeon through the same
+#   queue. Stock LFG matchmaking then pairs them: the player gets the ordinary
+#   "Dungeon Found" popup and accepts it themselves, and stock MakeNewGroup
+#   builds the LFG group, applies the Dungeon Finder buff and teleports
+#   everyone in. Nothing about the client flow changes — no addon, no command.
+#
+#   This changes realm-wide behaviour, so it is OFF by default.
+#
+#   The DungeonClear.BgQueueFill.* prefix is reserved for the battleground
+#   counterpart, which is a separate feature with its own switch.
+#
+
+#
+#    DungeonClear.DungeonQueueFill.Enable
+#        Master switch. 0 = the dungeon finder behaves exactly as it does
+#        without this module.
+#
+#        Turning it off while fills are in flight releases them (the bots
+#        leave the queue and log out); it never strands a queued bot.
+#
+#        Default: 0 (off)
+#
+
+DungeonClear.DungeonQueueFill.Enable = 0
+
+#
+#    DungeonClear.DungeonQueueFill.MaxConcurrent
+#        How many fills may be SETTING UP at once. Each one provisions up to
+#        four bots through PlayerbotFactory at one roll per world tick
+#        REALM-WIDE (shared with the `.dc test` harness), so this is the knob
+#        that bounds the cost of the feature.
+#
+#        It counts only the stages up to the group forming. A fill whose party
+#        has formed goes on shadowing that group for the length of the dungeon
+#        so it can log the bots out at the end, but it costs nothing while it
+#        does and does NOT count here — otherwise one party clearing a dungeon
+#        would hold a slot for the best part of an hour and the next player to
+#        click Find Group would be refused a fill for no reason they could see.
+#
+#        So this does not bound how many parties are out at once, and it is not
+#        a bound on addclass-pool draw either. Seed the pool for the number of
+#        simultaneous dungeons you expect, not for MaxConcurrent x 4; a fill
+#        that finds its pool empty releases itself and tells the player.
+#
+#        0 = unlimited (not recommended).
+#
+#        Raising it does not buy throughput: every setting-up fill competes
+#        for the same one roll per tick, so N in flight makes each one take
+#        roughly N times as long to provision. Push it far enough and fills
+#        start hitting SetupTimeoutSec instead of forming.
+#
+#        Default: 3
+#
+
+DungeonClear.DungeonQueueFill.MaxConcurrent = 3
+
+#
+#    DungeonClear.DungeonQueueFill.SetupTimeoutSec
+#        Bound on everything up to the bots being in the queue: waiting for
+#        the player's own queue to settle, claiming pool characters, logging
+#        them in, provisioning and sanitising them.
+#
+#        On timeout the fill is released and the player keeps their place in
+#        the real queue — a fill that cannot happen degrades to ordinary
+#        matchmaking, it never breaks the queue.
+#
+#        Default: 60
+#
+
+DungeonClear.DungeonQueueFill.SetupTimeoutSec = 60
+
+#
+#    DungeonClear.DungeonQueueFill.MatchTimeoutSec
+#        Bound on the wait for the matchmaker once the bots are queued. The
+#        stock compatibility pass drains one new queue entry per map update,
+#        so a match normally lands within a few seconds; this only catches
+#        the case where it never does.
+#
+#        Default: 120
+#
+
+DungeonClear.DungeonQueueFill.MatchTimeoutSec = 120
+
+#
+#    DungeonClear.DungeonQueueFill.MinPlayerLevel
+#        Do not fill for players below this level.
+#
+#        Default: 15 (the level the dungeon finder itself opens at)
+#
+
+DungeonClear.DungeonQueueFill.MinPlayerLevel = 15
+
+#
+#    DungeonClear.DungeonQueueFill.GearIlvl
+#    DungeonClear.DungeonQueueFill.GearQuality
+#        Gear ceiling for the filled bots, resolved through the same ladder a
+#        `.dc test` run uses. GearIlvl caps item level; GearQuality is an
+#        item quality (2 = uncommon, 3 = rare, 4 = epic).
+#
+#        0 on either inherits the server-wide AiPlayerbot.AutoGearScoreLimit /
+#        AiPlayerbot.AutoGearQualityLimit, which is what you usually want:
+#        filled bots should look like the realm's other bots.
+#
+#        Default: 0 / 0 (inherit)
+#
+
+DungeonClear.DungeonQueueFill.GearIlvl = 0
+DungeonClear.DungeonQueueFill.GearQuality = 0
+
+#
+#    DungeonClear.DungeonQueueFill.AutoClear
+#        0 = the filled bots behave like any other party bots: they follow the
+#        player and assist. The player queued to PLAY the dungeon, so this is
+#        the default.
+#
+#        1 = the dungeon-clear driver takes over once the party is inside and
+#        runs the instance itself, with the player along for the ride.
+#
+#        Default: 0
+#
+
+DungeonClear.DungeonQueueFill.AutoClear = 0
+
+#
+#    DungeonClear.DungeonQueueFill.LogoutOnRelease
+#        1 = log the filled bots out when the fill is released or the dungeon
+#        ends. 0 = leave them in world (useful when debugging a fill, so the
+#        characters can be inspected afterwards).
+#
+#        Default: 1
+#
+
+DungeonClear.DungeonQueueFill.LogoutOnRelease = 1

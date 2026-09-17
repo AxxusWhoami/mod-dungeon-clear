@@ -133,6 +133,14 @@ public:
     // (UINT32_MAX when MaxConcurrent is 0 = unlimited). World-thread read.
     uint32 CapHeadroom() const;
 
+    // Is this pool character already claimed by a live run? World-thread only.
+    // Read by the RDF queue fill, which draws from the same addclass pool and
+    // must not hand a second subsystem a character a run is about to log in.
+    bool IsReserved(ObjectGuid guid) const
+    {
+        return _reservedGuids.find(guid) != _reservedGuids.end();
+    }
+
     // Drive every live job from the global playerbots tick (world thread).
     void Tick(uint32 diff);
 

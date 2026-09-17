@@ -239,6 +239,117 @@ namespace
             // Done" state the tripwire guards against needs a boss that is both
             // within 40yd and frozen — i.e. the tank is already there.
             {604, 2},
+            // Utgarde Pinnacle "Bring down Grauf": UpGraufFlying is gated on the
+            // instance's own state word — GetData(DATA_SKADI) == IN_PROGRESS —
+            // which is a STRICTLY STRONGER near-gate than a distance check,
+            // because the only two things that set it are areatrigger 4991 (a
+            // 32x22yd box the party has to be standing in) and
+            // boss_skadiAI::JustEngagedWith. The encounter cannot be in progress
+            // with the party elsewhere. It is then gated on Grauf being alive,
+            // which is phase 1's own completion in the other direction. Its lone
+            // step (hook 27, DriveGraufHarpoon) OWNS the travel — it walks the
+            // leader the 161yd east to the harpoon pocket itself — so an arrival
+            // step would add nothing, and Done is its "nothing to steer this tick"
+            // yield rather than a completion. Repeatable besides: a momentary Done
+            // latches nothing.
+            {575, 4},
+            // Utgarde Pinnacle "Svala's ritual: kill the channelers": the same
+            // instance-state gate (GetData(DATA_SVALA) == IN_PROGRESS, set by
+            // areatrigger 5140 and by her JustEngagedWith) plus a live position
+            // read — the boss must be more than 12yd above her own authored floor,
+            // which is only true for the 25 seconds the Ritual of the Sword has
+            // her rooted at z 110. Its lone step (hook 28) issues NO movement and
+            // no completion of any kind; it retargets the leader onto a channeler
+            // and returns Done — the yield — on every tick it does not. Repeatable
+            // and Optional, so there is no latch to false-set and nothing to stall.
+            {575, 5},
+            // Pit of Saron "Run the Ymirjar gauntlet": PosGauntletDue is gated on
+            // the instance's own progress counter —
+            // GetData(DATA_INSTANCE_PROGRESS) in [FINISHED_KRICK_SCENE,
+            // AFTER_WARN_2] — which is a STRICTLY STRONGER near-gate than a
+            // distance check. That counter is MONOTONIC and is raised by exactly
+            // two things: the death of Ick, and a player standing inside one of
+            // two areatrigger SPHERES 34.5 and 38.1yd across. It cannot read 3 or
+            // 4 with the party anywhere else on the map, and the window closes the
+            // instant the tunnel warn lands. It is additionally gated on both
+            // earlier bosses being DONE (the orchestrator's own first refusal) and
+            // on Tyrannus not being down. Its lone step (hook 29,
+            // PosDriveGauntlet) OWNS the travel — it walks the leader from the
+            // Krick arena to each of the three gates in turn — so an arrival step
+            // would add nothing, and Done is its "nothing to steer this tick"
+            // yield rather than a completion. Repeatable besides: a momentary Done
+            // latches nothing.
+            {658, 1},
+            // Halls of Reflection "Hold the altar": HorWavesDue is gated on
+            // GetPersistentData(PERSISTENT_DATA_INTRO), which is a STRICTLY
+            // STRONGER near-gate than a distance check. That flag is raised by
+            // exactly one thing — the intro script running to its last step — and
+            // the intro script is started by exactly one thing, the gossip on
+            // Jaina/Sylvanas that event 1 takes sixty yards inside the front door.
+            // It cannot read true with the party outside the altar chamber,
+            // because the instance SHUTS the front door three seconds before it is
+            // set and again for every wave. The window closes for ever when Marwyn
+            // dies. Its lone step (hook 32, HorDriveWaves) OWNS the travel — it
+            // walks the leader back to the camp — so an arrival step would add
+            // nothing, and Done is its "nothing to steer this tick" yield rather
+            // than a completion. Repeatable besides: a momentary Done latches
+            // nothing, and after a leash wipe the driver must re-arm.
+            {668, 2},
+            // Halls of Reflection "Escape the Lich King": HorEscapeDue is gated on
+            // GetBossState(DATA_LICH_KING) == IN_PROGRESS, which is the tightest
+            // near-gate in this list. That state is raised by exactly one line of
+            // the core — npc_hor_leader_secondAI's ACTION_START_LK_FIGHT_REAL —
+            // reached only through a gossip on a leader standing at
+            // LeaderEscapePos, which is only offered after the freeze cutscene,
+            // which is only reachable once the Frostsworn General is dead. The
+            // party is standing in the throne room when it flips, by construction.
+            // Its lone step (hook 35, HorDriveEscape) OWNS the travel — it walks
+            // the leader stand point to stand point down 679yd of escape path — so
+            // an arrival step would add nothing, and Done is its yield. Repeatable
+            // because the instance only resets the escape when the LAST player
+            // leaves the map, so a driver that came back must re-arm from whatever
+            // state it finds.
+            {668, 5},
+            // The Culling of Stratholme "The ten waves of Stratholme": CosWavesDue is
+            // gated on GetData(DATA_ARTHAS_EVENT) being exactly 4 or 5, and on this map
+            // a counter test is a STRONGER near-gate than any distance check. The
+            // counter can only read 4 because the party performed, in this order,
+            // Chromie's entrance gossip, five Arcane Disruptor uses along 330yd of road,
+            // Chromie-middle's gossip 430yd further on, a three-minute escort to the
+            // city gate, a gossip there, and an 85-second city intro that ENDS with
+            // Arthas parked at waypoint 11 — ninety yards from the first wave cluster.
+            // There is no path to that value that leaves the party anywhere but in the
+            // city, and none of it can happen from a distance or by accident. It closes
+            // for ever at 6 (Salramm dead).
+            //
+            // Its lone step (hook 36, CosDriveWaves) OWNS the travel — it walks the
+            // leader to the live wave, which is the entire reason the event exists,
+            // because nothing on this map comes to the party — so an arrival step would
+            // add nothing, and Done is its "nothing to steer this tick" yield rather
+            // than a completion. Repeatable besides: a momentary Done latches nothing.
+            {595, 10},
+            // Trial of the Champion "The Champion's Arena": TocDriverDue is true for
+            // the WHOLE run (progress < 9), from the entrance — and that is sound
+            // here because the map IS the arena. The party lands 57yd from the
+            // centre of one open bowl ~110yd across, every actor the driver touches
+            // (the announcer, the soldiers, the boss, the Knight) stands inside it,
+            // and there is no second room anywhere to fire from a distance into.
+            // Its lone step (hook 37, TocDriveArena) owns its own movement — it
+            // rides the tank's horse to the announcer and back to the joust post —
+            // so an arrival step would add nothing, and Done is its yield.
+            // Repeatable: it never completes; the predicate going false ends it.
+            {650, 4},
+            // The Oculus "The Oculus ascent": OculusDriverDue is gated on
+            // GetData(DATA_DRAKOS) == DONE, and on this map that is a STRONGER
+            // near-gate than any distance. Drakos stands on an island reachable only
+            // through the Nexus Portal teleport, and nothing else on the map can set
+            // the slot — so the party is on his ring, beside the drake-givers who
+            // only walk out of their cages on that very death, when it flips. It
+            // stays due until Eregos dies and nobody is left in a saddle. Its lone
+            // step (hook 38, OcDriveAscent) owns the travel — the party flies island
+            // to island, which no arrival step can express — so Done is its yield.
+            // Repeatable: it never completes; the predicate going false ends it.
+            {578, 9},
         };
         for (Row const& r : kRows)
             if (r.mapId == mapId && r.eventId == eventId)
@@ -439,6 +550,64 @@ TEST(DungeonEventIntegrityTest, MultiStepRewindHazardEventsArePersistent)
             << "anchored event map " << ev.mapId << " id " << ev.id << " (" << ev.name
             << ") has >1 step and a rewind-hazard step but is not .Persistent() — a "
                "combat gap will rewind it to step 0. Add .Persistent() or whitelist it.";
+    }
+}
+
+// --- F1b: an anchored event must be able to latch itself ACTIVE ------------
+
+TEST(DungeonEventIntegrityTest, AnchoredStepsOwnMovementEventsCanLatchActive)
+{
+    // DungeonEventExecutor::IsPersistentAnchoredEventActive is what keeps a running
+    // anchored event alive once its own steps walk the tank out of the objective's
+    // arriveRadius: without that latch DungeonClearAtObjectiveTrigger falls back to
+    // a plain distance test, the event stops being driven the moment the tank
+    // leaves the radius, Advance hauls it back, and the two rungs fight until the
+    // step times out. IsPullOwningEventDriving reads the same latch, so the pull
+    // system does not stand down either.
+    //
+    // SCOPED TO stepsOwnMovement, which is the flag that makes the latch load-
+    // bearing. It is the author's statement that this event's steps — not the
+    // per-tick StopBot(Hold) — own where the tank stands, i.e. that they WILL walk
+    // it off the anchor. Every other anchored event is content to be held at the
+    // arriveRadius, and the `stepIndex >= 1` rule is what protects those from a
+    // leading KillCreature/ClearRadius gate false-latching before the tank has
+    // arrived. So this is not a lint about step counts; it is the one shape where
+    // "my steps move the tank" and "the trigger drops me when I move" contradict.
+    //
+    // The latch is `stepIndex >= 1 || <the front step is one that owns the walk>`,
+    // and the first disjunct cannot be leaned on: it is unreachable for a one-step
+    // event (the index reaches 1 only on the tick the event completes), and for a
+    // multi-step one it still leaves step 0 unprotected. So require the FRONT step
+    // to latch.
+    //
+    // Every anchored stepsOwnMovement event in the registry already satisfies this
+    // through a leading MoveTo — Black Morass' Medivh defence, Halls of Stone's
+    // escort / Tribunal / door, both Violet Hold families. The one that did not was
+    // Pit of Saron's Tyrannus's ledge (map 658 event 2): one bare Custom step, so
+    // IsPersistentAnchoredEventActive was false for its whole life, its 34.4yd
+    // walk-in left a 6.0yd arriveRadius, and 6 of 10 runs of tp-20260907-140341-2
+    // stalled on the anchor while Advance and the hook fought over the tank.
+    for (DungeonEvent const& ev : DungeonEventRegistry::AllEvents())
+    {
+        if (ev.activation != EventActivation::Anchored || !ev.stepsOwnMovement ||
+            ev.steps.empty())
+            continue;
+
+        EventStep const& front = ev.steps.front();
+        bool const latchable =
+            front.kind == EventStepKind::MoveTo ||
+            (front.kind == EventStepKind::Custom && ev.stepsOwnMovement);
+
+        EXPECT_TRUE(latchable)
+            << "anchored event map " << ev.mapId << " id " << ev.id << " (" << ev.name
+            << ") sets .StepsOwnMovement() but its front step (kind "
+            << static_cast<uint32>(front.kind)
+            << ") cannot latch the event ACTIVE from step 0 — so"
+               " IsPersistentAnchoredEventActive is false while those steps walk the"
+               " tank off the anchor, DungeonClearAtObjectiveTrigger drops back to a"
+               " plain arriveRadius test, and Advance fights the event for the tank"
+               " until the step times out. Lead with a MoveTo, or make the front step"
+               " a Custom driver hook.";
     }
 }
 
@@ -712,6 +881,83 @@ TEST(DungeonEventIntegrityTest, DrivesInCombatIsConfinedToVettedWaveEncounters)
         // CONDITION — it resets boss state 2 to NOT_STARTED and sends him back to
         // a DB spawn 200yd away, costing a second full escort.
         {599, 4},
+        // Utgarde Pinnacle "Bring down Grauf". The moment areatrigger 4991 trips,
+        // a 38667 Combat Trigger at the add-spawn corner calls DoZoneInCombat() on
+        // the whole hall and a World Trigger starts casting 59275 Summon Gauntlet
+        // Mobs Periodic — a deque of eight summon spells, two per tick, WITH NO END
+        // CONDITION but the drake's death. The party is therefore in unbroken
+        // combat for the whole of phase 1, so the non-combat rung would never run
+        // once — and phase 1 cannot be won by fighting at all: Grauf carries
+        // IMMUNE_TO_PC and Skadi is NOT_SELECTABLE until he dies, so the ONLY
+        // damage in the encounter is a GameObject click this driver has to be alive
+        // to make. It yields on every tick it is not walking or firing, which is
+        // most of them.
+        {575, 4},
+        // Utgarde Pinnacle "Svala's ritual: kill the channelers". The whole 25s is
+        // a fight — three Ritual Channelers holding an INFINITE-duration Paralyze
+        // (48278, ends only when its caster dies) on a teleported party member —
+        // and the retarget this event exists to make is a COMBAT-tick act. An
+        // out-of-combat-only rung would never fire once inside a boss encounter.
+        {575, 5},
+        // Pit of Saron "Run the Ymirjar gauntlet". From the tick areatrigger 5578
+        // is accepted the party is fighting: ten Ymirjar arrive on splines at two
+        // fixed homes and go REACT_AGGRESSIVE in place, and the moment they are
+        // dead the driver has to walk the leader eighty yards to the NEXT gate —
+        // which is only accepted while the counter still reads AFTER_WARN_1. Then
+        // six (twelve heroic) Wrathbone, then the same again. The gaps between
+        // those fights are measured in seconds, so the non-combat rung would get
+        // its ticks before the first gate and essentially never again — and the
+        // thing this driver exists to do happens entirely inside them. Note it
+        // yields the tick on every wave tick it is not steering, which is most of
+        // them, so the flag's usual cost (taking the combat tick off the stock
+        // movers) is paid only while it is walking.
+        {658, 1},
+        // Halls of Reflection "Hold the altar". The gaps between waves 1-2-3-4 and
+        // 6-7-8-9 are FIVE SECONDS — instance_halls_of_reflection cuts its 150s
+        // wave timer to 5000 the moment the last trash mob of a wave dies — and
+        // the two boss waves are continuous. An out-of-combat-only rung would get
+        // five seconds in every ninety, and it would stop running entirely once
+        // the party fell behind, which is exactly when the hold matters most: a
+        // party that falls behind gets scattered, and scattering past 70.5yd from
+        // the altar WIPES THE EVENT and respawns every dead mob. Note this driver
+        // yields the tick on every wave tick (the mobs come to the party — there
+        // is nothing to steer), so the flag's usual cost is paid only on the few
+        // ticks it is actually walking the tank back to the camp.
+        {668, 2},
+        // Halls of Reflection "Escape the Lich King". The strongest case in this
+        // list: npc_hor_lich_kingAI calls SetInCombatWithZone() on every player
+        // ONCE A SECOND for the whole four-to-six-minute escape, so a
+        // non-combat-only rung would get exactly zero ticks. The flag is not an
+        // optimisation here, it is the difference between the event existing and
+        // not. It yields for most of every wall fight.
+        {668, 5},
+        // The Culling of Stratholme "The ten waves of Stratholme". THERE IS NO
+        // INTER-WAVE TIMER ON THIS MAP AT ALL: npc_arthasAI::SendNextWave summons
+        // the next four mobs in the SAME CALL as the previous wave's fourth death,
+        // so the party is in combat essentially without a break from wave 1 to
+        // Salramm, and the only gaps are the seconds it takes to walk between
+        // clusters. An out-of-combat-only rung would get the twenty seconds before
+        // wave 1 and essentially nothing afterwards — and the thing this driver
+        // exists to do happens entirely in those gaps, because the four spawn
+        // clusters are up to 264yd apart and the mobs have NO movement script.
+        // Note it yields the tick on every wave tick it is not steering, which is
+        // most of them, so the flag's usual cost is paid only while it is walking.
+        {595, 10},
+        // Trial of the Champion "The Champion's Arena". The flag here is for the
+        // OPPOSITE reason to every row above: the driver never steers under fire.
+        // It takes combat ticks only to hand them straight back — every in-combat
+        // verdict is a yield (the joust is mod-playerbots' `wotlk-toc`, every
+        // other fight the stock engine's) — and it needs to SEE them because the
+        // progress counter moves mid-fight and the telemetry line reports it.
+        // Its combat rung (61) is below `toc mounted` (66) regardless.
+        {650, 4},
+        // The Oculus "The Oculus ascent". The ToC reason, not the wave reason: the
+        // driver never steers under fire — it NEVER lifts off while anyone is
+        // engaged, because a drake spell on a ground mob kills its rider — and every
+        // in-combat verdict on the ground is a yield. It needs combat ticks to SEE a
+        // Guardian picket hold riders mid-leg (a Hold, so the ladder stays off the
+        // mounted tank) and the Eregos fight, which is in combat from start to end.
+        {578, 9},
     };
 
     for (DungeonEvent const& ev : DungeonEventRegistry::AllEvents())
@@ -1101,6 +1347,90 @@ TEST(DungeonEventIntegrityTest, StepsOwnMovementIsConfinedToVettedEvents)
         {599, 2},
         {599, 3},
         {599, 4},
+        // Utgarde Pinnacle "Bring down Grauf": hook 27 walks the leader 161yd east
+        // down the gauntlet hall to the harpoon pocket on its own long-haul spline
+        // (DcTransit::TravelTo — a bare MovePoint truncates silently past ~150yd),
+        // and the per-tick hold would cancel it the tick after it is issued. The
+        // flag is also what makes a Done RETURN YIELD, and on this map that is the
+        // load-bearing half: the driver is idle for most of every flight lap, and
+        // those are precisely the ticks four bots and a tank need in order to fight
+        // an add pump that never stops.
+        {575, 4},
+        // Utgarde Pinnacle "Svala's ritual: kill the channelers": the hook issues
+        // NO movement at all and takes the flag purely for the yield semantics. It
+        // sits above the stock combat movers to retarget the tank off a boss rooted
+        // twenty yards in the air, and a rung there that claimed every tick would
+        // starve the rotation it exists to redirect.
+        {575, 5},
+        // Pit of Saron "Run the Ymirjar gauntlet": hook 29 issues every metre of
+        // the leg itself through the long-haul funnel (DcTransit::TravelTo) — the
+        // hold-back at the Krick staging point, the walk into each of the three
+        // gate spheres, and the close on a wave mob parked at a home position the
+        // party would otherwise never reach. With the per-tick hold in place each
+        // of those splines is cancelled the tick after it is issued and the party
+        // creeps a tick at a time while every log line reports a healthy spline.
+        // The flag is also what makes a Done RETURN YIELD, which is load-bearing
+        // here: the driver is idle for most of both waves, and those are precisely
+        // the ticks a tank and four bots need in order to kill sixteen mobs.
+        {658, 1},
+        // Pit of Saron "Tyrannus's ledge": hook 30 owns a gather hold on the ledge
+        // anchor and then the ~30yd walk INTO areatrigger 5633's sphere — which is
+        // the whole point of the event, because the anchor is deliberately 22yd
+        // OUTSIDE that sphere so arriving cannot fire it. The per-tick hold would
+        // cancel the walk-in the tick after it is issued and the encounter would
+        // never start.
+        {658, 2},
+        // Halls of Reflection "Start the intro": hook 31 walks the tank the last
+        // yards to Jaina/Sylvanas itself, through the long-haul funnel, before it
+        // can send a gossip the whole dungeon is behind. The anchored per-tick
+        // hold would cancel that walk-in the tick after it is issued.
+        {668, 1},
+        // Halls of Reflection "Hold the altar": hook 32 issues the walk back to
+        // the camp itself — from wherever a wave ended, which can be sixty yards
+        // across the chamber. The flag is also what makes a Done RETURN YIELD,
+        // and on this map that is the half that decides fights: the driver has
+        // NOTHING to steer for the whole of every wave, because the mobs walk to
+        // the party by design, so every tick it claimed would be a tick the tank
+        // did not swing across ten waves and two bosses.
+        {668, 2},
+        // Halls of Reflection "The throne room": hooks 33 and 34 own two walks the
+        // anchor cannot express — 25yd from the west door INTO areatrigger 5605's
+        // box (the anchor is deliberately outside it, so arriving must not fire
+        // the cutscene), and then the hold on the muster point while the party
+        // tops off before the point of no return.
+        {668, 4},
+        // Halls of Reflection "Escape the Lich King": hook 35 walks the tank stand
+        // point to stand point down 679yd of escape path, on legs of 100-176yd,
+        // against a Lich King who never pauses. It yields for most of every wall
+        // fight — four summon batches totalling 831k-1.17M HP have to be killed by
+        // a party whose leader is running a rung above the stock combat movers.
+        {668, 5},
+        // The Culling of Stratholme "The ten waves of Stratholme": hook 36 walks the
+        // tank up to 264yd, cluster to cluster, on its own long-range spline — the
+        // whole point of the event, because Arthas stops at waypoint 11 for the
+        // entire phase and the wave mobs have no movement script, so nothing comes
+        // to the party and a driver that only held would never fight. The per-tick
+        // hold runs BEFORE Drive, so without the flag last tick's spline is
+        // cancelled before the hook can see it. It is also what makes a Done RETURN
+        // YIELD, and on this map that is the half that decides fights: the driver
+        // has nothing to steer for the whole of every wave fight, and forty trash
+        // mobs plus two bosses have to be killed by a party whose leader is running
+        // a rung above the stock combat movers.
+        {595, 10},
+        // Trial of the Champion "The Champion's Arena": hook 37 RIDES A HORSE.
+        // While the tank is mounted it steers the vehicle base itself (to the
+        // announcer, back to the joust post), because nothing else in the module
+        // can — the per-tick hold would cancel that before the hook saw it. And
+        // Done has to yield: the Argent soldiers, the Argent champion and the
+        // Black Knight are all stock-engine fights.
+        {650, 4},
+        // The Oculus "The Oculus ascent": hook 38 flies a drake — the vehicle base
+        // is the only thing that can move the party between rings, and the per-tick
+        // hold would pin the tank on the pad it has to take off from. (The moves
+        // themselves are each rider's own rung; the hook holds the ladder off the
+        // tank while they happen.) And Done has to yield: every island clear,
+        // Varos and Urom are ground fights for the objectives and the stock engine.
+        {578, 9},
     };
 
     for (DungeonEvent const& ev : DungeonEventRegistry::AllEvents())
@@ -1232,6 +1562,8 @@ TEST(DungeonEventIntegrityTest, EveryAuthoredObjectiveHookIdIsRegistered)
         { 10, "The Underbog — SendGhazanToPlatform" },
         { 12, "Black Morass — BmDriveWave (BlackMorassDriver.cpp)" },
         { 13, "Azjol-Nerub — HadronoxHasWebbedTheDoors" },
+        { 38, "The Oculus — OcDriveAscent (OculusDriver.cpp)" },
+        { 39, "The Oculus — OcEregosHold (OculusDriver.cpp)" },
     };
 
     for (Expected const& e : kHooks)
@@ -1932,6 +2264,75 @@ TEST(DungeonEventIntegrityTest, PullOwningEventsAreVetted)
         // the pit floor. A camp dragged onto the ramp therefore takes the boss
         // into the Slags over a path he cannot walk and evades him.
         {602, 1},
+        // Utgarde Pinnacle "Bring down Grauf". The 161yd leg east to the harpoon
+        // pocket is a TRANSIT across a summon pump with no end condition, so the
+        // pull's Idle branch — which answers unplanned aggro by walking a fresh
+        // camp BACK along the route until it finds ground clear of hostiles — can
+        // never find such ground and runs out to maxDrag. And on this map
+        // "backward" is not merely slow, it LOSES THE ENCOUNTER: spell_area keeps
+        // 47546 on every player in area 1196 (the whole instance), which fires
+        // 47547 every 5s restricted to the Flame Breath Triggers within 40yd, and
+        // every 6s the reset trigger at (397.0, -511.5) counts triggers still
+        // carrying it and evades Skadi on zero. A camp dragged west past that
+        // carpet resets the entire gauntlet.
+        {575, 4},
+        // Pit of Saron "Run the Ymirjar gauntlet". The pull's Idle branch answers
+        // unplanned aggro by stamping a fresh camp BEHIND the tank and dragging it
+        // there until it finds ground clear of hostiles — and on this leg
+        // "backward" costs the run twice over. It drags the party out of the
+        // 80yd volume the driver measures wave 2 in, so "is the wave dead" starts
+        // reading empty with mobs still up and the driver walks to a gate that
+        // refuses for killsLeft != 0; and it drags them back through a gate sphere
+        // whose SmartTrigger has already been spent, which is harmless for the
+        // driver's own level-triggered forge but not for the test harness's
+        // edge-triggered relay. There is also nothing to gain: the gauntlet
+        // corridor has no static trash between Krick and the tunnel at all, so
+        // every hostile on it is a scripted summon the driver already holds ground
+        // for.
+        {658, 1},
+        // Halls of Reflection "Hold the altar", and here the flag is not a
+        // preference but a survival rule. The pull's Idle branch answers unplanned
+        // aggro by walking a fresh camp BACK along the route until it finds ground
+        // clear of hostiles — and on this map "back" is toward the front door,
+        // which is 65yd from CenterPos against a leash of 70.5. ONE drag leg wipes
+        // the wave event and replays four waves with every dead mob respawned.
+        // Dropping the scout-lag with it is the other half of the same win: a wave
+        // activation opens on the FARTHEST player, so a tight clump around the
+        // tank is the whole defence and a tank scouting fifteen yards ahead of its
+        // party is the opposite of one. There is nothing to gain either — the
+        // altar chamber has no trash at all; all 34 mobs in it are the waves.
+        {668, 2},
+        // Halls of Reflection "Escape the Lich King". The same reason one step
+        // harder: a camp dragged backward here is dragged toward a Lich King who
+        // is permanently 10-30yd behind the party, and every yard back is closer
+        // to a 7068-per-second frost ring and a 10 000-damage zap whose knockback
+        // throws the victim further back still. The corridor has no static trash
+        // on it either — every hostile is a summon the encounter spawns at him.
+        {668, 5},
+        // The Culling of Stratholme "The ten waves of Stratholme". The pull's Idle
+        // branch answers unplanned aggro by stamping a fresh camp BEHIND the tank
+        // and dragging it back until it finds ground clear of hostiles — and this
+        // phase is one long unplanned aggro across four clusters up to 264yd apart,
+        // so "backward" is always away from the wave the party has to kill and the
+        // wave counter only moves on deaths. Dropping the scout-lag with it is the
+        // other half: the tank walks INTO a 4-pack by design here, and a tank
+        // fifteen yards ahead of its party is the wrong shape for that. There is
+        // nothing to gain either — every hostile in the city during this phase is a
+        // wave summon (the static Risen Zombies are 250yd away in Fire Street,
+        // which belongs to the LAST objective of the dungeon).
+        {595, 10},
+        // Trial of the Champion "The Champion's Arena". There is no trash on this
+        // map at all — every hostile is an encounter summon — and the one pull the
+        // party makes, the Argent side packs, the driver makes itself. The
+        // advanced pull's answer to them (a fresh camp dragged back to clear
+        // ground) would walk the party away from the packs the counter needs dead,
+        // and a scout-lagged tank is the wrong shape for a five-rider joust.
+        {650, 4},
+        // The Oculus "The Oculus ascent". Every construct island is twenty to eighty
+        // yards across with nothing but air past the rim: the advanced pull's
+        // drag-back camp would be stamped off the edge or on another island, and a
+        // scout-lagged tank is fifteen yards of rim nobody can stand on.
+        {578, 9},
     };
 
     for (DungeonEvent const& ev : DungeonEventRegistry::AllEvents())

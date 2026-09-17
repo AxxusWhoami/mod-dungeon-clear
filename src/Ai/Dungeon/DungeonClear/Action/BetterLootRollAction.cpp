@@ -116,10 +116,7 @@ bool DungeonClearBetterLootRollAction::Execute(Event event)
     // completes a roll destroys it — Group::CountRollVote calls CountTheRoll,
     // which erases the entry and deletes the Roll — so no Roll* may be read
     // after any vote has been cast.
-    // MODIFIED: CMSG_LOOT_ROLL requires the item slot, so we store it alongside the GUID and vote.
-    struct DecidedRoll { ObjectGuid guid; uint32 slot; RollVote vote; };
-    std::vector<DecidedRoll> decided;
-    
+    std::vector<std::pair<ObjectGuid, RollVote>> decided;
     for (Roll* roll : group->GetRolls())
     {
         // One predicate with the trigger — see DcLootRoll::IsVotablePendingRoll.
@@ -131,8 +128,6 @@ bool DungeonClearBetterLootRollAction::Execute(Event event)
             continue;
 
         ItemTemplate const* proto = sObjectMgr->GetItemTemplate(roll->itemid);
-        if (!proto)
-            continue;
         // Anything that is not the over-level case is stock's to answer, and
         // the pass below answers it — leave the vote unemitted for now.
         if (!IsFutureWearable(proto))
@@ -166,20 +161,11 @@ bool DungeonClearBetterLootRollAction::Execute(Event event)
             default:
                 break;
         }
-        decided.push_back({roll->itemGUID, roll->itemSlot, vote});
+        decided.emplace_back(roll->itemGUID, vote);
     }
 
-    // Thread-safe modification: queue CMSG_LOOT_ROLL packets to the session 
-    // instead of calling group->CountRollVote directly to prevent SIGSEGV.
-    for (auto const& roll : decided)
-    {
-        WorldPacket data(CMSG_LOOT_ROLL, 8 + 4 + 1);
-        data << uint64(roll.guid.GetRawValue());
-        data << uint32(roll.slot);
-        data << uint8(roll.vote);
-
-        bot->GetSession()->QueuePacket(&data);
-    }
+    for (auto const& [itemGuid, vote] : decided)
+        group->CountRollVote(bot->GetGUID(), itemGuid, vote);
 
     // Then stock, for every roll this pass left alone. Upstream #2496 turned
     // that from one item per Execute into all of them, and matching it is the

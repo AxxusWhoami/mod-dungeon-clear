@@ -818,6 +818,12 @@ namespace
             RegisterBlackwingLairHooks(t);
             RegisterHallsOfStoneHooks(t);
             RegisterHallsOfLightningHooks(t);
+            RegisterUtgardePinnacleHooks(t);
+            RegisterPitOfSaronHooks(t);
+            RegisterHallsOfReflectionHooks(t);
+            RegisterCullingOfStratholmeHooks(t);
+            RegisterTrialOfTheChampionHooks(t);
+            RegisterOculusHooks(t);
             return t;
         }();
         return kHooks;

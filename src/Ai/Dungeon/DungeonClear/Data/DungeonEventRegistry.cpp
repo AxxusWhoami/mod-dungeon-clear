@@ -64,6 +64,12 @@ EventBuilder& EventBuilder::OwnsThePull()
     return *this;
 }
 
+EventBuilder& EventBuilder::YieldsTheApproach()
+{
+    _ev.yieldsTheApproach = true;
+    return *this;
+}
+
 EventBuilder& EventBuilder::DrivesInCombat()
 {
     _ev.drivesInCombat = true;
@@ -358,6 +364,23 @@ EventBuilder& EventBuilder::UseItemOnGO(uint32 itemId, uint32 spellId, uint32 go
     return *this;
 }
 
+EventBuilder& EventBuilder::UseItemAt(uint32 itemId, uint32 spellId, uint32 receiptGoEntry,
+                                     float x, float y, float z, float radius)
+{
+    EventStep& s = Add(EventStepKind::UseItemAt);
+    s.itemId = itemId;
+    s.spellId = spellId;
+    // The RECEIPT object, not a cast target — see the kind's note. It rides the
+    // shared goEntry field because that is where every GO-shaped step keeps its
+    // entry and the executor's scan helpers already read it.
+    s.goEntry = receiptGoEntry;
+    s.x = x;
+    s.y = y;
+    s.z = z;
+    s.radius = radius;
+    return *this;
+}
+
 EventBuilder& EventBuilder::DropInHole(float overX, float overY, float overZ,
                                        float landX, float landY, float landZ)
 {
@@ -439,6 +462,12 @@ namespace
             RegisterBlackwingLairEvents(t);
             RegisterHallsOfStoneEvents(t);
             RegisterHallsOfLightningEvents(t);
+            RegisterUtgardePinnacleEvents(t);
+            RegisterPitOfSaronEvents(t);
+            RegisterHallsOfReflectionEvents(t);
+            RegisterCullingOfStratholmeEvents(t);
+            RegisterTrialOfTheChampionEvents(t);
+            RegisterOculusEvents(t);
             return t;
         }();
         return kEvents;

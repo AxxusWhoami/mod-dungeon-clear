@@ -176,10 +176,13 @@ TEST(DcTestRunRecordTest, BossRosterSerializesInProgressionOrder)
               std::string::npos);
 }
 
-TEST(DcTestRunRecordTest, SchemaIsEleven)
+TEST(DcTestRunRecordTest, SchemaIsTwelve)
 {
-    // 11: added size (party size the run fielded; 0 in older records).
-    EXPECT_NE(ToJsonl(SampleRecord()).find("\"schema\":11"), std::string::npos);
+    // 12: added combatHolders[].trigger, and with it a change of meaning in the
+    // sibling `legitimate` field — a trigger creature now sinks the verdict. The
+    // bump is what lets a reader tell a pre-fix record (where a Flame Breath
+    // Trigger scored LEGITIMATE and wedged the run) from a post-fix one.
+    EXPECT_NE(ToJsonl(SampleRecord()).find("\"schema\":12"), std::string::npos);
     EXPECT_NE(ToJsonl(SampleRecord()).find("\"size\":"), std::string::npos);
 }
 

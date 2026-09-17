@@ -8,9 +8,11 @@
 #include <vector>
 
 #include "CombatManager.h"
+#include "Creature.h"
 #include "Group.h"
 #include "InstanceScript.h"
 #include "Map.h"
+#include "ObjectAccessor.h"
 #include "Player.h"
 #include "Playerbots.h"
 #include "Timer.h"
@@ -77,6 +79,22 @@ namespace
             return true;
         return RosterBossHoldsAnyMember(leader, leaderAI);
     }
+
+    // (c) a five-man TABLE boss: alive and in combat. Neither signal above can see
+    // one — The Oculus never calls SetBossState (IsEncounterInProgress is always
+    // false) and Eregos is not a roster boss row — so the instance's own guid slot
+    // resolves him.
+    bool TableBossEngaged(Player* at, DcBossStandDown::TableRow const& row)
+    {
+        InstanceScript* const script = DcTargeting::GetInstanceScript(at);
+        if (!script)
+            return false;
+        ObjectGuid const guid = script->GetGuidData(row.guidSlot);
+        if (guid.IsEmpty())
+            return false;
+        Creature* const boss = ObjectAccessor::GetCreature(*at, guid);
+        return boss && boss->IsAlive() && boss->GetEntry() == row.bossEntry && boss->IsInCombat();
+    }
 }
 
 namespace DcBossStandDown
@@ -86,7 +104,10 @@ namespace DcBossStandDown
         if (!bot)
             return false;
         Map* const map = bot->GetMap();
-        if (!map || !map->IsRaid())
+        if (!map)
+            return false;
+        TableRow const* const tableRow = FindTableRow(map->GetId());
+        if (!map->IsRaid() && !tableRow)
             return false;
 
         // The verdict is the RUN's, so it lives on the run's leader. No leader
@@ -100,6 +121,8 @@ namespace DcBossStandDown
             // on the instant script signal alone — still correct for every
             // scripted raid, just without the exit grace.
             {
+                if (tableRow)
+                    return TableBossEngaged(bot, *tableRow);
                 InstanceScript* const script = DcTargeting::GetInstanceScript(bot);
                 return script && script->IsEncounterInProgress();
             }
@@ -113,8 +136,8 @@ namespace DcBossStandDown
             return run.standDownActive;
         run.standDownEvalMs = now;
 
-        Verdict const v = Update(run.standDownActive, run.standDownSignalMs,
-                                 EncounterSignal(leader, leaderAI), now);
+        bool const signal = tableRow ? TableBossEngaged(leader, *tableRow) : EncounterSignal(leader, leaderAI);
+        Verdict const v = Update(run.standDownActive, run.standDownSignalMs, signal, now);
         run.standDownActive   = v.active;
         run.standDownSignalMs = v.lastSignalMs;
         return v.active;

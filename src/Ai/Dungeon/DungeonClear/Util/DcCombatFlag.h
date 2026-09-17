@@ -109,6 +109,14 @@ namespace DcCombatFlag
     // DC_FLAGGED_NO_ENGAGE_GRACE_MS. False while a real fight owns the bot.
     bool MayDrive(Player* bot, AiObjectContext* context);
 
+    // MayDrive for the CONDITIONAL-EVENT rung, which must not be shut down by a
+    // fight when the event it would drive opted in to being steered under fire.
+    // Pass DungeonEvent::drivesInCombat. See DungeonClearMath::EventDueGateOpen
+    // for the hole this closes — a combat-FLAGGED bot with an empty attacker set
+    // runs the NON-combat engine, so the combat-engine copy of the rung (which
+    // carries the same exemption) never gets a tick to apply it.
+    bool MayDriveEvent(Player* bot, AiObjectContext* context, bool drivesInCombat);
+
     // Flagged in combat with no fight behind it (past the same grace). The rest
     // gates' question: while this holds, eating and drinking are impossible and
     // nothing resolves the flag by itself, so any wait keyed on HP/mana is a
