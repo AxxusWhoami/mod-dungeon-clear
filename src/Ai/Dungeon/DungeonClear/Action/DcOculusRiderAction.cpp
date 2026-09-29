@@ -28,6 +28,7 @@
 #include "Ai/Dungeon/DungeonClear/DcValueKeys.h"
 #include "Ai/Dungeon/DungeonClear/Trigger/DungeonClearTriggers.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcCombatFlag.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcCoreCompat.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcFlightLeg.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcFormGate.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcMovement.h"
@@ -556,7 +557,7 @@ bool DungeonClearOculusRiderAction::Execute(Event /*event*/)
             float gap = -1.0f;
             // A clientless bot does not fall: set it down on the snapped floor it
             // was hovering LAND_HOVER above, rather than leave it standing in air.
-            if (!bot->GetVehicle() && onMesh && bot->GetSession()->IsBot())
+            if (!bot->GetVehicle() && onMesh && DcCoreCompat::IsClientless(bot->GetSession()))
             {
                 gap = bot->GetPositionZ() - snap.z;
                 if (gap > 0.5f)

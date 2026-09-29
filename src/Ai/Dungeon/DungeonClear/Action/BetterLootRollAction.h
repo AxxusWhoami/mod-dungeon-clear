@@ -10,7 +10,7 @@
  *
  * Improvement #2: roll on gear the bot will grow into. Stock rolling asks
  * ItemUsageValue, which rejects any weapon/armor whose RequiredLevel is above
- * the bot's current level (BotCanUseItem fails), so the bot greeds or passes
+ * the bot's current level (CanUseItem fails on level alone), so the bot greeds or passes
  * on its own future upgrades. Here, when the level requirement is the ONLY
  * thing blocking the item, the vote is computed as if the bot already were
  * that level: Need when the bot will have the proficiency at that level
@@ -93,7 +93,7 @@ namespace DcLootRoll
     // rejects a loot object that exists and is empty. On an invalidated roll a
     // null Loot* means something else entirely, which is why validity is tested
     // first rather than inferred from the pointer.
-    bool IsVotablePendingRoll(Roll* roll, Player* bot);
+    bool IsVotablePendingRoll(Roll const* roll, Player* bot);
 }
 
 class DungeonClearBetterLootRollAction : public LootRollAction

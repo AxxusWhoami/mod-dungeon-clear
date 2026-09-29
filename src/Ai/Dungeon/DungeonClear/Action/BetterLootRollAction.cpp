@@ -50,7 +50,7 @@ namespace
     }
 }
 
-bool DcLootRoll::IsVotablePendingRoll(Roll* roll, Player* bot)
+bool DcLootRoll::IsVotablePendingRoll(Roll const* roll, Player* bot)
 {
     if (!roll || !bot)
         return false;
@@ -77,7 +77,10 @@ bool DcLootRoll::IsVotablePendingRoll(Roll* roll, Player* bot)
     // corpse looted out from under a still-open roll window — makes
     // CountRollVote bail before it records anything, so a vote here can never
     // land and asking for one every tick is a livelock, not a retry.
-    if (Loot* loot = roll->getLoot())
+    // getLoot() is not const-qualified, but only reads the reference. The cast
+    // lets this take the Roll const* that Group::GetRolls() hands out on the
+    // upstream-shaped core (AC #27579).
+    if (Loot* loot = const_cast<Roll*>(roll)->getLoot())
         if (loot->items.empty())
             return false;
 
@@ -117,7 +120,7 @@ bool DungeonClearBetterLootRollAction::Execute(Event event)
     // which erases the entry and deletes the Roll — so no Roll* may be read
     // after any vote has been cast.
     std::vector<std::pair<ObjectGuid, RollVote>> decided;
-    for (Roll* roll : group->GetRolls())
+    for (Roll const* roll : group->GetRolls())
     {
         // One predicate with the trigger — see DcLootRoll::IsVotablePendingRoll.
         // It also screens the roll CountRollVote would refuse, which this loop
@@ -186,9 +189,38 @@ bool DungeonClearBetterLootRollAction::IsFutureWearable(ItemTemplate const* prot
     if (proto->RequiredLevel <= bot->GetLevel())
         return false;
 
+    // Relics first: the fork core's CanUseItem lets any class use any relic
+    // (only its BotCanUseItem, now gone, added these), and every relic is
+    // class-locked, so without them a paladin greeds an idol "to grow into".
+    // Upstream's CanUseItem already refuses them (AC #27530); harmless there.
+    if (proto->Class == ITEM_CLASS_ARMOR)
+    {
+        switch (proto->SubClass)
+        {
+            case ITEM_SUBCLASS_ARMOR_IDOL:
+                if (!bot->IsClass(CLASS_DRUID, CLASS_CONTEXT_EQUIP_RELIC))
+                    return false;
+                break;
+            case ITEM_SUBCLASS_ARMOR_TOTEM:
+                if (!bot->IsClass(CLASS_SHAMAN, CLASS_CONTEXT_EQUIP_RELIC))
+                    return false;
+                break;
+            case ITEM_SUBCLASS_ARMOR_LIBRAM:
+                if (!bot->IsClass(CLASS_PALADIN, CLASS_CONTEXT_EQUIP_RELIC))
+                    return false;
+                break;
+            case ITEM_SUBCLASS_ARMOR_SIGIL:
+                if (!bot->IsClass(CLASS_DEATH_KNIGHT, CLASS_CONTEXT_EQUIP_RELIC))
+                    return false;
+                break;
+            default:
+                break;
+        }
+    }
+
     // CanUseItem checks faction, class/race, skill and spell BEFORE level, so
     // this exact error means the level requirement is the only blocker.
-    return bot->BotCanUseItem(proto) == EQUIP_ERR_CANT_EQUIP_LEVEL_I;
+    return bot->CanUseItem(proto) == EQUIP_ERR_CANT_EQUIP_LEVEL_I;
 }
 
 RollVote DungeonClearBetterLootRollAction::CalculateFutureVote(ItemTemplate const* proto, int32 randomProperty)

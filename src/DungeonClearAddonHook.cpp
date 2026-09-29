@@ -571,6 +571,7 @@ public:
             action = "dc go";
             param = std::to_string(entry);
         }
+        else if (subCmd == "wing")  action = "dc wing";
         else
         {
             LOG_DEBUG("module", "mod-dungeon-clear: unknown addon subcommand '{}' from {}",

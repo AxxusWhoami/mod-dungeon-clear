@@ -8,6 +8,8 @@
 #include "Player.h"
 #include "PlayerScript.h"
 #include "ScriptMgr.h"
+#include "ServerScript.h"
+#include "WorldSession.h"
 #include "WorldScript.h"
 
 #include "DungeonQueueFill/DcDungeonQueueFillManager.h"
@@ -54,16 +56,40 @@ public:
 
 // Answer the dungeon proposal for the bots this fill owns.
 //
-// OnPlayerbotPacketSent is the one hook that sees a packet addressed to a BOT.
+// The packet-sent hook is the one hook that sees a packet addressed to a BOT.
 // WorldSession::SendPacket calls it before the `if (!m_Socket) return;` that
 // ends the journey for every socket-less playerbot session, so it is the only
-// place a module can watch what the core is telling a bot.
+// place a module can watch what the core is telling a bot. The upstream core
+// spells it ServerScript::OnPacketSent; the playerbots fork core spelled it
+// PlayerbotScript::OnPlayerbotPacketSent (see Util/DcCoreCompat.h). A core
+// with both takes the upstream one, so the proposal is answered once.
 //
 // Why the fill answers at all, rather than trusting the bot to: see
 // DcDungeonQueueFillManager::OnBotProposal. In short, playerbots' `lfg accept`
 // gets exactly one chance per proposal — the AI tick that happens to be handed
 // the packet — and a bot that misses it is silently marked DENY 40 seconds
 // later, taking the whole party's proposal down with it.
+#ifdef DC_CORE_HAS_ON_PACKET_SENT
+class DungeonClearQueueFillProposalScript : public ServerScript
+{
+public:
+    // Only this hook: an empty list would enable every ServerScript hook.
+    DungeonClearQueueFillProposalScript()
+        : ServerScript("DungeonClearQueueFillProposalScript", {
+            SERVERHOOK_ON_PACKET_SENT,
+        }) {}
+
+    // Fires for every packet on every session: the opcode test stays first.
+    void OnPacketSent(WorldSession* session, WorldPacket const& packet) override
+    {
+        if (packet.GetOpcode() != SMSG_LFG_PROPOSAL_UPDATE || !session)
+            return;
+
+        if (Player* player = session->GetPlayer())
+            DcDungeonQueueFillManager::Instance().OnBotProposal(player, packet);
+    }
+};
+#else
 class DungeonClearQueueFillProposalScript : public PlayerbotScript
 {
 public:
@@ -78,6 +104,7 @@ public:
         DcDungeonQueueFillManager::Instance().OnBotProposal(player, *packet);
     }
 };
+#endif
 
 // Worldserver shutdown. A fill in flight owns logged-in bots sitting in the
 // LFG queue; without this they are saved to the DB mid-queue and come back next

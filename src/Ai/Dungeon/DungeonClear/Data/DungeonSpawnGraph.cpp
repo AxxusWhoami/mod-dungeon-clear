@@ -15,7 +15,7 @@
 #include "ObjectMgr.h"
 #include "Ai/Dungeon/DungeonClear/Util/NavmeshSnap.h"
 
-bool DungeonSpawnGraph::_built = false;
+std::once_flag DungeonSpawnGraph::_once;
 
 std::unordered_map<uint32, std::vector<SpawnNode>>& DungeonSpawnGraph::Store()
 {
@@ -25,10 +25,13 @@ std::unordered_map<uint32, std::vector<SpawnNode>>& DungeonSpawnGraph::Store()
 
 void DungeonSpawnGraph::Build()
 {
-    if (_built)
-        return;
-    _built = true;
+    // The flag used to flip BEFORE the store was filled, so a second map
+    // thread returned early and read the store mid-construction (issue #34).
+    std::call_once(_once, &DungeonSpawnGraph::BuildStore);
+}
 
+void DungeonSpawnGraph::BuildStore()
+{
     auto& store = Store();
     store.clear();
 
@@ -112,7 +115,7 @@ std::vector<SpawnNode> DungeonSpawnGraph::FindCorridor(Map const* map, uint32 ma
     (void)fz;  // z used only for snap below; horizontal projection is the filter
     (void)tz;
 
-    Build();  // Lazy-init on first lookup, same pattern as BossSpawnIndex.
+    Build();  // Lazy, thread-safe init on first lookup (see BossSpawnIndex).
 
     auto& store = Store();
     auto it = store.find(mapId);
