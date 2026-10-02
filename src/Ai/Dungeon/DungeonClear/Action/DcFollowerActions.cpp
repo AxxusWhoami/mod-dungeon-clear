@@ -1197,7 +1197,7 @@ bool DungeonClearCampHoldActionBase::Execute(Event /*event*/)
                   "inRoom={})", bot->GetName(), toCamp, passive, moved, inNoGoRoom);
 
     // BACKSTOP — the recall was refused, the bot is standing still, and a stale
-    // EQUAL-priority movement wait is what is holding it down. IsWaitingForLastMove
+    // EQUAL-priority movement block is what is holding it down. The arbiter
     // only yields to a STRICTLY greater priority, so a combat mover that grabbed
     // this follower a moment ago (the camp assist seeding a target and flipping it
     // to the combat engine is the usual culprit) silently starves every recall tick
@@ -1209,7 +1209,7 @@ bool DungeonClearCampHoldActionBase::Execute(Event /*event*/)
     // "move REFUSED and not moving -> IsWaitingForLastMove ... prio=3", and walked
     // into the room. The tank's drag-back and camp recall both carry this backstop
     // already; the follower hold never did.
-    if (!moved && !bot->isMoving() && IsWaitingForLastMove(prio))
+    if (!moved && !bot->isMoving() && DcMoveDeferred(prio))
     {
         DcMovement::StopBot(bot, DcMovement::Stop::HardPin);
         DcMovement::ClearMovementWait(bot);
@@ -2224,8 +2224,9 @@ bool DungeonClearRezPartyAction::Execute(Event /*event*/)
     //
     // COMBAT priority, though the rezzer is out of combat by the trigger's gate.
     // The priority here is not a claim about combat, it is who wins the movement
-    // arbitration: MovementAction::IsWaitingForLastMove refuses any move whose
-    // priority is not STRICTLY GREATER than the last one's, for up to 5 seconds. At
+    // arbitration: the movement arbiter (DcMoveDeferred) refuses any move whose
+    // priority is not STRICTLY GREATER than the last one's while its block stands
+    // (up to 5 seconds before mod-playerbots #2747; only under a hold after it). At
     // NORMAL this rung ties with follow-tank, scout-lag and hold-at-camp — which
     // move constantly — so the approach was refused over and over while the corpse
     // sat there: 259 consecutive "move REFUSED" in run -52 with the rezzer stranded
@@ -2242,7 +2243,7 @@ bool DungeonClearRezPartyAction::Execute(Event /*event*/)
     // scout-lag's inside-the-lag-bubble branch (StopBot(Hold)) tore the approach
     // spline down a few hundred ms in. The rezzer then could not re-issue either,
     // because its OWN cancelled leg had recorded a MOVEMENT_COMBAT wait sized to
-    // the whole leg and IsWaitingForLastMove will not let an equal priority through.
+    // the whole leg and the arbiter would not let an equal priority through.
     //
     // Live: tr-20260807-080834-115, 301 consecutive "approaching Rederen's body"
     // over 99 seconds with the distance pinned at 86.1 -> 85.8yd — 0.3yd of net

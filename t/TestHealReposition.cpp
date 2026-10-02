@@ -201,38 +201,6 @@ TEST(DungeonClearHealRepositionTest, FallbackShortOrDegenerateRoute)
     EXPECT_FALSE(std::isnan(c.x));
 }
 
-// --- the exact-waypoint retry's level gate ----------------------------------
-//
-// This is the CHEAP HALF of the gate: true means "safe, no probe needed". False
-// is not a refusal — DcMoveTo then asks DcEngageGeometry::IsPointLevelReachable
-// whether a route actually arrives at the destination, which is what keeps ramps
-// and stair flights (legitimately off-level, legitimately routable) on the retry.
-// That half needs a navmesh and is covered by the fixture-gated nav probes.
-
-// The cases the retry exists for — a legitimate destination a few yards away on
-// the bot's own floor — take the fast path with no probe at all.
-TEST(DungeonClearHealRepositionTest, RetryAllowedOnOwnLevel)
-{
-    // Xomja, refused 45x on a destination 1.7yd away.
-    EXPECT_TRUE(DungeonClearMath::MayRetryExactWaypoint(100.0f, 100.0f, 5.0f));
-    EXPECT_TRUE(DungeonClearMath::MayRetryExactWaypoint(101.7f, 100.0f, 5.0f));
-    // A ramp or stair step, either direction, right up to the tolerance.
-    EXPECT_TRUE(DungeonClearMath::MayRetryExactWaypoint(104.9f, 100.0f, 5.0f));
-    EXPECT_TRUE(DungeonClearMath::MayRetryExactWaypoint(95.1f, 100.0f, 5.0f));
-}
-
-// A destination on another storey does not take the fast path — in either
-// direction — so it reaches the reachability probe rather than being forced.
-// Up is the BWL ceiling; down is the same trick over a ledge.
-TEST(DungeonClearHealRepositionTest, RetryNeedsAProbeAcrossLevels)
-{
-    // The drake hall over the Broodlord approach: z 449.3 asked from z 424.5.
-    EXPECT_FALSE(DungeonClearMath::MayRetryExactWaypoint(449.3f, 424.5f, 5.0f));
-    EXPECT_FALSE(DungeonClearMath::MayRetryExactWaypoint(424.5f, 449.3f, 5.0f));
-    // And just past the tolerance, so the boundary is pinned.
-    EXPECT_FALSE(DungeonClearMath::MayRetryExactWaypoint(105.1f, 100.0f, 5.0f));
-}
-
 // ---------------------------------------------------------------------------
 // HealLeashRegistry — the per-map camp leash (tr-20260926-192642-1).
 // ---------------------------------------------------------------------------

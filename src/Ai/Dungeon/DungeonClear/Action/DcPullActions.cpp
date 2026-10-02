@@ -988,7 +988,7 @@ bool DungeonClearPullAction::Execute(Event /*event*/)
                                  /*idle*/ false, /*react*/ false, /*normal_only*/ false,
                                  /*exact_waypoint*/ false, MovementPriority::MOVEMENT_NORMAL);
                     if (!(moved || bot->isMoving() ||
-                          IsWaitingForLastMove(MovementPriority::MOVEMENT_NORMAL)))
+                          DcMoveDeferred(MovementPriority::MOVEMENT_NORMAL)))
                         return false;
                     DC_PULL_DEBUG("[DC:{}] pull idle: detouring around a bystander pack "
                                   "on the way to {} ({:.1f}yd) -> ({:.1f},{:.1f})",
@@ -1260,7 +1260,7 @@ bool DungeonClearPullAction::Execute(Event /*event*/)
                                      /*exact_waypoint*/ false,
                                      MovementPriority::MOVEMENT_COMBAT);
                         if (walked || bot->isMoving() ||
-                            IsWaitingForLastMove(MovementPriority::MOVEMENT_COMBAT))
+                            DcMoveDeferred(MovementPriority::MOVEMENT_COMBAT))
                             return true;
                         // Couldn't move and not moving: the stand spot is wedged. Fall
                         // through to the ordinary tag rather than burning the whole
@@ -1674,10 +1674,11 @@ bool DungeonClearPullAction::Execute(Event /*event*/)
                 // backstop if nothing aggros (resisted / non-hostile).
                 //
                 // This is the tick the walk-in ENDS on, and the walk-in was a
-                // MOVEMENT_COMBAT MoveTo whose LastMovement wait is still running.
+                // MOVEMENT_COMBAT MoveTo whose LastMovement block may still stand (a
+                // delay window before mod-playerbots #2747, only a hold after it).
                 // Leaving it up means the next MOVEMENT_COMBAT move — the creep
                 // step, or the drag-back once aggro lands — is refused
-                // (IsWaitingForLastMove yields to a strictly greater priority only)
+                // (the arbiter yields to a strictly greater priority only)
                 // for whatever is left of the approach budget, with the tank stood
                 // in the pack taking hits. Neither stop strength zeroes it, so say so.
                 //
@@ -1889,7 +1890,7 @@ bool DungeonClearPullAction::Execute(Event /*event*/)
             bool const moved = DcMoveTo(trash->GetMapId(), tagX, tagY, tagZ,
                                       /*idle*/ false, /*react*/ false, /*normal_only*/ false,
                                       /*exact_waypoint*/ false, MovementPriority::MOVEMENT_COMBAT);
-            if (moved || bot->isMoving() || IsWaitingForLastMove(MovementPriority::MOVEMENT_COMBAT))
+            if (moved || bot->isMoving() || DcMoveDeferred(MovementPriority::MOVEMENT_COMBAT))
                 return true;
 
             // ARRIVAL IS NOT A WEDGE.
@@ -2473,13 +2474,13 @@ bool DungeonClearPullManeuverAction::Execute(Event /*event*/)
             // Same starvation the drag-back guards against, and the recall needs it
             // just as badly: the wait is cleared once when the leash trips, but a
             // combat mover that grabs the tank a moment later records a NEW
-            // equal-priority wait, and IsWaitingForLastMove only yields to a
+            // equal-priority block, and the arbiter only yields to a
             // strictly greater one. Every later recall tick is then refused
             // silently. Live: a recall at 22:57:19 was starved for thirty-one
             // seconds, logging "move REFUSED and not moving ... prio=3" the whole
             // way. Break the wait whenever we are refused while standing still.
             if (!moved && !bot->isMoving() &&
-                IsWaitingForLastMove(MovementPriority::MOVEMENT_COMBAT))
+                DcMoveDeferred(MovementPriority::MOVEMENT_COMBAT))
             {
                 DcMovement::StopBot(bot, DcMovement::Stop::HardPin);
                 DcMovement::ClearMovementWait(bot);
@@ -2570,10 +2571,12 @@ bool DungeonClearPullManeuverAction::Execute(Event /*event*/)
         //     MotionMaster happily finishes carrying the tank INTO the pack while
         //     the engine flip is happening.
         //
-        //  2. The LastMovement wait. That same MoveTo recorded a wait sized to the
-        //     whole leg's travel time at MOVEMENT_COMBAT priority.
-        //     MovementAction::IsWaitingForLastMove refuses a new move whose
-        //     priority is not STRICTLY GREATER than the recorded one, so the
+        //  2. The LastMovement block. Before mod-playerbots #2747 that same MoveTo
+        //     recorded a delay window sized to the whole leg's travel time at
+        //     MOVEMENT_COMBAT priority; after it only an explicit hold blocks (and
+        //     DC's own SplinePath records one). Either way the arbiter refuses a
+        //     new move whose priority is not STRICTLY GREATER than the recorded
+        //     one, so the
         //     run-home below — also MOVEMENT_COMBAT — is silently refused for the
         //     remainder of that budget. The maneuver still returns true (it owns
         //     the tick), so the tank just stands and eats the pack until the stale
@@ -3104,7 +3107,7 @@ bool DungeonClearPullManeuverAction::Execute(Event /*event*/)
     // the glide is already running), while the run is paused, and while the bot
     // cannot move at all under CC — none of which this should touch.
     if (!moved && !bot->isMoving() &&
-        IsWaitingForLastMove(MovementPriority::MOVEMENT_COMBAT))
+        DcMoveDeferred(MovementPriority::MOVEMENT_COMBAT))
     {
         DcMovement::StopBot(bot, DcMovement::Stop::HardPin);
         DC_PULL_DEBUG("[DC:{}] pull returning: run-home refused while standing at "

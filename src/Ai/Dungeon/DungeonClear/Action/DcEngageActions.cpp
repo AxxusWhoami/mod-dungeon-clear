@@ -392,7 +392,7 @@ bool DungeonClearEngageActionBase::EngageDirect(Unit* target)
                                       /*normal_only*/ false, /*exact_waypoint*/ false,
                                       MovementPriority::MOVEMENT_NORMAL);
             if (moved || bot->isMoving() ||
-                IsWaitingForLastMove(MovementPriority::MOVEMENT_NORMAL))
+                DcMoveDeferred(MovementPriority::MOVEMENT_NORMAL))
                 return true;
             // else: detour unwalkable — fall through to the direct approach.
         }
@@ -461,7 +461,7 @@ bool DungeonClearEngageActionBase::EngageDirect(Unit* target)
         // "couldn't move AND not moving" falls through so Advance's posStuck /
         // stall escalation can still catch a real wedge. Mirrors the direct-
         // pursuit branch in DungeonClearAdvanceAction.
-        if (moved || bot->isMoving() || IsWaitingForLastMove(prio))
+        if (moved || bot->isMoving() || DcMoveDeferred(prio))
             return true;
         return false;
     }
@@ -626,7 +626,7 @@ bool DungeonClearEngageActionBase::MoveToSkirtingRoomAggro(Unit* target,
                               /*normal_only*/ false, /*exact_waypoint*/ false, prio);
     // Own the tick while the move is in flight (a duplicate-move returns false but
     // the bot is still gliding) — mirrors EngageDirect's walk-branch semantics.
-    return moved || bot->isMoving() || IsWaitingForLastMove(prio);
+    return moved || bot->isMoving() || DcMoveDeferred(prio);
 }
 
 bool DungeonClearEngageActionBase::MoveToStandSkirtingRoomAggro(Unit* pack,
@@ -651,7 +651,7 @@ bool DungeonClearEngageActionBase::MoveToStandSkirtingRoomAggro(Unit* pack,
     bool const moved = DcMoveTo(pack->GetMapId(), to.GetPositionX(), to.GetPositionY(),
                                 to.GetPositionZ(), /*idle*/ false, /*react*/ false,
                                 /*normal_only*/ false, /*exact_waypoint*/ false, prio);
-    return moved || bot->isMoving() || IsWaitingForLastMove(prio);
+    return moved || bot->isMoving() || DcMoveDeferred(prio);
 }
 
 // At the boss (close, on its floor) AND no anchored intermediate hops remain

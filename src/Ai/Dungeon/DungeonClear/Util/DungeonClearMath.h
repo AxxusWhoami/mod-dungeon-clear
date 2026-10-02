@@ -113,20 +113,6 @@ namespace DungeonClearMath
         return path.front();
     }
 
-    // May DcMoveTo override a refused move by re-issuing it as an exact waypoint?
-    //
-    // The override exists for one stock bug: SearchForBestPath seeds `min_length`
-    // from its first attempt even when that attempt FAILED, after which no genuine
-    // route can beat the seed and a perfectly good nearby destination is refused
-    // forever. Every case it was written for is a few yards away on the bot's own
-    // floor.
-    //
-    // It must not be spent on a destination the z-search refused because the
-    // destination is on another LEVEL. exact_waypoint routes to DoMovePoint, and a
-    // Player always gets PATHFIND_NORMAL — with no navmesh poly under the point,
-    // PathGenerator hands back a straight line and still calls it normal, so the
-    // bot walks through whatever is between. Same-level is therefore the whole
-    // precondition, and it costs one fabs.
     // A point `distFromAnchor` yards out from `anchor` along the 2D bearing to
     // `toward`, with z carried along the SAME fraction of the way.
     //
@@ -155,20 +141,6 @@ namespace DungeonClearMath
                         anchor.GetPositionZ() +
                             (toward.GetPositionZ() - anchor.GetPositionZ()) * frac,
                         anchor.GetOrientation());
-    }
-
-    // The CHEAP HALF of DcMoveTo's exact-waypoint retry gate: is the destination
-    // on the bot's own level, so the retry is safe with no probe at all?
-    //
-    // A false answer is not a refusal — it only means "this one needs asking
-    // properly", and DcMoveTo follows it with DcEngageGeometry::IsPointLevel-
-    // Reachable. Gating on the band alone would deny the retry to every ramp,
-    // stair flight and walkway a tier up, which is not the defect: the defect is a
-    // destination with no route, and a Player is handed PATHFIND_NORMAL whether or
-    // not one exists.
-    inline bool MayRetryExactWaypoint(float destZ, float botZ, float zTolerance)
-    {
-        return std::fabs(destZ - botZ) <= zTolerance;
     }
 
     // Should follow-tank's centered breadcrumb trail own this follower's tick?

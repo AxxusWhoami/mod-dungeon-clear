@@ -128,7 +128,7 @@ namespace
     // MoveTo. PathGenerator caps ONE call at 74 smoothed points at 4yd spacing
     // (MAX_POINT_PATH_LENGTH / SMOOTH_PATH_STEP_SIZE, ~296yd of straight corridor
     // and far less around bends); over the cap it returns PATHFIND_SHORT, which is
-    // not in SearchForBestPath's accepted set, so modified_z stays INVALID_HEIGHT
+    // not in pre-#2747 SearchForBestPath's accepted set, so modified_z stays INVALID_HEIGHT
     // and MoveTo refuses — every tick, forever, with no diagnostic. That is not a
     // transient refusal the rung can ride out; the leg is simply unrepresentable as
     // one move. Set well under the theoretical cap because a winding corridor
@@ -1149,7 +1149,7 @@ DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::DoPursue(AdvanceState
                                 /*idle*/ false, /*react*/ false, /*normal_only*/ false,
                                 /*exact_waypoint*/ false, MovementPriority::MOVEMENT_NORMAL);
     bool const moveAlive = chasing || bot->isMoving() ||
-                           IsWaitingForLastMove(MovementPriority::MOVEMENT_NORMAL);
+                           DcMoveDeferred(MovementPriority::MOVEMENT_NORMAL);
 
     // stuckCount is NOT cleared here: issuing a chase is not closing on the boss.
     // NoteRecoveryProgress owns every recovery counter (see DcApproachState).
@@ -1449,7 +1449,7 @@ void DungeonClearAdvanceAction::FillHopObs(AdvanceState& st, DungeonClearApproac
         return;  // jump outranks ride / off-line / window
 
     // A healthy in-flight continuous-spline glide (ESCORT generator active AND
-    // moving) just rides — deliberately NOT IsWaitingForLastMove, whose
+    // moving) just rides — deliberately NOT DcMoveDeferred, whose pre-#2747
     // window-sized delay was the mid-path "frozen for seconds" freeze.
     MotionMaster* const mm = bot->GetMotionMaster();
     obs.splineRunning =
