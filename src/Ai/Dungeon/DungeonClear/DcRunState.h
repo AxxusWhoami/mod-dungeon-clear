@@ -11,12 +11,15 @@
 #include <cstdlib>
 #include <string>
 #include <utility>
+#include <unordered_map>
 #include <vector>
 
+#include "G3D/Vector3.h"
 #include "ObjectGuid.h"
 #include "Timer.h"
 
 #include "Ai/Dungeon/DungeonClear/Util/DcChessConductor.h"
+#include "Ai/Dungeon/DungeonClear/Util/DcProgressWatchdog.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRunProgress.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcRunWing.h"
 #include "Ai/Dungeon/DungeonClear/Util/DcThrottle.h"
@@ -226,6 +229,11 @@ struct DcRunState
     DcRunProgress::Mark progress;
     DcRunProgress::Mark purgeProgress;
 
+    // === final-loot hold (leader-owned) ===========================================
+    // getMSTime() the all-cleared trigger first held the run end for pending boss
+    // loot (0 = not holding). Capped by DcLootPolicy::kFinalLootWaitMs.
+    uint32 finalLootHoldSinceMs = 0;
+
     // === Blackwing Lair — Razorgore's orb and egg run (leader-owned) =============
     // The one encounter DC orchestrates from INSIDE a raid fight (see
     // DungeonEvent::encounterActive). All of it is the leader's; the runner GUID is
@@ -306,6 +314,13 @@ struct DcRunState
     // LATCHES (the verdict keeps reporting the hold so the leg keeps walking), so
     // this is what makes the WARN fire once per release instead of once per tick.
     bool   transitHoldTimedOut = false;
+
+    // --- an event's pack leash (DungeonEvent::packLeash) --------------------
+    // The two clocks DcPackLeash::Decide carries across ticks: when the current
+    // hold began, and when its watchdog last released (the walk window). Both
+    // self-clear the moment the party is formed up, so no teardown owns them.
+    uint32 leashHoldSinceMs = 0;
+    uint32 leashReleasedAtMs = 0;
 
     // The Violet Hold keeper / Black Morass rift a bot has COMMITTED to, held
     // across the portal-death boundary so a tank two yards from a corpse is not
@@ -396,6 +411,25 @@ struct DcRunState
     // hands the tick back to MoveChase halfway through a 136yd leg and the bot
     // is walked back onto the add it left.
     bool   horFollowAdvancing = false;
+
+    // --- Blackrock Depths: the Iron Hall's safe-spot hop (map 230) -------------
+    //
+    // The hop in flight (DungeonClearIronHallSafeSpot): where this bot is going
+    // and when it set off (0 = none). While it is set the rung keeps the tick and
+    // the follow-tank clamp holds, so neither MoveChase nor the follow can turn
+    // the bot round halfway and park it back in the fire.
+    float  ironHallHopX = 0.0f;
+    float  ironHallHopY = 0.0f;
+    uint32 ironHallHopMs = 0;
+    // When this bot was first seen standing still in the fire (0 = it is not).
+    uint32 ironHallStillMs = 0;
+
+    // --- Blackrock Depths: the Lyceum close-up (map 230) ----------------------
+    //
+    // When this bot started walking back inside DcLyceumCloseUp::CLOSE_TO of its
+    // tank (0 = it is not closing up). The latch is the hysteresis: begun past
+    // LEASH, the walk runs until CLOSE_TO, not until the bot crosses LEASH again.
+    uint32 lyceumCloseUpMs = 0;
 
     // --- The Culling of Stratholme: the ten waves (map 595) ------------------
     //
@@ -517,6 +551,43 @@ struct DcRunState
     // it is copied into the harness once a second.
     uint32 eventProgressSeq = 0;
     std::vector<DcTestExtra> testExtras;
+
+    // PartyWide chain falls this run (DcPartyWideChain::HandleFall): every time
+    // a bot ended up in an event's fall volume. Published as the `chainFalls`
+    // test extra and in the DcDiag snapshot; zero across a batch is the proof
+    // the stone coordinates are right.
+    uint32 chainFalls = 0;
+
+    // Blackfathom Deeps' Forgotten Pool exit (BlackfathomDeepsEvents.cpp): the
+    // swim leg from where the tank fell in to the ramp, its cursor, progress
+    // watchdog and wedge count. Built on the event's first tick, dropped when it
+    // ends. `poolExits` counts the climbs this run, published as the `poolExits`
+    // test extra.
+    std::vector<G3D::Vector3> poolExitLeg;
+    uint32 poolExitCursor = 0;
+    uint32 poolExitWedges = 0;
+    DcProgressWatchdog poolExitWatch;
+    uint32 poolExits = 0;
+
+    // Stratholme's trap-alley pit rescues this run (StratholmeEvents.cpp,
+    // DcStratTrapAlley.h), published as the `stratPitRescues` test extra.
+    uint32 stratPitRescues = 0;
+
+    // Karazhan's library-pit rescues this run (KarazhanEvents.cpp,
+    // DcKaraLibraryPit.h), published as the `karaPitRescues` test extra.
+    uint32 karaPitRescues = 0;
+
+    void ClearPoolExit()
+    {
+        poolExitLeg.clear();
+        poolExitCursor = 0;
+        poolExitWedges = 0;
+        poolExitWatch.Reset();
+    }
+
+    // Breath watchdog stamps (DcBreathProvision::WatchdogTick): member guid ->
+    // getMSTime() it was first seen under water; erased the tick it surfaces.
+    std::unordered_map<uint64, uint32> underwaterSinceMs;
 
     void BumpEventProgress() { ++eventProgressSeq; }
 

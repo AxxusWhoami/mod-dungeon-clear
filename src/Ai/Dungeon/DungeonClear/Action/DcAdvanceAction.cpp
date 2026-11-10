@@ -1061,10 +1061,25 @@ DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::DoStuckRecover(Advanc
             DcStatusPublisher::SendAddonMessage(botAI, "CHAT\tRepathing around " + next->name + " \xe2\x80\x94 nudging onto the navmesh.");
             return Step::ReturnTrue;
         }
+        // The third dead-end that never reached the swim: "path didn't make
+        // forward progress" is the classification a submerged tunnel produces
+        // when the surface sheet IS meshed but ends at the water (the auto-
+        // detect swim is the fallback for an off anchor on the authored legs,
+        // which is exactly when it earns its keep). Same water-between verdict
+        // as the other two sites.
+        uint32 const nudges = appr.nudgeAttempts;
+        appr.nudgeAttempts = 0;
+        if (TryBeginSwim(bot, context, next->entry, st.bossX, st.bossY, st.bossZ))
+        {
+            LOG_INFO("playerbots.dungeonclear",
+                     "[DC:{}] stuck ladder exhausted near {} with water between -> swimming",
+                     bot->GetName(), next->name);
+            SetPhase(context, "swimming");
+            return Step::ReturnTrue;
+        }
         LOG_INFO("playerbots.dungeonclear",
                  "[DC:{}] stuck ladder exhausted near {} ({} nudge(s) bought no ground) -> stalling",
-                 bot->GetName(), next->name, appr.nudgeAttempts);
-        appr.nudgeAttempts = 0;
+                 bot->GetName(), next->name, nudges);
         StallDungeonClear(botAI,
             "Stuck near " + next->name + " — not making forward progress. "
             "I'll try to clear nearby mobs; use 'dc skip' if it persists.");
@@ -2071,9 +2086,14 @@ DungeonClearAdvanceAction::Step DungeonClearAdvanceAction::DoMoveToFallback(Adva
                               /*exact_waypoint*/ false, MovementPriority::MOVEMENT_NORMAL);
     if (!moved)
     {
+        // Deferred by the movement arbiter: a higher move still holds and will
+        // expire. Wait without counting it (MoveToFallbackCountsStuck).
+        if (!DungeonClearMath::MoveToFallbackCountsStuck(
+                moved, DcMoveDeferred(MovementPriority::MOVEMENT_NORMAL)))
+            return Step::ReturnFalse;
         // MoveTo returned false. Benign in the common case (duplicate
-        // move queued / waiting on last move). Only treat as a real
-        // stall after several consecutive failures.
+        // move queued). Only treat as a real stall after several
+        // consecutive failures.
         if (++stuck >= DC_STUCK_LIMIT)
         {
             // Force a fresh chunked rebuild — the cached path's first
@@ -2162,6 +2182,14 @@ bool DungeonClearAdvanceAction::Execute(Event /*event*/)
     DcPullPlanner::MaintainScoutCamp(botAI, context);
 
     std::optional<DungeonBossInfo> next = AI_VALUE(std::optional<DungeonBossInfo>, DcKey::NextDungeonBoss);
+    // All cleared, run end held for the last boss's loot (DungeonClearAllClearedTrigger):
+    // nothing is stuck, so don't stall — yield the tick so stock looting runs.
+    if (!next.has_value() && DcRun::Of(context).finalLootHoldSinceMs)
+    {
+        ClearStall(context);
+        SetPhase(context, "");
+        return false;
+    }
     if (!next.has_value())
     {
         // Mode stays enabled so `dc skip` is still reachable, but there is
@@ -2227,7 +2255,13 @@ bool DungeonClearAdvanceAction::Execute(Event /*event*/)
     // direct-pursuit give-up latch so a boss that wanders back out can be
     // re-pursued cleanly (the counters themselves live on appr and are consumed
     // by FillHopObs/DoHopDoneEscalation and DoPursue below).
-    if (engageDist < engageRange)
+    //
+    // Gated on atBoss, not raw 3D range: a tank inside the range but OFF the
+    // boss's floor is still approaching, and wiping the pursuit latch every tick
+    // there means a refused pursuit can never abdicate to the long path —
+    // tr-20261018-101829-3 sat at noClose=0/5 for 7 minutes, 30yd under
+    // Emperor Thaurissan's throne, against a 32yd room-aggro hand-off.
+    if (atBoss)
         appr.OnEnteredEngageRange();
 
     // Bundle the per-tick approach state for the extracted phase steps below.

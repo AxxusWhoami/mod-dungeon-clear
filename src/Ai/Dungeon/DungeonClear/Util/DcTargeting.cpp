@@ -238,7 +238,8 @@ namespace
             // re-pick it every tick. The FarTargets set already drops these, but
             // this scan falls back to the stock `possible targets` value when
             // FarTargets is empty, so the check is repeated here.
-            if (DcNeverTargetRegistry::IsNeverTarget(bot->GetMapId(), u->GetEntry()))
+            if (DcNeverTargetRegistry::IsNeverTarget(bot->GetMapId(), u->GetEntry(),
+                                                     u->GetPositionX(), u->GetPositionY()))
                 continue;
             // Nor is an add a live boss summoned for his own encounter (Moroes'
             // dinner guests on the dais): it comes with the boss, and pulling it
@@ -641,7 +642,8 @@ Unit* DcTargeting::FindEnRouteAggroPack(Player* bot, AiObjectContext* ctx,
                                          return true;
                                      if (!AttackersValue::IsPossibleTarget(u, bot))
                                          return true;
-                                     if (DcNeverTargetRegistry::IsNeverTarget(mapId, u->GetEntry()))
+                                     if (DcNeverTargetRegistry::IsNeverTarget(mapId, u->GetEntry(),
+                                                                              u->GetPositionX(), u->GetPositionY()))
                                          return true;
                                      if (IsDungeonBossEntry(ctx, u->GetEntry()) ||
                                          IsBossSummon(u))
@@ -966,7 +968,7 @@ Unit* DcTargeting::FindNearestReachableHostile(Player* bot)
         // A scripted never-dies mob would be picked here forever (see
         // DcNeverTargetRegistry) — this scan builds its own candidate list from
         // the creature store, so the FarTargets filter never sees it.
-        if (DcNeverTargetRegistry::IsNeverTarget(bot->GetMapId(), c->GetEntry()))
+        if (DcNeverTargetRegistry::IsNeverTarget(bot->GetMapId(), c->GetEntry(), c->GetPositionX(), c->GetPositionY()))
             continue;
         candidates.emplace_back(dist, c);
     }
@@ -1134,28 +1136,38 @@ bool DcTargeting::IsCreaturePresentOnMap(Player* bot, uint32 entry)
     return bot->FindNearestCreature(entry, DC_SUMMON_SCAN_RANGE, /*alive*/ true) != nullptr ||
            bot->FindNearestCreature(entry, DC_SUMMON_SCAN_RANGE, /*alive*/ false) != nullptr;
 }
+
+namespace
+{
+    // The first unretired conditional event that summons `bossEntry`, or null.
+    DungeonEvent const* FindPendingSummonEvent(Player* bot, AiObjectContext* ctx, uint32 bossEntry)
+    {
+        if (!bot || !ctx || !bossEntry)
+            return nullptr;
+        Map* map = bot->GetMap();
+        if (!map)
+            return nullptr;
+
+        auto const& cleared =
+            ctx->GetValue<std::unordered_set<uint32>&>(DcKey::ClearedAnchors)->Get();
+        for (DungeonEvent const* ev : DungeonEventRegistry::Conditional(map->GetId(), DcDifficulty::Of(map)))
+        {
+            if (ev->panelGatesBossEntry != bossEntry)
+                continue;
+            // Retired (skipped via `dc skip` inserts the latch key into cleared). A
+            // Repeatable summon event is otherwise never latched, so it stays
+            // "pending" for the whole encounter until the boss it gates is live/dead.
+            if (cleared.count(DungeonEventExecutor::ConditionalLatchKey(ev->id)))
+                continue;
+            return ev;
+        }
+        return nullptr;
+    }
+}
+
 bool DcTargeting::HasPendingSummonEvent(Player* bot, AiObjectContext* ctx, uint32 bossEntry)
 {
-    if (!bot || !ctx || !bossEntry)
-        return false;
-    Map* map = bot->GetMap();
-    if (!map)
-        return false;
-
-    auto const& cleared =
-        ctx->GetValue<std::unordered_set<uint32>&>(DcKey::ClearedAnchors)->Get();
-    for (DungeonEvent const* ev : DungeonEventRegistry::Conditional(map->GetId(), DcDifficulty::Of(map)))
-    {
-        if (ev->panelGatesBossEntry != bossEntry)
-            continue;
-        // Retired (skipped via `dc skip` inserts the latch key into cleared). A
-        // Repeatable summon event is otherwise never latched, so it stays
-        // "pending" for the whole encounter until the boss it gates is live/dead.
-        if (cleared.count(DungeonEventExecutor::ConditionalLatchKey(ev->id)))
-            continue;
-        return true;
-    }
-    return false;
+    return FindPendingSummonEvent(bot, ctx, bossEntry) != nullptr;
 }
 
 bool DcTargeting::IsHoldingForSummonEvent(Player* bot, AiObjectContext* ctx,
@@ -1165,12 +1177,16 @@ bool DcTargeting::IsHoldingForSummonEvent(Player* bot, AiObjectContext* ctx,
     // comfortably contain the wave-fight spread (RFD's gong summons reach ~55yd)
     // AND bridge the anchor-to-spawn gap (the gong is ~83yd from Tuten'kash's
     // summon spot) so the hold stays continuous as the tank closes on him.
+    // An event may shrink it (DungeonEvent::summonHoldRadius) where trash the
+    // party still has to clear stands inside it.
     constexpr float DC_EVENT_BOSS_HOLD_RADIUS = 80.0f;
 
     if (!bot || !ctx || next.kind != DungeonAnchorKind::Boss)
         return false;
-    if (!HasPendingSummonEvent(bot, ctx, next.entry))
+    DungeonEvent const* ev = FindPendingSummonEvent(bot, ctx, next.entry);
+    if (!ev)
         return false;
+    float const holdRadius = ev->summonHoldRadius > 0.0f ? ev->summonHoldRadius : DC_EVENT_BOSS_HOLD_RADIUS;
 
     // Hold (suppress the dynamic pull) while parked at the gong to ring AND,
     // crucially, AFTER the boss is summoned while the tank closes to engage it.
@@ -1180,11 +1196,11 @@ bool DcTargeting::IsHoldingForSummonEvent(Player* bot, AiObjectContext* ctx,
     // covers the whole gong->summon-spot corridor, so the pull never re-arms
     // mid-encounter. Released once the boss dies: its credit bit flips and
     // NextDungeonBossValue advances `next` past it (this returns false then).
-    if (bot->GetDistance(next.x, next.y, next.z) <= DC_EVENT_BOSS_HOLD_RADIUS)
+    if (bot->GetDistance(next.x, next.y, next.z) <= holdRadius)
         return true;
     Creature* live = GetLiveBoss(bot, ctx, next.entry);
     return live && bot->GetDistance(live->GetPositionX(), live->GetPositionY(),
-                                    live->GetPositionZ()) <= DC_EVENT_BOSS_HOLD_RADIUS;
+                                    live->GetPositionZ()) <= holdRadius;
 }
 
 InstanceScript* DcTargeting::GetInstanceScript(Player* bot)
@@ -1369,6 +1385,36 @@ namespace
         return std::find(pull.laneRefused.begin(), pull.laneRefused.end(), guid) !=
                pull.laneRefused.end();
     }
+
+    // The room's ordering rules for the next boss: off-level packs last
+    // (RoomAggroBoss::detourReachable) and the boss-side ring last of all
+    // (bossSideLastRadius, `boss` set only when there is a ring and a live boss).
+    struct RoomPickOrder
+    {
+        bool offLevelLast = false;
+        float bossSideLast = 0.0f;
+        Creature* boss = nullptr;
+
+        bool InRing(Unit const* u) const
+        {
+            return boss && boss->GetExactDist2d(u) < bossSideLast;
+        }
+    };
+
+    RoomPickOrder RoomPickOrderFor(Player* bot, AiObjectContext* ctx)
+    {
+        RoomPickOrder order;
+        if (std::optional<DungeonBossInfo> const next =
+                ctx->GetValue<std::optional<DungeonBossInfo>>(DcKey::NextDungeonBoss)->Get())
+            if (RoomAggroBoss const* const room = RoomAggroRegistry::Find(bot->GetMapId(), next->entry))
+            {
+                order.offLevelLast = room->detourReachable;
+                order.bossSideLast = room->bossSideLastRadius;
+                if (order.bossSideLast > 0.0f)
+                    order.boss = DcTargeting::GetLiveBoss(bot, ctx, next->entry);
+            }
+        return order;
+    }
 }
 
 Unit* DcTargeting::NearestRoomTrash(Player* bot, AiObjectContext* ctx)
@@ -1379,16 +1425,29 @@ Unit* DcTargeting::NearestRoomTrash(Player* bot, AiObjectContext* ctx)
     std::vector<Unit*> const live = LiveRoomTrash(bot, ctx);
     DcPullContext const& pull = PrunedLaneRefusals(ctx, live.size());
 
+    // A room whose off-level packs count however long their route is
+    // (RoomAggroBoss::detourReachable) pulls them last: a balcony straight
+    // overhead is "nearest" on the 2D line and a ramp walk away.
+    // A boss-side ring (RoomAggroBoss::bossSideLastRadius) pulls the packs flanking
+    // the boss after everything else, refused packs included (PickRoomTrashIndex).
+    RoomPickOrder const order = RoomPickOrderFor(bot, ctx);
+
     std::vector<float> dist;
     std::vector<bool> refused;
+    std::vector<bool> ring;
     dist.reserve(live.size());
     refused.reserve(live.size());
+    ring.reserve(live.size());
     for (Unit* u : live)
     {
-        dist.push_back(bot->GetExactDist2d(u));
+        dist.push_back(DungeonClearMath::RoomTrashPickDistance(
+            bot->GetExactDist2d(u), u->GetPositionZ() - bot->GetPositionZ(),
+            DC_Z_LEVEL_TOLERANCE, order.offLevelLast,
+            order.boss ? order.boss->GetExactDist2d(u) : -1.0f, order.bossSideLast));
         refused.push_back(InLaneRefused(pull, u->GetGUID()));
+        ring.push_back(order.InRing(u));
     }
-    int const idx = DungeonClearMath::PickRoomTrashIndex(dist, refused);
+    int const idx = DungeonClearMath::PickRoomTrashIndex(dist, refused, ring);
     return idx >= 0 ? live[static_cast<std::size_t>(idx)] : nullptr;
 }
 
@@ -1420,8 +1479,22 @@ bool DcTargeting::HasUnrefusedRoomTrash(Player* bot, AiObjectContext* ctx, Unit*
 
     std::vector<Unit*> const live = LiveRoomTrash(bot, ctx);
     DcPullContext const& pull = PrunedLaneRefusals(ctx, live.size());
+    // The boss-side ring is no clean alternative while anything outside it lives:
+    // PickRoomTrashIndex takes it only after the rest, refused or not. Counting it
+    // here would refuse an outside pack, hand it straight back as the pick, and
+    // refuse it again — never letting it go as the last resort.
+    RoomPickOrder const order = RoomPickOrderFor(bot, ctx);
+    bool outsideRingLeft = false;
+    if (order.boss)
+        for (Unit* u : live)
+            if (!order.InRing(u))
+            {
+                outsideRingLeft = true;
+                break;
+            }
     for (Unit* u : live)
-        if (u != except && !InLaneRefused(pull, u->GetGUID()))
+        if (u != except && !InLaneRefused(pull, u->GetGUID()) &&
+            !(outsideRingLeft && order.InRing(u)))
             return true;
     return false;
 }
@@ -1477,7 +1550,7 @@ Unit* DcTargeting::NearestHostileNearPoint(Player* bot, AiObjectContext* ctx,
             continue;
         if (!AttackersValue::IsPossibleTarget(u, bot))
             continue;
-        if (DcNeverTargetRegistry::IsNeverTarget(bot->GetMapId(), u->GetEntry()))
+        if (DcNeverTargetRegistry::IsNeverTarget(bot->GetMapId(), u->GetEntry(), u->GetPositionX(), u->GetPositionY()))
             continue;
         // Never treat an encounter boss or a room-aggro boss/partner as clearable
         // area trash — those belong to the dedicated boss/at-boss paths.

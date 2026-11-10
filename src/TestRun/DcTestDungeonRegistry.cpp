@@ -56,7 +56,13 @@ namespace DcTestDungeonRegistry
             { "rfd",             "Razorfen Downs",                129,  2592.55f,  1107.50f,   51.29f, 4.740f, 40, "" },
             { "uldaman",         "Uldaman",                        70,  -226.80f,    49.09f,  -46.03f, 1.390f, 44, "" },
             { "zf",              "Zul'Farrak",                    209,  1213.52f,   841.59f,    8.93f, 6.090f, 46, "" },
+            // Maraudon: the whole dungeon, then its three dungeon-finder wings at
+            // their lfg_dungeon_template entrances (see MaraudonEvents). The row's
+            // token IS the run wing; `maraudon` clears all of it.
             { "maraudon",        "Maraudon",                      349,  1019.69f,  -458.31f,  -43.43f, 0.310f, 48, "" },
+            { "mara-orange",     "Maraudon: Orange Crystals",     349,  1019.69f,  -458.31f,  -43.43f, 0.310f, 46, "Orange" },
+            { "mara-purple",     "Maraudon: Purple Crystals",     349,   752.91f,  -616.53f,  -33.11f, 1.370f, 46, "Purple" },
+            { "mara-pw",         "Maraudon: Pristine Waters",     349,   495.70f,    17.34f,  -96.31f, 3.119f, 48, "Pristine Waters" },
             { "st",              "The Temple of Atal'Hakkar",     109,  -319.24f,    99.90f, -131.85f, 3.190f, 52, "" },
             // Blackrock Depths is two dungeons on one map (see BlackrockDepthsEvents):
             // the Detention Block (Gerstahn -> Bael'Gar) and the Upper City
@@ -64,13 +70,21 @@ namespace DcTestDungeonRegistry
             // portal, as the dungeon finder does. The retired `brd` token aliases
             // to `brd-db`.
             { "brd-db",          "Blackrock Depths: Detention Block", 230, 456.93f,  34.09f,  -68.09f, 4.712f, 54, "Detention Block" },
-            { "brd-uc",          "Blackrock Depths: Upper City",  230,   456.93f,    34.09f,  -68.09f, 4.712f, 58, "Upper City" },
+            // The Upper City's no-progress net is wider than the global 600s: in
+            // the Lyceum a lost torch costs a 300s Flame Keeper respawn (plus the
+            // 330s torch-wait stall it is allowed) between two objective latches.
+            { "brd-uc",          "Blackrock Depths: Upper City",  230,   456.93f,    34.09f,  -68.09f, 4.712f, 58, "Upper City",
+              0, nullptr, {}, {}, 0, 0, /*noProgressS*/ 900 },
             // Blackrock Spire is two dungeons on one map (see BlackrockSpireEvents).
             // LBRS enters at the shared portal; UBRS drops the party inside the
             // shared hall facing the Dragonspine Door (GO 164725), where a UBRS
             // run starts in practice. The retired `brs` token aliases to `lbrs`.
+            // UBRS gets the Upper City's 900s no-progress budget: Emberseer's
+            // ~69s release after the altar and the stadium's five waves are
+            // legitimate quiet stretches between objective latches.
             { "lbrs",            "Lower Blackrock Spire",         229,    78.51f,  -225.04f,   49.84f, 5.100f, 58, "LBRS" },
-            { "ubrs",            "Upper Blackrock Spire",         229,   105.00f,  -320.00f,   65.50f, 0.041f, 60, "UBRS" },
+            { "ubrs",            "Upper Blackrock Spire",         229,   105.00f,  -320.00f,   65.50f, 0.041f, 60, "UBRS",
+              0, nullptr, {}, {}, 0, 0, /*noProgressS*/ 900 },
             { "dm-east",         "Dire Maul: East",               429,    44.45f,  -154.82f,   -2.71f, 0.000f, 58, "East" },
             { "dm-west",         "Dire Maul: West",               429,   -62.97f,   159.87f,   -3.46f, 3.148f, 60, "West" },
             { "dm-north",        "Dire Maul: North",              429,   255.25f,   -16.06f,   -2.59f, 4.700f, 60, "North" },
@@ -118,6 +132,13 @@ namespace DcTestDungeonRegistry
             // speed — see the raid-support plan). Classic rows run at 60.
             { "mc",              "Molten Core",                   409,  1091.89f,  -466.99f, -105.08f, 3.142f, 60, "" },
             { "bwl",             "Blackwing Lair",                469, -7673.03f, -1106.08f,  396.65f, 0.178f, 60, "" },
+            // The other classic raids, from the same table (ZG 3928, AQ20 4008,
+            // AQ40 4010, Onyxia 2848). Onyxia runs at 80: the 3.3.5 core ships her
+            // level-80 revamp, so a realm that de-levels her passes `level=60`.
+            { "zg",              "Zul'Gurub",                     309, -11916.10f, -1230.53f,  92.53f, 4.719f, 60, "" },
+            { "aq20",            "Ruins of Ahn'Qiraj",            509, -8429.74f,  1512.14f,   31.91f, 2.580f, 60, "" },
+            { "aq40",            "Temple of Ahn'Qiraj",           531, -8231.33f,  2010.60f,  129.33f, 0.930f, 60, "" },
+            { "ony",             "Onyxia's Lair",                 249,    29.16f,   -71.34f,   -8.18f, 4.580f, 80, "" },
             // Gruul's Lair (TBC, level 70, 25-man): two kill-credit encounters
             // — High King Maulgar with his four-ogre council (instance
             // MINIONS of his encounter, despawned on his death), then Gruul —

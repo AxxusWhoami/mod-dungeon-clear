@@ -217,6 +217,10 @@ void DcTestRunJob::ReassertMaster()
         // toward the invisible driver parked outside the instance.
         botAI->ChangeStrategy("-follow", BOT_STATE_NON_COMBAT);
         botAI->ChangeStrategy("-follow", BOT_STATE_COMBAT);
+        // That rebuild ran while the master was cleared, so stock playerbots left
+        // out the master-gated "avoid aoe". Put it back with the master.
+        if (DC_PB_CONFIG(AutoAvoidAoe, autoAvoidAoe) && !botAI->HasStrategy("avoid aoe", BOT_STATE_COMBAT))
+            botAI->ChangeStrategy("+avoid aoe", BOT_STATE_COMBAT);
     }
 }
 
@@ -744,6 +748,7 @@ DcTestRunLive::RunSnapshot DcTestRunJob::Snapshot() const
     std::size_t const from = st.size() > 8 ? st.size() - 8 : 0;
     for (std::size_t i = from; i < st.size(); ++i)
         s.recent.push_back({st[i].t, st[i].state, st[i].detail});
+    s.loot = _loot;
     return s;
 }
 
@@ -1176,15 +1181,25 @@ void DcTestRunJob::TickGrouping()
         // this strip covers the pre-enable / paused window. A GM master sticks:
         // FindNewMaster() only re-resolves a null or bot master.
         Player* gm = FindGm();
+        uint32 avoidAoe = 0;
         for (Slot const& slot : _slots)
             if (Player* bot = ObjectAccessor::FindPlayer(slot.guid))
                 if (PlayerbotAI* botAI = GET_PLAYERBOT_AI(bot))
                 {
                     if (gm)
                         botAI->SetMaster(gm);
+                    // Roster members log in masterless, so provisioning built their
+                    // strategies without playerbots' master-gated "avoid aoe".
+                    // Rebuild now that the GM is their master. Pool bots have had
+                    // the GM as master since login and get the same set back.
+                    botAI->ResetStrategies();
                     botAI->ChangeStrategy("-follow", BOT_STATE_NON_COMBAT);
                     botAI->ChangeStrategy("-follow", BOT_STATE_COMBAT);
+                    if (botAI->HasStrategy("avoid aoe", BOT_STATE_COMBAT))
+                        ++avoidAoe;
                 }
+        LOG_INFO("playerbots.dungeonclear", "TESTRUN {} grouped: avoid aoe on {}/{} members", RunId(), avoidAoe,
+                 _slots.size());
 
         EnterStage(Stage::Teleporting);
         return;
@@ -2046,12 +2061,18 @@ void DcTestRunJob::TickMonitoring(uint32 dt)
                 DcTestRunRecord::BossKill kill;
                 kill.t = _totalMs / 1000;
                 kill.via = "mask";
+                // Prefer the boss: an objective sharing the bit (the Iron Clad
+                // Door on Mr. Smite's 3) sorts first by the objective-before-boss
+                // tie-break and would otherwise take the boss's kill. A bit that
+                // only an objective owns (Stratholme's Dathrohan 6, Slaughterhouse
+                // 11) keeps the objective's name.
                 for (BossRef const& ref : _roster)
-                    if (ref.encounterIndex == bit)
+                    if (ref.encounterIndex == bit && (ref.isBoss || kill.name.empty()))
                     {
                         kill.entry = ref.entry;
                         kill.name = ref.name;
-                        break;
+                        if (ref.isBoss)
+                            break;
                     }
                 if (kill.name.empty())
                     kill.name = "encounter #" + std::to_string(bit);
@@ -2361,6 +2382,8 @@ void DcTestRunJob::Finish(DcTestRun::Verdict verdict, std::string const& failRea
     {
         std::lock_guard<std::mutex> lock(_obsMutex);
         _record.disableReason = _disableReason;
+        _record.loot = std::move(_loot);
+        _loot.clear();
     }
     Teardown();
 }
@@ -2620,6 +2643,18 @@ void DcTestRunJob::OnRunDisabled(std::string const& reason)
     _disableFired = true;
     _disableReason = reason;
     _disableAllCleared = reason == DcActionShared::kReasonAllCleared;
+}
+
+void DcTestRunJob::OnLoot(DcTestRunRecord::LootEntry entry)
+{
+    if (_stage.load() != Stage::Monitoring)
+        return;
+    entry.t = _totalMs / 1000;
+    LOG_INFO("playerbots.dungeonclear", "TESTRUN {} loot: {} got {}x {} [{}] ({}) from {}", _record.runId,
+             entry.name, entry.count, entry.item, entry.itemId, entry.roll.empty() ? "looted" : entry.roll,
+             entry.source.empty() ? "?" : entry.source);
+    std::lock_guard<std::mutex> lock(_obsMutex);
+    _loot.push_back(std::move(entry));
 }
 
 void DcTestRunJob::OnStatusPayload(std::string const& payload)

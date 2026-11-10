@@ -21,6 +21,7 @@ class Creature;
 class Map;
 struct DungeonBossInfo;
 struct EventStep;
+struct DungeonEvent;
 struct DungeonEventProgress;
 
 // Thin MovementAction subclass that every movement-issuing DC action derives
@@ -209,6 +210,18 @@ protected:
     // through to Drive and RunStep's gate pulls the followers down + latches.
     bool DriveDropInHole(EventStep const& step);
 
+    // Drive ONE movement step of a PARTY-WIDE event (or any RawPath step) for the
+    // LEADER from its own position: a raw polyline spline, a stone-to-stone
+    // MoveJump, or a short MoveTo, through DcPartyWideChain::DriveStep with the
+    // leader's chain record for the cursor/watchdog. Owns the tick (returns true)
+    // while the step is in flight so the at-objective StopBot(Hold) cannot cancel
+    // the off-mesh spline (the DropInHole argument); returns false once the step
+    // reports Done, so the caller falls through to Drive and RunStep's gate — the
+    // straggler wait on the last movement step — latches it. A fall (the event's
+    // fall volume) rewinds `prog` to step 0 after the handler's teleport; a double
+    // wedge on a chain without a fall volume stalls the run for `dc skip`.
+    bool DriveChainStep(DungeonEvent const& ev, EventStep const& step, DungeonEventProgress& prog);
+
     // Drive a UseItemOnGO step's APPROACH (Old Hillsbrad's barrels, one inside each
     // house). Owns the tick (returns true) while walking the tank to the target GO
     // via the DC movement system, because the normal at-objective StopBot(Hold)
@@ -221,6 +234,12 @@ protected:
     // destination). Returns false once within cast range, so the caller falls
     // through to Drive and RunStep fires the GO.
     bool DriveUseItemOnGO(EventStep const& step);
+
+    // The event's pack leash (DungeonEvent::packLeash): true while the leader
+    // should stand and let the party close up before its next step. Counts the
+    // living members on the map outside the leash and runs DcPackLeash::Decide
+    // against the run state's two clocks; logs the hold and any watchdog release.
+    bool HoldForPackLeash(DungeonEvent const& ev);
 
     // Drive a UseItemAt step's APPROACH (the Culling of Stratholme's five plagued
     // grain crates, 48-81yd apart along 330yd of road). Owns the tick (returns
@@ -997,6 +1016,38 @@ public:
     bool Execute(Event event) override;
 };
 
+// BLACKROCK DEPTHS' IRON HALL ONLY, every member, both engines: walk to a
+// fire-free stop rather than stand in the Ironhand Guardians' fire — in a fight,
+// the nearest one it can still hit its target from. Driven by
+// DungeonClearIronHallSafeSpotTrigger; the decision is DcIronHall::Decide.
+class DungeonClearIronHallSafeSpotAction : public DcMovementAction
+{
+public:
+    DungeonClearIronHallSafeSpotAction(PlayerbotAI* botAI)
+        : DcMovementAction(botAI, "dungeon clear iron hall safe spot")
+    {
+    }
+    bool Execute(Event event) override;
+};
+
+// BLACKROCK DEPTHS' LYCEUM ONLY, every member but the tank, combat engine: walk
+// back inside DcLyceumCloseUp::CLOSE_TO of the tank. Driven by
+// DungeonClearLyceumCloseUpTrigger; the decision is DcLyceumCloseUp::Decide.
+class DungeonClearLyceumCloseUpAction : public DcMovementAction
+{
+public:
+    DungeonClearLyceumCloseUpAction(PlayerbotAI* botAI)
+        : DcMovementAction(botAI, "dungeon clear lyceum close up")
+    {
+    }
+    bool Execute(Event event) override;
+};
+
+// The Iron Hall's follow-tank clamp: true while `bot` should hold the stop the hop
+// put it on (or is still walking to it) rather than follow `tank`. Inert off map
+// 230. Implemented with the rung, in DcIronHallSafeSpotAction.cpp.
+bool DcIronHallHoldsFollow(Player* bot, PlayerbotAI* botAI, Player* tank);
+
 // THE OCULUS ONLY, every member, both engines: the rider rung — an essence from
 // the givers, the mount, this member's drake on its lane, the landing, the
 // dismount, and the stations on Eregos. A PLAIN Action on purpose: stock
@@ -1037,6 +1088,11 @@ public:
     {
     }
     bool Execute(Event event) override;
+
+private:
+    // The flagged groupmate the groupmate fallback last yielded beside — the latch
+    // half of DC_LEADER_ASSIST_COLOCATED_RELEASE's hysteresis.
+    ObjectGuid _colocatedFighter;
 };
 
 #endif

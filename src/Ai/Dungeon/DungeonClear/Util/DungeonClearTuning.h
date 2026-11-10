@@ -64,6 +64,22 @@ constexpr uint32 DC_LONGROUTE_DEFER_LIMIT = 20;
 // that a genuine stand-down returns the tick to Advance almost at once.
 constexpr uint32 DC_ENGAGE_WALK_YIELD_MS = 1000;
 
+// Engage-trash's walk-in gives a target up once it has not got any nearer for
+// this long, and leaves it alone for the second span
+// (DungeonClearMath::EngageWalkGivenUp). Eight seconds is ~50yd of walking at
+// run speed; a tick gap past the third restarts the measurement.
+constexpr uint32 DC_ENGAGE_WALK_GIVEUP_MS = 8 * 1000;
+constexpr uint32 DC_ENGAGE_WALK_GIVEN_UP_MS = 60 * 1000;
+constexpr uint32 DC_ENGAGE_WALK_TICK_GAP_MS = 2 * 1000;
+
+// The boss engage's walk-in refused outright (DungeonClearMath::ShouldTagBossFromStandoff):
+// how long the refusal must persist before the tank tags the boss from where it
+// stands, and how far away a boss in line of sight may be for that. The grace
+// rides out a one-tick refusal while a fresh path is still being built; the range
+// is a pull-spell's reach, so the tag never opens on a boss across the room.
+constexpr uint32 DC_BOSS_STANDOFF_TAG_GRACE_MS = 3000;
+constexpr float DC_BOSS_STANDOFF_TAG_RANGE = 40.0f;
+
 // How much closer the fresh blocking-trash pick must be than a quiet engage-trash
 // sticky before the sticky is dropped for it (DungeonClearMath::ShouldDropTrashSticky).
 // Wide enough that two roughly equidistant corridor mobs keep the sticky and never
@@ -324,6 +340,16 @@ constexpr float DC_ENGAGEMENT_RADIUS = 100.0f;
 // the driving ladder underneath. Deliberately small — a genuine round-the-corner
 // assist is tens of yards, and the failure this bounds was measured at 0.0yd.
 constexpr float DC_LEADER_ASSIST_COLOCATED_RANGE = 5.0f;
+
+// ...and how far that same groupmate has to drift back out before the fallback may
+// walk at them again. Without the gap the threshold is a ping-pong: the flagged
+// member FOLLOWS the tank, so the tank yields at 4.9yd, Advance moves it, the member
+// trails to 5.1yd, the fallback claims the tick at MOVEMENT_COMBAT and walks it back
+// — the two moves cancel and the tank stands still. Karazhan tr-20261022-104155-559
+// and -193320-1035 alternated `closing on party fight (5.6yd)` / `nearest flagged
+// member is 4.2yd away` until the stuck ladder stalled the Netherspite leg. Wide
+// enough to swallow a follower's trailing lag; a real corner is tens of yards.
+constexpr float DC_LEADER_ASSIST_COLOCATED_RELEASE = 15.0f;
 
 // Half-width of the capsule around a NO_STOP route leg within which the pull
 // system stands down (DcNoStopZone). Wide enough to cover a raid's natural
